@@ -12,6 +12,7 @@
 mod bus;
 mod clock_setup;
 mod ina226;
+mod lis3dh;
 #[path = "panel.rs"]
 mod panel;
 mod pd;
@@ -33,7 +34,7 @@ use embassy_hc32::gpio::{self, AlternateMode, AlternatePin, InputPin, Port};
 // PAC exposes the generated `Interrupt` enum through that path.
 use bus::{
     ASYNC_READS, BUS_LATCH, I2C_ERRORS, I2C_FAULT_STEP, I2C_IRQ_COUNT, I2C_LAST_CR1, I2C_LAST_CR4,
-    I2C_LAST_SR, I2C3, SENSOR_CONFIG, bus_failed, read_meter, write_meter, write_sensor,
+    I2C_LAST_SR, I2C3, bus_failed, read_meter, write_meter, write_sensor,
 };
 use embassy_time::{Instant, Timer};
 use hc32f460_pac::interrupt;
@@ -356,8 +357,12 @@ async fn tilt_task(input: InputPin) {
 
         let rotation = ROTATION.load(Ordering::Relaxed) ^ 1;
         ROTATION.store(rotation, Ordering::Relaxed);
-        let cfg = if rotation == 1 { 0xc2 } else { 0xc1 };
-        let _ = write_sensor(0x30, cfg).await;
+        let cfg = if rotation == 1 {
+            lis3dh::POSITION_X_HIGH
+        } else {
+            lis3dh::POSITION_X_LOW
+        };
+        let _ = write_sensor(lis3dh::INT1_CFG, cfg).await;
         TILT_FLIPS.fetch_add(1, Ordering::Relaxed);
 
         // Suppress the rest of the burst, then discard anything it latched.
@@ -747,7 +752,7 @@ async fn main(spawner: Spawner) {
                 break;
             }
         }
-        for (reg, value) in SENSOR_CONFIG {
+        for (reg, value) in lis3dh::INIT {
             if !write_sensor(reg, value).await {
                 break;
             }
