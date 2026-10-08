@@ -3,7 +3,7 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use kws_x1_core::latch::Latch;
+use firmware_core::latch::Latch;
 
 use crate::{ina226, lis3dh};
 
@@ -31,7 +31,7 @@ pub static I2C_LAST_CR1: AtomicU32 = AtomicU32::new(0);
 pub static I2C_FAULT_STEP: AtomicU32 = AtomicU32::new(0);
 /// `CR4` as it stood when the bus last failed (`BUSWAIT` is bit 10).
 pub static I2C_LAST_CR4: AtomicU32 = AtomicU32::new(0);
-/// Latches the bus off after the first failure (`kws_x1_core::latch`).
+/// Latches the bus off after the first failure (`firmware_core::latch`).
 pub static BUS_LATCH: Latch = Latch::new();
 
 /// Whether the shared bus is latched off after a failure.

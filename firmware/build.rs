@@ -6,7 +6,7 @@ fn main() -> std::io::Result<()> {
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("cargo must provide OUT_DIR"));
     fs::copy("memory.x", out.join("memory.x"))?;
     println!("cargo:rustc-link-search={}", out.display());
-    println!("cargo:rustc-link-arg-bin=kws-x1-fw=-Tlink.x");
+    println!("cargo:rustc-link-arg-bin=firmware=-Tlink.x");
     println!("cargo:rerun-if-changed=memory.x");
     println!("cargo:rerun-if-changed=build.rs");
     Ok(())

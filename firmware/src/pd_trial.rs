@@ -138,8 +138,8 @@ fn detail_page() -> Option<u32> {
 
 fn control(
     observation: &mut fusb302_pd::observation::Observation,
-    selection: &kws_x1_core::pd_spr::Selection,
-    store: Option<&dyn kws_x1_core::pd_svids::Store>,
+    selection: &firmware_core::pd_spr::Selection,
+    store: Option<&dyn firmware_core::pd_svids::Store>,
 ) {
     selection.update_buttons(buttons());
     pd::control_cable_selection(observation, selection, detail_page(), store);
@@ -149,7 +149,7 @@ fn stop_requested() -> bool {
     crate::BUTTON_STATE.load(core::sync::atomic::Ordering::Relaxed) & 3 == 3
 }
 
-use kws_x1_core::pd_spr;
+use firmware_core::pd_spr;
 
 struct Clock;
 impl pd_spr_phy::Clock for Clock {
@@ -176,7 +176,7 @@ pub async fn run(observation: &mut pd::Observation, report: pd_cc::Report) {
     let mut error;
     {
         let control = |observation: &mut fusb302_pd::observation::Observation,
-                       store: Option<&dyn kws_x1_core::pd_svids::Store>| {
+                       store: Option<&dyn firmware_core::pd_svids::Store>| {
             control(observation, &selection, store)
         };
         let identity_started = || selection.set_mode_cursor(None);

@@ -15,16 +15,16 @@ pub fn paint_cable(
 /// Selected SVID's ascending-set index; no bitmap is copied into observations.
 pub fn control_cable_selection(
     observation: &mut fusb302_pd::observation::Observation,
-    selection: &kws_x1_core::pd_spr::Selection,
+    selection: &firmware_core::pd_spr::Selection,
     page: Option<u32>,
-    store: Option<&dyn kws_x1_core::pd_svids::Store>,
+    store: Option<&dyn firmware_core::pd_svids::Store>,
 ) {
     let (Some(page), Some(store), Some(spr)) = (page, store, observation.spr) else {
         return;
     };
     if selection.cable_active()
         || selection.has_pending()
-        || spr.cable_modes.status != kws_x1_core::pd_cable_modes::Status::Ack
+        || spr.cable_modes.status != firmware_core::pd_cable_modes::Status::Ack
     {
         return;
     }
@@ -42,7 +42,7 @@ pub fn control_cable_selection(
     } else if selection.request_cable_mode(svid) {
         selection.set_mode_cursor(Some(index));
         if let Some(spr) = observation.spr.as_mut() {
-            spr.cable_modes.mode = kws_x1_core::pd_cable_modes::Modes {
+            spr.cable_modes.mode = firmware_core::pd_cable_modes::Modes {
                 svid,
                 ..Default::default()
             };
@@ -53,7 +53,7 @@ pub fn control_cable_selection(
 pub fn cable_svid_index(observation: Observation, page: u32) -> Option<u16> {
     let spr = observation.spr?;
     let report = spr.cable_report?;
-    let fields = kws_x1_core::pd_cable_details::field_count(&report);
+    let fields = firmware_core::pd_cable_details::field_count(&report);
     if fields == 0 {
         return None;
     }
@@ -68,7 +68,7 @@ pub fn cable_svid_index(observation: Observation, page: u32) -> Option<u16> {
 /// Raw identity, latest SVID reply and selected mode, plus decoded identity fields.
 /// Encoded values use hexadecimal; they are claims, not electrical measurements.
 pub fn cable_lines(observation: Observation, page: u32, svid: Option<u16>) -> [[u8; 24]; 8] {
-    use kws_x1_core::{pd_cable_details, pd_cable_modes::Status};
+    use firmware_core::{pd_cable_details, pd_cable_modes::Status};
     if let Some(sniff) = observation.sniff {
         return sniff_caps_lines(sniff);
     }
@@ -148,7 +148,7 @@ pub fn cable_lines(observation: Observation, page: u32, svid: Option<u16>) -> [[
             if info.status != Status::Ack {
                 put(
                     &mut rows[2],
-                    match kws_x1_core::pd_cable::second_controller(&report) {
+                    match firmware_core::pd_cable::second_controller(&report) {
                         Some(false) => b"NO SOP2 ADVERTISED",
                         None => b"LAYOUT/PRESENCE UNKNOWN",
                         Some(true) if report.revision != fusb302_pd::header::REVISION_3 => {
@@ -264,9 +264,9 @@ pub fn cable_lines(observation: Observation, page: u32, svid: Option<u16>) -> [[
 /// SOP' Soft_Reset result separates a silent cable from an unanswered request.
 pub(super) fn cable_failure(
     status: CableStatus,
-    sync: kws_x1_core::pd_cable_modes::Sync,
+    sync: firmware_core::pd_cable_modes::Sync,
 ) -> (&'static [u8], &'static [u8]) {
-    use kws_x1_core::pd_cable_modes::Sync;
+    use firmware_core::pd_cable_modes::Sync;
     match (status, sync) {
         (CableStatus::Nak, _) => (b"CABLE ID NAK", b""),
         (CableStatus::Busy, _) => (b"CABLE ID BUSY NO RETRY", b""),
@@ -280,8 +280,8 @@ pub(super) fn cable_failure(
     }
 }
 
-fn status_caption(status: kws_x1_core::pd_cable_modes::Status) -> &'static [u8] {
-    use kws_x1_core::pd_cable_modes::Status;
+fn status_caption(status: firmware_core::pd_cable_modes::Status) -> &'static [u8] {
+    use firmware_core::pd_cable_modes::Status;
     match status {
         Status::NotQueried => b"NOT QUERIED",
         Status::Ack => b"ACK",

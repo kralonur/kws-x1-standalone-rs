@@ -175,8 +175,8 @@ async fn sniff(observation: &mut pd::Observation, released: pd::Snapshot) {
             match result {
                 Ok(Some((outcome, status0))) => {
                     // BC_LVL is only meaningful between BMC transmissions.
-                    let rp = kws_x1_core::pd_sniff::rp(status0);
-                    if kws_x1_core::pd_sniff::quiet(status0) && rp != view.rp {
+                    let rp = firmware_core::pd_sniff::rp(status0);
+                    if firmware_core::pd_sniff::quiet(status0) && rp != view.rp {
                         view.rp = rp;
                         changed = true;
                     }

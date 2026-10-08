@@ -1,12 +1,12 @@
 [package]
-name = "kws-x1-fw"
+name = "firmware"
 version = "0.1.0"
 edition = "2024"
 description = "Async meter and USB PD firmware."
 publish = false
 
 [[bin]]
-name = "kws-x1-fw"
+name = "firmware"
 path = "src/main.rs"
 test = false
 bench = false
@@ -31,5 +31,5 @@ embassy-time = { workspace = true, features = ["tick-hz-1_000"] }
 embedded-hal-async.workspace = true
 fusb302-pd.workspace = true
 hc32f460-pac = { workspace = true, features = ["rt"] }
-kws-x1-core.workspace = true
+firmware-core.workspace = true
 panic-halt.workspace = true

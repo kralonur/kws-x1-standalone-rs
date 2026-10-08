@@ -10,7 +10,7 @@ impl fusb302_pd::phy::Platform for X1Platform {
     // Preserve the previous discovery receive/no-progress bounds (milliseconds).
     const CABLE_RESPONSE_TIMEOUT_MS: u64 = 51;
     const CABLE_SVID_NO_PROGRESS_TIMEOUT_MS: u64 = 1_000;
-    type Limits = kws_x1_core::pd_spr::X1Limits;
+    type Limits = firmware_core::pd_spr::X1Limits;
     const BASELINE: [u8; 11] = crate::pd_cc::EXPECTED;
     const MEASURE: u8 = crate::pd_sniff::MEASURE;
     const INSPECTION_CC: u8 = 1;

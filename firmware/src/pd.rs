@@ -5,7 +5,7 @@ mod partner;
 pub use cable::{cable_svid_index, control_cable_selection, paint_cable};
 pub use partner::paint_partner;
 
-use kws_x1_core::pd_cable::CableStatus;
+use firmware_core::pd_cable::CableStatus;
 // Compatibility exports are used by different subsets of board host tests.
 #[allow(unused_imports)]
 pub use fusb302_pd::observation::{Phase, SprObservation};
@@ -107,8 +107,8 @@ pub enum SniffStop {
 pub struct SniffObservation {
     pub cc: Option<u8>,
     pub cc_status: Option<[u8; 2]>,
-    pub rp: Option<kws_x1_core::pd_sniff::Rp>,
-    pub log: kws_x1_core::pd_sniff::Log,
+    pub rp: Option<firmware_core::pd_sniff::Rp>,
+    pub log: firmware_core::pd_sniff::Log,
     pub caps: [u32; 7],
     pub caps_count: u8,
     pub flags: [u8; 3],
@@ -121,7 +121,7 @@ impl SniffObservation {
             cc: None,
             cc_status: None,
             rp: None,
-            log: kws_x1_core::pd_sniff::Log::new(),
+            log: firmware_core::pd_sniff::Log::new(),
             caps: [0; 7],
             caps_count: 0,
             flags: [0; 3],
@@ -130,7 +130,7 @@ impl SniffObservation {
     }
     /// Log one CRC-checked SOP frame. Source_Capabilities replace the stored
     /// PDOs first, so a later Request decodes against the newest offer.
-    pub fn record(&mut self, frame: &kws_x1_core::pd_rx::Frame<'_>) {
+    pub fn record(&mut self, frame: &firmware_core::pd_rx::Frame<'_>) {
         if frame.header() & fusb302_pd::header::EXTENDED == 0
             && let Ok(objects) = frame.source_capabilities()
         {
@@ -140,7 +140,7 @@ impl SniffObservation {
             }
         }
         let caps = &self.caps[..self.caps_count as usize];
-        self.log.push(kws_x1_core::pd_sniff::Entry::classify(
+        self.log.push(firmware_core::pd_sniff::Entry::classify(
             frame.header(),
             frame.data(),
             caps,
@@ -298,7 +298,7 @@ fn passive_lines(observation: Observation) -> [[u8; 24]; 8] {
 
 /// Passthrough page: status row, then the latest messages, oldest first.
 fn sniff_lines(sniff: SniffObservation) -> [[u8; 24]; 8] {
-    use kws_x1_core::pd_sniff::{Row, Rp, describe};
+    use firmware_core::pd_sniff::{Row, Rp, describe};
     let mut rows = [[b' '; 24]; 8];
     let mut head = Row::new();
     head.text(b"SNIFF ");
@@ -378,7 +378,7 @@ fn sniff_lines(sniff: SniffObservation) -> [[u8; 24]; 8] {
 
 /// Passthrough detail page: the latest advertised Source_Capabilities.
 fn sniff_caps_lines(sniff: SniffObservation) -> [[u8; 24]; 8] {
-    use kws_x1_core::pd_sniff::{Row, describe_pdo};
+    use firmware_core::pd_sniff::{Row, describe_pdo};
     let mut rows = [[b' '; 24]; 8];
     let mut head = Row::new();
     head.text(b"SNIFF CAPS N")
@@ -627,15 +627,16 @@ fn spr_lines(observation: Observation, spr: SprObservation) -> [[u8; 24]; 8] {
             match report.status {
                 CableStatus::Identity => {
                     let decoded = (report.count <= 7).then(|| {
-                        kws_x1_core::pd_cable::decode(
+                        firmware_core::pd_cable::decode(
                             &report.objects[..report.count as usize],
                             report.revision,
                         )
                     });
-                    if let Some(Ok(kws_x1_core::pd_cable::Response::Identity(identity))) = decoded {
+                    if let Some(Ok(firmware_core::pd_cable::Response::Identity(identity))) = decoded
+                    {
                         if identity.epr_capable == Some(true) {
                             put(&mut rows[5], b"CABLE:P --V -A EPR S:-");
-                            if identity.kind == kws_x1_core::pd_cable::CableKind::Active {
+                            if identity.kind == firmware_core::pd_cable::CableKind::Active {
                                 rows[5][6] = b'A';
                             }
                             if let Some(mv) = identity.maximum_voltage_mv {
@@ -647,7 +648,7 @@ fn spr_lines(observation: Observation, spr: SprObservation) -> [[u8; 24]; 8] {
                             rows[5][21] = b'0' + identity.speed_code;
                         } else {
                             put(&mut rows[5], b"CABLE:P --V -A SPD:-");
-                            if identity.kind == kws_x1_core::pd_cable::CableKind::Active {
+                            if identity.kind == firmware_core::pd_cable::CableKind::Active {
                                 rows[5][6] = b'A';
                             }
                             if let Some(mv) = identity.maximum_voltage_mv {

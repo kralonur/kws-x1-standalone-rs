@@ -155,7 +155,7 @@ pub unsafe fn render_measure(
 ) {
     unsafe {
         clear_screen(framebuffer);
-        text(framebuffer, 12, 6, b"KOWSI X1 EMBASSY");
+        text(framebuffer, 12, 6, b"USB PD METER");
 
         let v_mv = ina226::bus_millivolts(raw_v);
         let mut line_v = *b"VBUS: 00.000 V";

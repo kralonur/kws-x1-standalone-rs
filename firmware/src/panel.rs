@@ -2,7 +2,7 @@
 //! Panel commands, pin routing and wire order follow the owner-confirmed driver.
 //! Complete command/frame operations hold one mutex; D/C changes fence wire idle.
 use embassy_hc32::gpio::{AlternateMode, AlternatePin, Level, OutputPin, Port};
-use kws_x1_core::panel;
+use firmware_core::panel;
 
 /// Polls of the DMA channel state before the stop is treated as failed. The
 /// channel stops after its current read/write (RM 14.3.11), so this is a

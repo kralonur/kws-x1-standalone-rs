@@ -312,6 +312,34 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
 
 [[package]]
+name = "firmware"
+version = "0.1.0"
+dependencies = [
+ "cortex-m",
+ "cortex-m-rt",
+ "embassy-executor",
+ "embassy-hc32",
+ "embassy-sync",
+ "embassy-time",
+ "embedded-hal-async",
+ "firmware-core",
+ "fusb302-pd",
+ "hc32f460-pac",
+ "panic-halt",
+]
+
+[[package]]
+name = "firmware-core"
+version = "0.1.0"
+dependencies = [
+ "embassy-hc32",
+ "fusb302-pd",
+ "pd-protocol",
+ "usbpd",
+ "usbpd-traits",
+]
+
+[[package]]
 name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -414,34 +442,6 @@ name = "ident_case"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39"
-
-[[package]]
-name = "kws-x1-core"
-version = "0.1.0"
-dependencies = [
- "embassy-hc32",
- "fusb302-pd",
- "pd-protocol",
- "usbpd",
- "usbpd-traits",
-]
-
-[[package]]
-name = "kws-x1-fw"
-version = "0.1.0"
-dependencies = [
- "cortex-m",
- "cortex-m-rt",
- "embassy-executor",
- "embassy-hc32",
- "embassy-sync",
- "embassy-time",
- "embedded-hal-async",
- "fusb302-pd",
- "hc32f460-pac",
- "kws-x1-core",
- "panic-halt",
-]
 
 [[package]]
 name = "lazy_static"

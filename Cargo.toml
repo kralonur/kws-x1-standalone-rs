@@ -13,7 +13,7 @@ embassy-time = "0.5.1"
 embedded-hal-async = "1.0.0"
 fusb302-pd = { path = "fusb302-pd" }
 hc32f460-pac = { git = "https://github.com/kralonur/hc32f460-embassy-rs", rev = "8bad72945c4f91331c2e6fac3716271484292cd9" }
-kws-x1-core = { path = "firmware-core" }
+firmware-core = { path = "firmware-core" }
 panic-halt = "1.0.0"
 pd-protocol = { git = "https://github.com/kralonur/embedded-charging-protocols-rs", rev = "b9adb62c2baf8a357ff486eaa779ada8fcf686e4" }
 usbpd = { git = "https://github.com/kralonur/usbpd", rev = "326123330125a74cfc75bc58a6d81e34fba97f4b" }

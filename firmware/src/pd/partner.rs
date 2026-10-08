@@ -6,7 +6,7 @@ use super::{Observation, decimal3, decimal4, hex, hex8, paint_lines, put};
 /// information requests (`pd_partner`), on three sub-pages (PB2/PB10). These
 /// are the Source's claims, not measurements.
 pub fn partner_lines(observation: Observation, page: u32) -> [[u8; 24]; 8] {
-    use kws_x1_core::pd_partner::Answer;
+    use firmware_core::pd_partner::Answer;
     let mut rows = [[b' '; 24]; 8];
     let sub = page % 3;
     let second = sub == 1;
@@ -158,8 +158,8 @@ pub fn partner_lines(observation: Observation, page: u32) -> [[u8; 24]; 8] {
 }
 
 /// Charger page wording for the outcome of one information request.
-fn answer_caption<T>(answer: &kws_x1_core::pd_partner::Answer<T>) -> &'static [u8] {
-    use kws_x1_core::pd_partner::Answer;
+fn answer_caption<T>(answer: &firmware_core::pd_partner::Answer<T>) -> &'static [u8] {
+    use firmware_core::pd_partner::Answer;
     match answer {
         Answer::Value(_) => b"OK",
         Answer::Pending => b"WAITING",
@@ -174,9 +174,9 @@ fn answer_caption<T>(answer: &kws_x1_core::pd_partner::Answer<T>) -> &'static [u
 /// Third charger sub-page: Source_Info and the latest Status.
 fn status_rows(
     mut rows: [[u8; 24]; 8],
-    partner: kws_x1_core::pd_partner::PartnerInfo,
+    partner: firmware_core::pd_partner::PartnerInfo,
 ) -> [[u8; 24]; 8] {
-    use kws_x1_core::pd_partner::Answer;
+    use firmware_core::pd_partner::Answer;
     put(&mut rows[1], b"SRC INFO:");
     let text = answer_caption(&partner.source_info);
     rows[1][9..9 + text.len()].copy_from_slice(text);

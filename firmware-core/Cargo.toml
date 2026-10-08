@@ -1,5 +1,5 @@
 [package]
-name = "kws-x1-core"
+name = "firmware-core"
 version = "0.1.0"
 edition = "2024"
 description = "Board policy, input handling and display geometry without hardware access."

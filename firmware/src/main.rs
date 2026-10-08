@@ -37,8 +37,8 @@ use bus::{
     I2C_LAST_SR, I2C3, bus_failed, read_meter, write_meter, write_sensor,
 };
 use embassy_time::{Instant, Timer};
+use firmware_core::buttons as button_logic;
 use hc32f460_pac::interrupt;
-use kws_x1_core::buttons as button_logic;
 #[cfg(not(any(feature = "pd-boot-diagnostic", feature = "cable-log")))]
 use panic_halt as _;
 use render::{Counters, clear_screen, glyph, render_irq_test, render_measure, render_ports};
@@ -118,17 +118,17 @@ static BUTTON_STATE: AtomicU32 = AtomicU32::new(0);
 // One bitmap, outside both observations and async futures.
 static CABLE_SVIDS: embassy_sync::blocking_mutex::Mutex<
     embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
-    core::cell::RefCell<kws_x1_core::pd_svids::Svids>,
+    core::cell::RefCell<firmware_core::pd_svids::Svids>,
 > = embassy_sync::blocking_mutex::Mutex::new(core::cell::RefCell::new(
-    kws_x1_core::pd_svids::Svids::EMPTY,
+    firmware_core::pd_svids::Svids::EMPTY,
 ));
 struct CableSvidStore;
 static CABLE_SVID_STORE: CableSvidStore = CableSvidStore;
-impl kws_x1_core::pd_svids::Store for CableSvidStore {
+impl firmware_core::pd_svids::Store for CableSvidStore {
     fn clear(&self) {
         CABLE_SVIDS.lock(|cell| cell.borrow_mut().clear());
     }
-    fn response(&self, objects: &[u32]) -> Option<kws_x1_core::pd_svids::Progress> {
+    fn response(&self, objects: &[u32]) -> Option<firmware_core::pd_svids::Progress> {
         CABLE_SVIDS.lock(|cell| cell.borrow_mut().response(objects))
     }
     fn at(&self, index: u16) -> Option<u16> {
@@ -297,7 +297,7 @@ fn stack_use() -> (u32, u32) {
     }
     let low = core::ptr::addr_of!(_stack_end) as usize;
     let words = (core::ptr::addr_of!(_stack_start) as usize - low) / 4;
-    let peak = kws_x1_core::stack::peak_bytes(words, |i| unsafe {
+    let peak = firmware_core::stack::peak_bytes(words, |i| unsafe {
         (low as *const u32).add(i).read_volatile()
     });
     (peak as u32, (words * 4) as u32)
@@ -450,7 +450,7 @@ unsafe fn render_pd(framebuffer: *mut u16, raw_vbus: u16, cable_detail: Option<u
         // This task is the sole framebuffer owner; other tasks publish values.
         if let Some(page) = cable_detail {
             let svid = pd::cable_svid_index(observation, page)
-                .and_then(|index| kws_x1_core::pd_svids::Store::at(&CABLE_SVID_STORE, index));
+                .and_then(|index| firmware_core::pd_svids::Store::at(&CABLE_SVID_STORE, index));
             pd::paint_cable(
                 &mut *(framebuffer as *mut [u16; 32400]),
                 observation,
@@ -662,7 +662,7 @@ async fn main(spawner: Spawner) {
         for (icer, &mask) in nvic.icer.iter().zip(&IRQ_CLEAR_MASKS) {
             icer.write(mask);
         }
-        scb.vtor.write(kws_x1_core::image::APP_BASE);
+        scb.vtor.write(firmware_core::image::APP_BASE);
         core::arch::asm!("dsb", "isb", options(nostack, preserves_flags));
     }
 
