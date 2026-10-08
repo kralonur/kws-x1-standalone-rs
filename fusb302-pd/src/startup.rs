@@ -1,5 +1,6 @@
 //! Caller-baseline-gated FUSB startup measurements and passive release.
 use crate::config::{ConfigRegister, Error, write_checked};
+use crate::register;
 use crate::snapshot::{self as pd, Snapshot};
 use embedded_hal_async::{delay::DelayNs, i2c::I2c};
 
@@ -115,10 +116,10 @@ impl Diagnostic {
         }
         // Also gate MEASURE (not in the old snapshot): no VBUS selection,
         // reserved-bit writes or guesses about a different retained MDAC setup.
-        let measure = read(bus, 0x04).await?;
+        let measure = read(bus, register::MEASURE).await?;
         if measure != self.measure {
             return Err(Error::Baseline {
-                register: 0x04,
+                register: register::MEASURE,
                 value: measure,
             });
         }
@@ -126,10 +127,10 @@ impl Diagnostic {
         write_checked(bus, ConfigRegister::Power, 0x07).await?; // bandgap + receiver/references + measure
         write_checked(bus, ConfigRegister::Switches0, 0x07).await?; // preserve Rd1/Rd2, measure CC1 only
         delay.delay_ms(10).await; // nominal settling interval; no calibrated voltage result
-        let cc1 = read(bus, 0x40).await?;
+        let cc1 = read(bus, register::STATUS0).await?;
         write_checked(bus, ConfigRegister::Switches0, 0x0b).await?; // preserve Rd1/Rd2, measure CC2 only
         delay.delay_ms(10).await;
-        let cc2 = read(bus, 0x40).await?;
+        let cc2 = read(bus, register::STATUS0).await?;
         // Normal successful sequence restores the known originals. On any
         // preceding error/cancellation: abort, no retries or blind cleanup writes.
         write_checked(bus, ConfigRegister::Switches0, 0x03).await?;

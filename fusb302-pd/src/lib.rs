@@ -9,6 +9,7 @@ pub mod observation;
 pub mod pd_rx;
 pub mod pd_sniff;
 pub mod phy;
+pub mod register;
 pub mod service;
 pub mod snapshot;
 pub mod sniffer;

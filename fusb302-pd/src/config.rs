@@ -1,4 +1,5 @@
 //! Typed, readback-checked FUSB configuration writes; no board baseline defaults.
+use crate::register;
 use crate::snapshot as pd;
 use device_driver::{AsyncRegisterInterface, Fieldset, FieldsetMetadata, RegisterInterfaceBase};
 use embedded_hal_async::i2c::I2c;
@@ -45,39 +46,46 @@ pub enum ConfigRegister {
     Control1,
     Control1Flush,
 }
+impl ConfigRegister {
+    pub fn address(self) -> u8 {
+        match self {
+            Self::Power => register::POWER,
+            Self::Switches0 => register::SWITCHES0,
+            Self::Switches1 => register::SWITCHES1,
+            Self::Control3 => register::CONTROL3,
+            Self::Control1 | Self::Control1Flush => register::CONTROL1,
+        }
+    }
+}
 pub async fn write_checked<B: I2c>(
     bus: &mut B,
     register: ConfigRegister,
     value: u8,
 ) -> Result<(), Error<B::Error>> {
     let mut phy = FusbLowLevel::new(RegisterIo(bus));
-    let (address, result) = match register {
-        ConfigRegister::Power => (
-            0x0b,
+    let address = register.address();
+    let result = match register {
+        ConfigRegister::Power => {
             phy.power()
                 .write_async(|r| r.as_slice_mut()[0] = value)
-                .await,
-        ),
-        ConfigRegister::Switches0 => (
-            0x02,
+                .await
+        }
+        ConfigRegister::Switches0 => {
             phy.switches_0()
                 .write_async(|r| r.as_slice_mut()[0] = value)
-                .await,
-        ),
-        ConfigRegister::Switches1 => (
-            0x03,
+                .await
+        }
+        ConfigRegister::Switches1 => {
             phy.switches_1()
                 .write_async(|r| r.as_slice_mut()[0] = value)
-                .await,
-        ),
-        ConfigRegister::Control3 => (
-            0x09,
+                .await
+        }
+        ConfigRegister::Control3 => {
             phy.control_3()
                 .write_async(|r| r.as_slice_mut()[0] = value)
-                .await,
-        ),
-        ConfigRegister::Control1 | ConfigRegister::Control1Flush => (
-            0x07,
+                .await
+        }
+        ConfigRegister::Control1 | ConfigRegister::Control1Flush => {
             phy.control_1()
                 .write_async(|r| {
                     if matches!(register, ConfigRegister::Control1Flush) {
@@ -86,8 +94,8 @@ pub async fn write_checked<B: I2c>(
                         r.as_slice_mut()[0] = value;
                     }
                 })
-                .await,
-        ),
+                .await
+        }
     };
     result.map_err(|source| Error::Bus {
         register: address,

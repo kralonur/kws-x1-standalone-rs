@@ -1,10 +1,15 @@
 //! Controller configuration observations; reads only, no recovery writes.
+use crate::register::{
+    CONTROL0, CONTROL1, CONTROL2, CONTROL3, DEVICE_ID, MASK, MASKA, MASKB, POWER, STATUS0, STATUS1,
+    SWITCHES0, SWITCHES1,
+};
 use embedded_hal_async::i2c::I2c;
 
-pub const ADDRESS: u8 = 0x22;
+pub const ADDRESS: u8 = fusb302b::FUSB302B_I2C_ADDRESS;
 // Datasheet: ID, switches, control0..3, power, masks, status0/1. Never interrupt/FIFO.
 pub const REGISTERS: [u8; 13] = [
-    0x01, 0x02, 0x03, 0x06, 0x07, 0x08, 0x09, 0x0b, 0x0a, 0x0e, 0x0f, 0x40, 0x41,
+    DEVICE_ID, SWITCHES0, SWITCHES1, CONTROL0, CONTROL1, CONTROL2, CONTROL3, POWER, MASK, MASKA,
+    MASKB, STATUS0, STATUS1,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

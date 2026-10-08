@@ -12,6 +12,7 @@
 //! an explicit caller policy option for the nonstandard stale-SinkTxNG fallback
 //! (see `stale_sink_tx_ng`); no default opt-in is provided.
 //! Errors/cancellation halt without hardware cleanup; only normal completion restores.
+use crate::register;
 use crate::snapshot::{self, Snapshot};
 use crate::{config as pd_cc, observation as pd, service as pd_service};
 use embedded_hal_async::{delay::DelayNs, i2c::I2c};
@@ -439,10 +440,9 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
     async fn checked(
         &mut self,
         register: ConfigRegister,
-        address: u8,
         value: u8,
     ) -> Result<(), Error<B::Error>> {
-        self.register = Some(address);
+        self.register = Some(register.address());
         self.trace().failed_address = snapshot::ADDRESS;
         self.unverified = true;
         pd_cc::write_checked(self.bus, register, value)
@@ -493,7 +493,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             _ => return Err(Error::Orientation),
         };
         self.trace().tx_off_verified = true;
-        let measure = self.byte(4).await?;
+        let measure = self.byte(register::MEASURE).await?;
         if measure != P::MEASURE {
             return Err(Error::Config(pd_cc::Error::Baseline {
                 register: 4,
@@ -508,14 +508,14 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             return Err(Error::InputVoltage { raw });
         }
         self.trace().vbus_pre_mv = Some(mv as u16);
-        self.checked(ConfigRegister::Power, 0x0b, 9).await?;
-        self.checked(ConfigRegister::Control1Flush, 7, 4).await?;
-        let status = self.byte(0x41).await?;
+        self.checked(ConfigRegister::Power, 9).await?;
+        self.checked(ConfigRegister::Control1Flush, 4).await?;
+        let status = self.byte(register::STATUS1).await?;
         if status & 0x3f != 0x28 {
             return Err(Error::Boundary { status });
         }
         let mut flags = [0; 3];
-        for (i, register) in [0x3e, 0x3f, 0x42].into_iter().enumerate() {
+        for (i, register) in register::INTERRUPTS.into_iter().enumerate() {
             flags[i] = self.byte(register).await?;
         }
         self.observation.rx_flags = flags;
@@ -526,7 +526,6 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         }
         self.checked(
             ConfigRegister::Switches0,
-            2,
             if selected == 1 { 7 } else { 0x0b },
         )
         .await?;
@@ -535,13 +534,12 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         self.trace().tx_off_verified = false; // before enabling TX await, even on NACK
         self.checked(
             ConfigRegister::Switches1,
-            3,
             if selected == 1 { 0x25 } else { 0x26 },
         )
         .await?;
         self.steps_t0 = Some(self.clock.now_ms());
         self.step(3);
-        self.checked(ConfigRegister::Power, 0x0b, 0x0f).await?;
+        self.checked(ConfigRegister::Power, 0x0f).await?;
         self.observation.selected_cc = Some(selected);
         self.stopped = false;
         Ok(())
@@ -1061,7 +1059,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                 status: self.receiver.status(),
             });
         }
-        self.checked(ConfigRegister::Control3, 9, retries).await?;
+        self.checked(ConfigRegister::Control3, retries).await?;
         let token_len = 0x80 | (bytes.len() as u8);
         let mut fifo = [0u8; 40];
         fifo[0] = 0x43;
@@ -1080,7 +1078,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             fifo[end..end + 4].copy_from_slice(&[0xff, 0x14, 0xfe, 0xa1]);
             end + 4
         };
-        self.register = Some(0x43);
+        self.register = Some(register::FIFOS);
         let t_send = if ams_start {
             self.gated_send(&fifo[..total_end]).await?
         } else {
@@ -1091,7 +1089,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                 .await
                 .map_err(|source| Error::Bus {
                     address: snapshot::ADDRESS,
-                    register: 0x43,
+                    register: register::FIFOS,
                     source,
                 })?;
             t_send
@@ -1365,11 +1363,11 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             _ => return Ok(()),
         };
         self.rp_probing = true;
-        let with_both = self.byte(0x40).await?;
-        self.checked(ConfigRegister::Switches0, 2, single).await?;
+        let with_both = self.byte(register::STATUS0).await?;
+        self.checked(ConfigRegister::Switches0, single).await?;
         self.delay.delay_ms(2).await;
-        let with_single = self.byte(0x40).await?;
-        self.checked(ConfigRegister::Switches0, 2, both).await?;
+        let with_single = self.byte(register::STATUS0).await?;
+        self.checked(ConfigRegister::Switches0, both).await?;
         self.observation.rp_probe = Some([with_both, with_single]);
         Ok(())
     }
@@ -1394,7 +1392,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         let mut fallback = false;
         loop {
             let sampled = self.clock.now_ms();
-            self.register = Some(0x40);
+            self.register = Some(register::STATUS0);
             let need_rp = rp_required && !fallback;
             let (samples, sent) = self
                 .bus
@@ -1409,13 +1407,13 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                     self.trace().tx_written = true; // the FIFO write may have started
                     Error::Bus {
                         address: snapshot::ADDRESS,
-                        register: 0x43,
+                        register: register::FIFOS,
                         source,
                     }
                 })?;
             let now = self.clock.now_ms();
             if sent {
-                self.register = Some(0x43);
+                self.register = Some(register::FIFOS);
                 self.trace().sink_tx_cause = if fallback { b'Q' } else { 0 };
                 let gate = now.saturating_sub(sampled).min(255) as u8;
                 if gate > self.trace().sink_tx_gate_ms {
@@ -1662,8 +1660,8 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                         .map(|bdo| bist_request(header, bdo, self.contract_object.unwrap_or(0)))
                     {
                         Some(BistRequest::TestData) => {
-                            let control3 = self.byte(0x09).await?;
-                            self.checked(ConfigRegister::Control3, 9, control3 | 0x20)
+                            let control3 = self.byte(register::CONTROL3).await?;
+                            self.checked(ConfigRegister::Control3, control3 | 0x20)
                                 .await?;
                             self.bist_test_data = true;
                             return Ok(length);
@@ -1858,7 +1856,9 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             return Ok(report);
         }
         self.cable_safe5().await?;
-        if self.byte(2).await? != original_switch || self.byte(7).await? != 0 {
+        if self.byte(register::SWITCHES0).await? != original_switch
+            || self.byte(register::CONTROL1).await? != 0
+        {
             return Err(Error::Request);
         }
         let requested_mode = self.selection.and_then(|s| s.cable_mode());
@@ -1880,13 +1880,13 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
 
         // Apply the board-authorized inspection routing; no role negotiation is
         // added by this transport. Any direct-VCONN deviation belongs to its profile.
-        self.checked(ConfigRegister::Switches0, 2, P::INSPECTION_SWITCHES0)
+        self.checked(ConfigRegister::Switches0, P::INSPECTION_SWITCHES0)
             .await?;
         self.trace().vconn_on = true;
         // Wait 50 ms for cable controller to power up and stabilize (tVCONNStable)
         let inspected = match self.vconn_settle().await {
             Ok(()) => {
-                self.checked(ConfigRegister::Control1, 7, 1).await?;
+                self.checked(ConfigRegister::Control1, 1).await?;
                 pd_discovery::inspect(self, next_id, last_id, requested_mode, previous_report).await
             }
             Err(error) => Err(error),
@@ -1910,8 +1910,8 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             Err(error) => return Err(error),
         };
 
-        self.checked(ConfigRegister::Control1, 7, 0).await?;
-        self.checked(ConfigRegister::Switches0, 2, original_switch)
+        self.checked(ConfigRegister::Control1, 0).await?;
+        self.checked(ConfigRegister::Switches0, original_switch)
             .await?;
         self.trace().vconn_on = false;
         self.cable_phase = CablePhase::Idle;
@@ -1958,14 +1958,14 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         self.delay.delay_ms(1).await;
         let raw_rdy = self.vbus_raw().await?;
         self.trace().vbus_rdy_mv = Some((P::voltage_mv(raw_rdy)) as u16);
-        let status = self.byte(0x41).await?;
+        let status = self.byte(register::STATUS1).await?;
         if status & 0x3f != 0x28 {
             return Err(Error::Boundary { status });
         }
         let after = self.restore_baseline().await?;
         let raw_post = self.vbus_raw().await?;
         self.trace().vbus_post_mv = Some((P::voltage_mv(raw_post)) as u16);
-        let measure = self.byte(4).await?;
+        let measure = self.byte(register::MEASURE).await?;
         if measure != P::MEASURE {
             return Err(Error::Config(pd_cc::Error::Verify {
                 register: 4,
@@ -1981,10 +1981,10 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
     /// The power-on register baseline the boot path checks: AUTO_CRC and the
     /// receiver off, MEAS_CC cleared. SWITCHES0 keeps both PDWN bits (Rd).
     async fn restore_baseline(&mut self) -> Result<Snapshot, Error<B::Error>> {
-        self.checked(ConfigRegister::Switches1, 3, 0x20).await?;
-        self.checked(ConfigRegister::Power, 0x0b, 1).await?;
-        self.checked(ConfigRegister::Switches0, 2, 3).await?;
-        self.checked(ConfigRegister::Control3, 9, 6).await?;
+        self.checked(ConfigRegister::Switches1, 0x20).await?;
+        self.checked(ConfigRegister::Power, 1).await?;
+        self.checked(ConfigRegister::Switches0, 3).await?;
+        self.checked(ConfigRegister::Control3, 6).await?;
         self.register = None; // snapshot cancellation has unknown in-flight address
         let after = snapshot::snapshot(self.bus).await.map_err(|f| {
             self.register = Some(f.register);
@@ -2038,24 +2038,24 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             observation.restore_unverified = self.unverified;
             publish(observation);
         }
-        let control3 = self.byte(0x09).await?;
+        let control3 = self.byte(register::CONTROL3).await?;
         // SEND_HARD_RESET clears itself, so this write cannot be read back.
         self.unverified = true;
         self.hard_reset_sent = true; // before the await: it may have gone out
-        self.register = Some(0x09);
+        self.register = Some(register::CONTROL3);
         self.bus
-            .write(snapshot::ADDRESS, &[0x09, control3 | 0x40])
+            .write(snapshot::ADDRESS, &[register::CONTROL3, control3 | 0x40])
             .await
             .map_err(|source| Error::Bus {
                 address: snapshot::ADDRESS,
-                register: 0x09,
+                register: register::CONTROL3,
                 source,
             })?;
         // Section 7.31.10.1: without I_HARDSENT within tHardResetComplete, the
         // Hard Reset counts as sent.
         let began = self.clock.now_ms();
         loop {
-            let flags = self.byte(0x3e).await?; // INTERRUPTA, read-clear
+            let flags = self.byte(register::INTERRUPTA).await?; // read-clear
             self.observation.rx_flags[0] |= flags;
             if flags & 1 != 0 {
                 self.hard_reset_received = true; // the Source's crossed ours
@@ -2093,34 +2093,34 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         {
             return Err(Error::Request);
         }
-        let control1 = self.byte(0x07).await?;
-        self.checked(ConfigRegister::Control1, 7, control1 | 0x10)
+        let control1 = self.byte(register::CONTROL1).await?;
+        self.checked(ConfigRegister::Control1, control1 | 0x10)
             .await?;
-        let control0 = self.byte(0x06).await?;
-        self.register = Some(0x06);
+        let control0 = self.byte(register::CONTROL0).await?;
+        self.register = Some(register::CONTROL0);
         self.bus
-            .write(snapshot::ADDRESS, &[0x06, control0 | 0x01]) // TX_START, self-clearing
+            .write(snapshot::ADDRESS, &[register::CONTROL0, control0 | 0x01]) // TX_START, self-clearing
             .await
             .map_err(|source| Error::Bus {
                 address: snapshot::ADDRESS,
-                register: 0x06,
+                register: register::CONTROL0,
                 source,
             })?;
         self.delay.delay_ms(BIST_CARRIER_MS).await;
-        self.checked(ConfigRegister::Control1, 7, control1 & !0x10)
+        self.checked(ConfigRegister::Control1, control1 & !0x10)
             .await?;
         self.trace().bist_carriers = self.trace().bist_carriers.saturating_add(1);
-        self.register = Some(0x0c);
+        self.register = Some(register::RESET);
         self.bus
-            .write(snapshot::ADDRESS, &[0x0c, 0x02]) // RESET: PD_RESET only
+            .write(snapshot::ADDRESS, &[register::RESET, 0x02]) // RESET: PD_RESET only
             .await
             .map_err(|source| Error::Bus {
                 address: snapshot::ADDRESS,
-                register: 0x0c,
+                register: register::RESET,
                 source,
             })?;
         let mut flags = [0; 3];
-        for (flag, register) in flags.iter_mut().zip([0x3e, 0x3f, 0x42]) {
+        for (flag, register) in flags.iter_mut().zip(register::INTERRUPTS) {
             *flag = self.byte(register).await?;
         }
         if flags[0] & 1 != 0 {
@@ -2148,13 +2148,13 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         self.stopped = true;
         self.finished = true;
         self.unverified = true;
-        self.register = Some(0x0c);
+        self.register = Some(register::RESET);
         self.bus
-            .write(snapshot::ADDRESS, &[0x0c, 0x02]) // RESET: PD_RESET only
+            .write(snapshot::ADDRESS, &[register::RESET, 0x02]) // RESET: PD_RESET only
             .await
             .map_err(|source| Error::Bus {
                 address: snapshot::ADDRESS,
-                register: 0x0c,
+                register: register::RESET,
                 source,
             })?;
         self.restore_baseline().await?;
@@ -2175,7 +2175,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         // Read-clear the latched flags so the next start sees a clean boundary.
         // Only the Hard Reset's own (I_HARDRST, I_HARDSENT) and TOGDONE may be set.
         let mut flags = [0; 3];
-        for (i, register) in [0x3e, 0x3f, 0x42].into_iter().enumerate() {
+        for (i, register) in register::INTERRUPTS.into_iter().enumerate() {
             flags[i] = self.byte(register).await?;
             self.observation.rx_flags[i] |= flags[i];
         }
@@ -2291,7 +2291,7 @@ impl<B: GatedBus, D: Waiter, C: Clock, P: Platform> pd_discovery::Transport
         self.cable_safe5().await
     }
     async fn select_second(&mut self) -> Result<(), Self::Error> {
-        self.checked(ConfigRegister::Control1, 7, 2).await
+        self.checked(ConfigRegister::Control1, 2).await
     }
 }
 impl<B: GatedBus, D: Waiter, C: Clock, P: Platform> Driver for Session<'_, B, D, C, P> {

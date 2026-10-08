@@ -4,12 +4,9 @@
 //! Sniffer mode is RX-only and also rejects retry/toggle/collision/TX-FIFO evidence.
 
 use crate::pd_rx;
+use crate::register::{FIFOS, INTERRUPTS, STATUS1};
+use crate::snapshot::ADDRESS;
 use embedded_hal_async::i2c::I2c;
-
-const ADDRESS: u8 = 0x22;
-const INTERRUPTS: [u8; 3] = [0x3e, 0x3f, 0x42];
-const STATUS1: u8 = 0x41;
-const FIFO: u8 = 0x43;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error<E> {
@@ -189,13 +186,13 @@ impl Receiver {
                 bytes: [0; 35],
                 length: 0,
             };
-            self.read(bus, FIFO, &mut packet.bytes[..3]).await?;
+            self.read(bus, FIFOS, &mut packet.bytes[..3]).await?;
             let prefix: &[u8; 3] = packet.bytes[..3].try_into().unwrap();
             let extended = prefix[2] & 0x80 != 0
                 && (self.cable_extended && matches!(prefix[0] >> 5, 5 | 6)
                     || self.partner_extended && prefix[0] >> 5 == 7);
             let body_start = if extended {
-                self.read(bus, FIFO, &mut packet.bytes[3..5]).await?;
+                self.read(bus, FIFOS, &mut packet.bytes[3..5]).await?;
                 packet.length = pd_rx::fifo_extended_frame_len(
                     packet.bytes[..5].try_into().unwrap(),
                     self.cable_extended,
@@ -207,7 +204,7 @@ impl Receiver {
                 packet.length = pd_rx::fifo_frame_len(prefix).map_err(Error::Frame)?;
                 3
             };
-            self.read(bus, FIFO, &mut packet.bytes[body_start..packet.length])
+            self.read(bus, FIFOS, &mut packet.bytes[body_start..packet.length])
                 .await?;
             if extended {
                 pd_rx::decode_with(packet.bytes(), self.cable_extended, self.partner_extended)

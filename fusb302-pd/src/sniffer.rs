@@ -7,11 +7,10 @@
 //! and the FIFO are never written, so the tester never transmits or acknowledges
 //! (no GoodCRC). Errors/cancellation halt without retry or cleanup writes.
 use crate::pd_sniff;
+use crate::register::{self, STATUS0};
 use crate::{config as pd_cc, service as pd_service, snapshot as pd};
 use embedded_hal_async::{delay::DelayNs, i2c::I2c};
 use pd_cc::ConfigRegister;
-
-const STATUS0: u8 = 0x40;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error<E> {
@@ -126,10 +125,10 @@ impl Sniffer {
                 }));
             }
         }
-        let measure = self.read(bus, 0x04).await?;
+        let measure = self.read(bus, register::MEASURE).await?;
         if measure != self.measure {
             return Err(Error::Config(pd_cc::Error::Baseline {
-                register: 0x04,
+                register: register::MEASURE,
                 value: measure,
             }));
         }
@@ -146,11 +145,11 @@ impl Sniffer {
         // Keep receiver/references OFF while clocking the flush.
         self.write(bus, ConfigRegister::Power, 0x09).await?;
         self.write(bus, ConfigRegister::Control1Flush, 0x04).await?;
-        let status = self.read(bus, 0x41).await?;
+        let status = self.read(bus, register::STATUS1).await?;
         if status & 0x3f != 0x28 {
             return Err(Error::Boundary { status });
         }
-        for (i, register) in [0x3e, 0x3f, 0x42].into_iter().enumerate() {
+        for (i, register) in register::INTERRUPTS.into_iter().enumerate() {
             self.acknowledged[i] |= self.read(bus, register).await?;
         }
         if self.acknowledged[0] & 1 != 0 {
