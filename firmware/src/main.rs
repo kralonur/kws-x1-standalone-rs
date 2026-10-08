@@ -43,6 +43,21 @@ use hc32f460_pac::interrupt;
 use panic_halt as _;
 use render::{Counters, clear_screen, glyph, render_irq_test, render_measure, render_ports};
 
+/// Return addresses the walk accepts: the application image after its initial
+/// stack pointer word, up to the end of the flash tool's application erase
+/// envelope.
+#[cfg(any(feature = "pd-boot-diagnostic", feature = "cable-log"))]
+const RETURN_RANGE: core::ops::Range<u32> = firmware_core::image::APP_BASE + 4..0x44000;
+/// BL encoding T1: first halfword 11110xxx_xxxxxxxx, second 11x1xxxx_xxxxxxxx
+/// (Armv7-M ARM A7.7.18).
+#[cfg(any(feature = "pd-boot-diagnostic", feature = "cable-log"))]
+const BL_FIRST: (u16, u16) = (0xf800, 0xf000);
+#[cfg(any(feature = "pd-boot-diagnostic", feature = "cable-log"))]
+const BL_SECOND: (u16, u16) = (0xd000, 0xd000);
+/// BLX (register) encoding T1: 01000111_1xxxx000 (Armv7-M ARM A7.7.19).
+#[cfg(any(feature = "pd-boot-diagnostic", feature = "cable-log"))]
+const BLX: (u16, u16) = (0xff87, 0x4780);
+
 /// `pd-boot-diagnostic`: return addresses on the stack above `sp`, innermost
 /// first: odd words inside the application image whose preceding instruction
 /// is a BL or BLX. They map to functions with the image's ELF. The panic
@@ -54,13 +69,14 @@ fn return_addresses(mut sp: usize, out: &mut [u32]) {
     }
     let top = core::ptr::addr_of!(_stack_start) as usize;
     let half = |address: u32| unsafe { (address as *const u16).read_volatile() };
+    let is = |address: u32, (mask, value): (u16, u16)| half(address) & mask == value;
     let mut n = 0;
     while sp + 4 <= top && n < out.len() {
         let value = unsafe { (sp as *const u32).read_volatile() };
         let ret = value & !1;
-        if value & 1 == 1 && (0x10004..0x44000).contains(&ret) {
-            let bl = half(ret - 4) & 0xf800 == 0xf000 && half(ret - 2) & 0xd000 == 0xd000;
-            let blx = half(ret - 2) & 0xff87 == 0x4780;
+        if value & 1 == 1 && RETURN_RANGE.contains(&ret) {
+            let bl = is(ret - 4, BL_FIRST) && is(ret - 2, BL_SECOND);
+            let blx = is(ret - 2, BLX);
             if bl || blx {
                 out[n] = ret;
                 n += 1;
@@ -84,6 +100,12 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
     }
 }
 
+/// Exception basic frame: eight words (Armv7-M ARM B1.5.6). An extended frame
+/// with FP state is larger; the walk then also scans that state, where a word
+/// is only reported if it passes the range and BL/BLX checks.
+#[cfg(any(feature = "pd-boot-diagnostic", feature = "cable-log"))]
+const BASIC_FRAME_BYTES: usize = 8 * 4;
+
 /// `pd-boot-diagnostic`: record the faulting PC, LR and the return addresses
 /// above the exception frame, then halt.
 #[cfg(any(feature = "pd-boot-diagnostic", feature = "cable-log"))]
@@ -91,7 +113,10 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 unsafe fn HardFault(frame: &cortex_m_rt::ExceptionFrame) -> ! {
     cortex_m::interrupt::disable();
     let mut chain = [frame.pc(), frame.lr(), 0, 0, 0];
-    return_addresses(core::ptr::from_ref(frame) as usize + 32, &mut chain[2..]);
+    return_addresses(
+        core::ptr::from_ref(frame) as usize + BASIC_FRAME_BYTES,
+        &mut chain[2..],
+    );
     flash_log::fatal(flash_log::FAULT, chain);
     loop {
         cortex_m::asm::nop();
@@ -189,6 +214,8 @@ mod stall {
     static SEEN: AtomicU32 = AtomicU32::new(0);
     static SINCE_MS: AtomicU32 = AtomicU32::new(0);
     static DONE: AtomicBool = AtomicBool::new(false);
+    /// Unchanged `BEAT` this long, in milliseconds, is recorded as a hang.
+    const HANG_MS: u32 = 3000;
 
     pub fn check() {
         if !ARMED.load(Ordering::Relaxed) || DONE.load(Ordering::Relaxed) {
@@ -201,7 +228,7 @@ mod stall {
             SINCE_MS.store(now.max(1), Ordering::Relaxed);
             return;
         }
-        if now.wrapping_sub(SINCE_MS.load(Ordering::Relaxed)) >= 3000 {
+        if now.wrapping_sub(SINCE_MS.load(Ordering::Relaxed)) >= HANG_MS {
             DONE.store(true, Ordering::Relaxed);
             let mut chain = [0; 5];
             crate::return_addresses(cortex_m::register::msp::read() as usize, &mut chain);
