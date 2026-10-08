@@ -1,11 +1,11 @@
 MEMORY
 {
-  /* Application content region the bootloader owns for updates.
-   * [0x10000, 0x4340c) content, then additive checksum and trailer added by
-   * the image packager. Bootloader below 0x10000 and stock settings at
-   * [0x72000, 0x80000) stay untouched.
+  /* Executable application space ends at the preserved graphics bank.
+   * The container extends to 0x43420, but packaging must retain everything
+   * after this region and only update the checksum at 0x4340c.
+   * Bootloader below 0x10000 and settings at [0x72000, 0x80000) are untouched.
    */
-  FLASH : ORIGIN = 0x00010000, LENGTH = 0x3340C
+  FLASH : ORIGIN = 0x00010000, LENGTH = 0x24000
   /* SRAMH (32 KiB) upper half + SRAM1 (64 KiB). The origin leaves the stock
    * clock bookkeeping words at 0x1FFF82A4/0x1FFF8C54 outside this image's
    * .bss, and the length stops 256 bytes short of SRAM1's exclusive end so the
