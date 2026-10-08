@@ -28,8 +28,8 @@ pub const REQUEST_MA: u32 = 100;
 pub const MAX_CURRENT_MA: u32 = 12_000;
 pub const PPS_REFRESH_MS: u64 = 4_000;
 
-pub struct X1Limits;
-impl shared::Limits for X1Limits {
+pub struct BoardLimits;
+impl shared::Limits for BoardLimits {
     // Preserve the no-VID/no-metadata convention (§6.1.5, §7.19.4.1).
     const SINK_IDENTITY: shared::SinkIdentity = shared::SinkIdentity::UNASSIGNED;
     const SESSION_POLICY: shared::SessionPolicy = SESSION_POLICY;
@@ -55,7 +55,7 @@ impl shared::Limits for X1Limits {
         Some([0, 2, 0, 0, 0, 0, 0])
     }
 }
-pub type Trial = shared::Trial<X1Limits>;
+pub type Trial = shared::Trial<BoardLimits>;
 
 pub fn request_pps(
     caps: &source_capabilities::SourceCapabilities,
@@ -63,22 +63,22 @@ pub fn request_pps(
     mv: u16,
     ma: u16,
 ) -> Result<request::PowerSource, Error> {
-    shared::request_pps::<X1Limits>(caps, object, mv, ma)
+    shared::request_pps::<BoardLimits>(caps, object, mv, ma)
 }
 pub fn request_target(
     caps: &source_capabilities::SourceCapabilities,
 ) -> Result<request::PowerSource, Error> {
-    shared::request_target::<X1Limits>(caps)
+    shared::request_target::<BoardLimits>(caps)
 }
 pub fn request_fixed(
     caps: &source_capabilities::SourceCapabilities,
     mv: u32,
 ) -> Result<request::PowerSource, Error> {
-    shared::request_fixed::<X1Limits>(caps, mv)
+    shared::request_fixed::<BoardLimits>(caps, mv)
 }
 
 pub struct Selection {
-    inner: shared::Selection<X1Limits>,
+    inner: shared::Selection<BoardLimits>,
     held_since_ms: Cell<u64>,
     pb10_held_since_ms: Cell<u64>,
     pb10_held: Cell<bool>,
@@ -87,7 +87,7 @@ pub struct Selection {
     mode_cursor: Cell<Option<u16>>,
 }
 impl core::ops::Deref for Selection {
-    type Target = shared::Selection<X1Limits>;
+    type Target = shared::Selection<BoardLimits>;
     fn deref(&self) -> &Self::Target {
         &self.inner
     }

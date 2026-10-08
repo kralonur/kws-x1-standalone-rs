@@ -4,13 +4,13 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use embedded_hal_async::i2c::I2c;
 pub use fusb302_pd::phy::{Clock, Config, Error, GatedBus, Waiter};
 
-pub struct X1Platform;
+pub struct BoardPlatform;
 static RX_IDLE: AtomicBool = AtomicBool::new(false);
-impl fusb302_pd::phy::Platform for X1Platform {
+impl fusb302_pd::phy::Platform for BoardPlatform {
     // Preserve the previous discovery receive/no-progress bounds (milliseconds).
     const CABLE_RESPONSE_TIMEOUT_MS: u64 = 51;
     const CABLE_SVID_NO_PROGRESS_TIMEOUT_MS: u64 = 1_000;
-    type Limits = firmware_core::pd_spr::X1Limits;
+    type Limits = firmware_core::pd_spr::BoardLimits;
     const BASELINE: [u8; 11] = crate::pd_cc::EXPECTED;
     const MEASURE: u8 = crate::pd_sniff::MEASURE;
     const INSPECTION_CC: u8 = 1;
@@ -39,7 +39,7 @@ impl fusb302_pd::phy::Platform for X1Platform {
         Ok(u16::from_be_bytes(raw))
     }
 }
-pub type Session<'a, B, D, C> = fusb302_pd::phy::Session<'a, B, D, C, X1Platform>;
+pub type Session<'a, B, D, C> = fusb302_pd::phy::Session<'a, B, D, C, BoardPlatform>;
 
 pub async fn wait_for_rx_idle(delay: &mut impl Waiter) {
     while !RX_IDLE.load(Ordering::Relaxed) {
