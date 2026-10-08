@@ -250,12 +250,21 @@ pub struct Config<'a, L: Limits> {
     pub svids: Option<&'a dyn pd_protocol::pd_svids::Store>,
 }
 
+/// Whether the session may perform I/O. `Halted` is the latch held across
+/// every bus operation, so an error or a cancelled future leaves the session
+/// stopped; `Finished` is terminal and also closes `transition_to_default`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Lifecycle {
+    Running,
+    Halted,
+    Finished,
+}
+
 pub struct Session<'a, B: I2c, D, C, P: Platform> {
     bus: &'a mut B,
     delay: &'a mut D,
     clock: &'a C,
-    stopped: bool,
-    finished: bool,
+    lifecycle: Lifecycle,
     unverified: bool,
     register: Option<u8>,
     receiver: pd_service::Receiver,
@@ -349,8 +358,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             bus,
             delay,
             clock,
-            stopped: true,
-            finished: false,
+            lifecycle: Lifecycle::Halted,
             unverified: false,
             register: None,
             receiver: pd_service::Receiver::for_spr_boundary(),
@@ -400,7 +408,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         }
     }
     pub fn stopped(&self) -> bool {
-        self.stopped
+        self.lifecycle != Lifecycle::Running
     }
     pub fn unverified(&self) -> bool {
         self.unverified
@@ -414,8 +422,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
     }
     pub fn stop(&mut self) {
         P::set_rx_idle(false);
-        self.stopped = true;
-        self.finished = true;
+        self.lifecycle = Lifecycle::Finished;
     }
     pub fn take_error(&mut self) -> Option<Error<B::Error>> {
         self.error.take()
@@ -557,7 +564,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         self.step(3);
         self.checked(ConfigRegister::Power, 0x0f).await?;
         self.observation.selected_cc = Some(selected);
-        self.stopped = false;
+        self.lifecycle = Lifecycle::Running;
         Ok(())
     }
     async fn poll(&mut self) -> Result<Option<pd_service::Packet>, Error<B::Error>> {
@@ -1811,7 +1818,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             if let Some(selection) = self.config.selection {
                 // Only this idle point is safe for the upstream Ready select to
                 // cancel receive: no transaction/FIFO read/TX is in flight.
-                self.stopped = false;
+                self.lifecycle = Lifecycle::Running;
                 selection.set_rx_idle(true);
                 P::set_rx_idle(true);
                 if selection.has_pending()
@@ -1825,7 +1832,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                 self.delay.wait_event().await;
                 selection.set_rx_idle(false);
                 P::set_rx_idle(false);
-                self.stopped = true;
+                self.lifecycle = Lifecycle::Halted;
             } else {
                 self.delay.wait_event().await;
             }
@@ -1984,12 +1991,11 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         &mut self,
         contract: &pd_protocol::pd_spr::Contract,
     ) -> Result<Snapshot, Error<B::Error>> {
-        if self.stopped || self.finished {
+        if self.stopped() {
             return Err(Error::Stopped);
         }
         P::set_rx_idle(false);
-        self.stopped = true;
-        self.finished = true;
+        self.lifecycle = Lifecycle::Finished;
         let established = self.config.persistent
             && self.trace().contract_seen
             && self
@@ -2198,12 +2204,13 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         Ok(())
     }
     pub async fn transition_to_default(&mut self) -> Result<(), Error<B::Error>> {
-        if self.finished || !(self.hard_reset_sent || self.hard_reset_received) {
+        if self.lifecycle == Lifecycle::Finished
+            || !(self.hard_reset_sent || self.hard_reset_received)
+        {
             return Err(Error::Stopped);
         }
         P::set_rx_idle(false);
-        self.stopped = true;
-        self.finished = true;
+        self.lifecycle = Lifecycle::Finished;
         self.unverified = true;
         self.register = Some(register::RESET);
         self.bus
@@ -2362,13 +2369,13 @@ impl<B: GatedBus, D: Waiter, C: Clock, P: Platform> Driver for Session<'_, B, D,
         // A fresh Trial cannot reuse this PHY owner's counters/configuration.
         // Return to the guarded receiver, which reports Discarded without I/O.
         if self.protocol_started {
-            self.stopped = true;
+            self.lifecycle = Lifecycle::Halted;
             self.error = Some(Error::Stopped);
             return;
         }
         self.protocol_started = true;
         // External voltage/CC/baseline gates already ran before enabling RX/TX.
-        if self.stopped {
+        if self.stopped() {
             self.error = Some(Error::Stopped);
             core::future::pending::<()>().await;
         }
@@ -2378,13 +2385,13 @@ impl<B: GatedBus, D: Waiter, C: Clock, P: Platform> Driver for Session<'_, B, D,
         next_tx_id: u8,
         last_rx_id: Option<u8>,
     ) -> Result<usbpd_traits::CableReport, DriverRxError> {
-        if self.stopped {
+        if self.stopped() {
             return Err(DriverRxError::Discarded);
         }
-        self.stopped = true;
+        self.lifecycle = Lifecycle::Halted;
         match self.cable_operation(next_tx_id, last_rx_id).await {
             Ok(report) => {
-                self.stopped = false;
+                self.lifecycle = Lifecycle::Running;
                 Ok(report)
             }
             Err(error) => {
@@ -2394,13 +2401,13 @@ impl<B: GatedBus, D: Waiter, C: Clock, P: Platform> Driver for Session<'_, B, D,
         }
     }
     async fn transmit_bist_carrier(&mut self) -> Result<(), DriverTxError> {
-        if self.stopped {
+        if self.stopped() {
             return Err(DriverTxError::Discarded);
         }
-        self.stopped = true;
+        self.lifecycle = Lifecycle::Halted;
         match self.send_bist_carrier().await {
             Ok(()) => {
-                self.stopped = false;
+                self.lifecycle = Lifecycle::Running;
                 Ok(())
             }
             Err(Error::Rx(pd_service::Error::HardReset)) => {
@@ -2414,11 +2421,11 @@ impl<B: GatedBus, D: Waiter, C: Clock, P: Platform> Driver for Session<'_, B, D,
         }
     }
     async fn transmit_hard_reset(&mut self) -> Result<(), DriverTxError> {
-        if self.stopped {
+        if self.stopped() {
             return Err(DriverTxError::Discarded);
         }
         // The session ends here either way; `transition_to_default` follows.
-        self.stopped = true;
+        self.lifecycle = Lifecycle::Halted;
         match self.send_hard_reset().await {
             Ok(()) => Ok(()),
             Err(error) => {
@@ -2428,21 +2435,21 @@ impl<B: GatedBus, D: Waiter, C: Clock, P: Platform> Driver for Session<'_, B, D,
         }
     }
     async fn transmit(&mut self, bytes: &[u8]) -> Result<(), DriverTxError> {
-        if self.stopped {
+        if self.stopped() {
             return Err(DriverTxError::Discarded);
         }
-        self.stopped = true;
+        self.lifecycle = Lifecycle::Halted;
         match self.send(bytes).await {
             Ok(()) => {
-                self.stopped = false;
+                self.lifecycle = Lifecycle::Running;
                 Ok(())
             }
             Err(Error::Deferred) => {
-                self.stopped = false;
+                self.lifecycle = Lifecycle::Running;
                 Err(DriverTxError::Deferred)
             }
             Err(Error::NotAcknowledged) => {
-                self.stopped = false;
+                self.lifecycle = Lifecycle::Running;
                 Err(DriverTxError::NotAcknowledged)
             }
             Err(error) => {
@@ -2457,18 +2464,18 @@ impl<B: GatedBus, D: Waiter, C: Clock, P: Platform> Driver for Session<'_, B, D,
         }
     }
     async fn receive(&mut self, buffer: &mut [u8]) -> Result<usize, DriverRxError> {
-        if self.stopped {
+        if self.stopped() {
             return Err(DriverRxError::Discarded);
         }
-        self.stopped = true;
+        self.lifecycle = Lifecycle::Halted;
         match self.receive_packet(buffer).await {
             Ok(length) => {
-                self.stopped = false;
+                self.lifecycle = Lifecycle::Running;
                 Ok(length)
             }
             Err(error) => {
                 if matches!(error, Error::StopRequested) {
-                    self.stopped = false;
+                    self.lifecycle = Lifecycle::Running;
                 }
                 let hard_reset = matches!(error, Error::Rx(pd_service::Error::HardReset));
                 self.error = Some(error);
