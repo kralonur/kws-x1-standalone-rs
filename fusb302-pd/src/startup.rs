@@ -4,42 +4,58 @@ use crate::register;
 use crate::snapshot::{self as pd, Snapshot};
 use embedded_hal_async::{delay::DelayNs, i2c::I2c};
 
+/// Why a one-shot startup step failed.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Failure<E> {
+    pub error: Error<E>,
+    /// A write was attempted and the configuration was not verified afterwards:
+    /// an error, NACK or cancellation can still have changed hardware.
+    pub unverified: bool,
+}
+impl<E> Failure<E> {
+    fn before_write(error: Error<E>) -> Self {
+        Self {
+            error,
+            unverified: false,
+        }
+    }
+    fn after_write(error: Error<E>) -> Self {
+        Self {
+            error,
+            unverified: true,
+        }
+    }
+}
+
 /// Passthrough boot only: power-on baseline -> SWITCHES0 = 0x00, verified.
-/// Runs at most once; any error halts without retry or cleanup. There is no
-/// way back to a sink session in the same boot.
+/// `release` consumes it, so it runs at most once; any error halts without
+/// retry or cleanup. There is no way back to a sink session in the same boot.
 pub struct Passive {
-    started: bool,
-    unverified: bool,
     expected: [u8; 11],
     release_switches: u8,
 }
 impl Passive {
     pub const fn new(expected: [u8; 11], release_switches: u8) -> Self {
         Self {
-            started: false,
-            unverified: false,
             expected,
             release_switches,
         }
     }
-    /// The SWITCHES0 write was attempted and its result not yet verified.
-    pub fn unverified(&self) -> bool {
-        self.unverified
-    }
     pub async fn release<B: I2c>(
-        &mut self,
+        self,
         bus: &mut B,
         before: Snapshot,
-    ) -> Result<Snapshot, Error<B::Error>> {
-        if self.started {
-            return Err(Error::Stopped);
-        }
-        self.started = true;
+    ) -> Result<Snapshot, Failure<B::Error>> {
         check(&before, &self.expected, |register, value| Error::Baseline {
             register,
             value,
-        })?;
-        self.unverified = true; // BEFORE the write await.
+        })
+        .map_err(Failure::before_write)?;
+        self.write_and_verify(bus)
+            .await
+            .map_err(Failure::after_write)
+    }
+    async fn write_and_verify<B: I2c>(&self, bus: &mut B) -> Result<Snapshot, Error<B::Error>> {
         write_checked(bus, ConfigRegister::Switches0, self.release_switches).await?;
         let after = pd::snapshot(bus).await.map_err(|f| Error::Bus {
             register: f.register,
@@ -51,7 +67,6 @@ impl Passive {
             register,
             value,
         })?;
-        self.unverified = false;
         Ok(after)
     }
 }
@@ -74,38 +89,34 @@ pub struct Report {
     pub after: Snapshot,
 }
 
-/// Persistent one-shot state. Cancellation does not restore hardware. Once
-/// polled, no second run is allowed, even on a mismatch/error/cancellation.
+/// One-shot measurement: `run` consumes it, so no second run is possible, even
+/// after a mismatch, error or cancellation. Cancellation does not restore hardware.
 pub struct Diagnostic {
-    started: bool,
-    unverified: bool,
     expected: [u8; 11],
     measure: u8,
 }
 impl Diagnostic {
     pub const fn once(expected: [u8; 11], measure: u8) -> Self {
-        Self {
-            started: false,
-            unverified: false,
-            expected,
-            measure,
-        }
-    }
-    /// A write was attempted and full original configuration not yet verified.
-    /// An error/NACK/cancellation can still have changed hardware.
-    pub fn unverified(&self) -> bool {
-        self.unverified
+        Self { expected, measure }
     }
     pub async fn run<B: I2c, D: DelayNs>(
-        &mut self,
+        self,
         bus: &mut B,
         delay: &mut D,
         before: Snapshot,
-    ) -> Result<Report, Error<B::Error>> {
-        if self.started {
-            return Err(Error::Stopped);
-        }
-        self.started = true;
+    ) -> Result<Report, Failure<B::Error>> {
+        self.check_baseline(bus, before)
+            .await
+            .map_err(Failure::before_write)?;
+        self.measure_and_restore(bus, delay)
+            .await
+            .map_err(Failure::after_write)
+    }
+    async fn check_baseline<B: I2c>(
+        &self,
+        bus: &mut B,
+        before: Snapshot,
+    ) -> Result<(), Error<B::Error>> {
         for (i, expected) in self.expected.into_iter().enumerate() {
             if before.values[i] != expected {
                 return Err(Error::Baseline {
@@ -123,7 +134,13 @@ impl Diagnostic {
                 value: measure,
             });
         }
-        self.unverified = true; // BEFORE first write await.
+        Ok(())
+    }
+    async fn measure_and_restore<B: I2c, D: DelayNs>(
+        &self,
+        bus: &mut B,
+        delay: &mut D,
+    ) -> Result<Report, Error<B::Error>> {
         write_checked(bus, ConfigRegister::Power, 0x07).await?; // bandgap + receiver/references + measure
         write_checked(bus, ConfigRegister::Switches0, 0x07).await?; // preserve Rd1/Rd2, measure CC1 only
         delay.delay_ms(10).await; // nominal settling interval; no calibrated voltage result
@@ -147,7 +164,6 @@ impl Diagnostic {
                 });
             }
         }
-        self.unverified = false;
         Ok(Report {
             status: [cc1, cc2],
             after,

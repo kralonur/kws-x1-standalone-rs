@@ -13,40 +13,11 @@ const fn passive_expected() -> [u8; 11] {
 }
 pub(crate) const PASSIVE_EXPECTED: [u8; 11] = passive_expected();
 
-pub struct Passive(fusb302_pd::startup::Passive);
-impl Passive {
-    pub const fn new() -> Self {
-        Self(fusb302_pd::startup::Passive::new(
-            EXPECTED,
-            PASSIVE_SWITCHES0,
-        ))
-    }
+/// The boot's one passive release, gated on the power-on baseline.
+pub const fn passive() -> fusb302_pd::startup::Passive {
+    fusb302_pd::startup::Passive::new(EXPECTED, PASSIVE_SWITCHES0)
 }
-impl core::ops::Deref for Passive {
-    type Target = fusb302_pd::startup::Passive;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-impl core::ops::DerefMut for Passive {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-pub struct Diagnostic(fusb302_pd::startup::Diagnostic);
-impl Diagnostic {
-    pub const fn once() -> Self {
-        Self(fusb302_pd::startup::Diagnostic::once(EXPECTED, 0x31))
-    }
-}
-impl core::ops::Deref for Diagnostic {
-    type Target = fusb302_pd::startup::Diagnostic;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-impl core::ops::DerefMut for Diagnostic {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
+/// The boot's one CC measurement, gated on the power-on baseline.
+pub const fn diagnostic() -> fusb302_pd::startup::Diagnostic {
+    fusb302_pd::startup::Diagnostic::once(EXPECTED, 0x31)
 }

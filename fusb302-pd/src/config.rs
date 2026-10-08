@@ -7,7 +7,6 @@ use fusb302b::FusbLowLevel;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error<E> {
-    Stopped,
     Baseline { register: u8, value: u8 },
     Bus { register: u8, source: E },
     Verify { register: u8, value: u8 },

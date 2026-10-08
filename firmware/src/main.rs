@@ -1219,7 +1219,6 @@ async fn pd_task(mut input: embassy_hc32::exti::ExtiInput, pc13: InputPin) {
 /// Passthrough: release the FUSB302 Rd once; no GoodCRC or TX. Returns the
 /// verified released snapshot, the only state the sniffer may start from.
 async fn passthrough(observation: &mut pd::Observation) -> Option<pd::Snapshot> {
-    let mut passive = pd_cc::Passive::new();
     let mut guard = I2C3.lock().await;
     if bus_failed() {
         observation.phase = pd::Phase::Skipped;
@@ -1233,15 +1232,17 @@ async fn passthrough(observation: &mut pd::Observation) -> Option<pd::Snapshot> 
     match pd::snapshot(bus).await {
         Ok(snapshot) => {
             observation.snapshot = Some(snapshot);
-            match passive.release(bus, snapshot).await {
+            match pd_cc::passive().release(bus, snapshot).await {
                 Ok(after) => {
                     observation.snapshot = Some(after);
                     observation.phase = pd::Phase::Passive;
                     released = Some(after);
                 }
-                Err(error) => cc_failure(observation, bus, error),
+                Err(failure) => {
+                    observation.restore_unverified |= failure.unverified;
+                    cc_failure(observation, bus, failure.error);
+                }
             }
-            observation.restore_unverified |= passive.unverified();
         }
         Err(failure) => {
             observation.failed_register = failure.register;
@@ -1348,7 +1349,7 @@ fn sniff_stop(
 ) {
     use pd::SniffStop as Stop;
     view.stop = Some(match error {
-        pd_sniff::Error::Stopped | pd_sniff::Error::Config(pd_cc::Error::Stopped) => Stop::Halted,
+        pd_sniff::Error::Stopped => Stop::Halted,
         pd_sniff::Error::Orientation(_) => Stop::Orientation,
         pd_sniff::Error::Boundary { status } => Stop::Boundary(status),
         pd_sniff::Error::Config(pd_cc::Error::Baseline { register, value }) => {
@@ -1401,10 +1402,6 @@ fn cc_failure(
             observation.phase = pd::Phase::Verify;
             BUS_LATCH.fail();
         }
-        pd_cc::Error::Stopped => {
-            observation.phase = pd::Phase::Skipped;
-            BUS_LATCH.fail();
-        }
     }
 }
 
@@ -1431,22 +1428,20 @@ async fn sink_session(observation: &mut pd::Observation) -> Option<pd_cc::Report
     observation.snapshot = Some(snapshot);
     observation.phase = pd::Phase::Measuring;
     store_observation(*observation);
-    let mut diagnostic = pd_cc::Diagnostic::once();
     let mut delay = embassy_time::Delay;
     // Deliberately retain sole bus ownership through the two nominal 10 ms
     // settles: one coherent, non-repeating session.
-    let result = diagnostic.run(bus, &mut delay, snapshot).await;
     // A successful report requires full restored baseline verification; no
     // failed/cancelled session claims restore.
-    observation.restore_unverified |= diagnostic.unverified();
-    match result {
+    match pd_cc::diagnostic().run(bus, &mut delay, snapshot).await {
         Ok(report) => {
             observation.cc_status = Some(report.status);
             observation.post_snapshot = Some(report.after);
             Some(report)
         }
-        Err(error) => {
-            cc_failure(observation, bus, error);
+        Err(failure) => {
+            observation.restore_unverified |= failure.unverified;
+            cc_failure(observation, bus, failure.error);
             None
         }
     }
