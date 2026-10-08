@@ -302,14 +302,24 @@ fn stack_use() -> (u32, u32) {
     (peak as u32, (words * 4) as u32)
 }
 
-unsafe fn init_backlight(compare: u16) -> (embassy_hc32::pwm::TimerA4Pwm, AlternatePin) {
+unsafe fn init_backlight(
+    compare: u16,
+) -> Result<(embassy_hc32::pwm::TimerA4Pwm, AlternatePin), embassy_hc32::pwm::Error> {
     unsafe {
-        let mut pwm =
-            embassy_hc32::pwm::TimerA4Pwm::new(hc32f460_pac::Tmra4::steal(), 7, 1875).unwrap();
+        let mut pwm = embassy_hc32::pwm::TimerA4Pwm::new(hc32f460_pac::Tmra4::steal(), 7, 1875)?;
 
         let pin = AlternatePin::new(Port::H, 2, 4, AlternateMode::DigitalOutput);
-        pwm.start(compare).unwrap();
-        (pwm, pin)
+        pwm.start(compare)?;
+        Ok((pwm, pin))
+    }
+}
+
+/// An interrupt line checked at compile time: call it inside `const { }` so a
+/// number past the last NVIC line fails the build instead of panicking.
+const fn line(n: u8) -> embassy_hc32::intc::Line {
+    match embassy_hc32::intc::Line::new(n) {
+        Some(line) => line,
+        None => panic!("interrupt line out of range"),
     }
 }
 
@@ -330,9 +340,7 @@ async fn tilt_task(input: InputPin) {
     };
     // Errata Rev 1.41 §2.4.2: the peripheral side is already enabled by
     // `ExtiInput::new`, so claiming the line here clears pending before NVIC.
-    if unsafe { embassy_hc32::intc::register(13, embassy_hc32::intc::Line::new(13).unwrap(), 8) }
-        .is_err()
-    {
+    if unsafe { embassy_hc32::intc::register(13, const { line(13) }, 8) }.is_err() {
         IRQ_REG_FAILURES.fetch_add(1, Ordering::Relaxed);
     }
     // One physical tilt makes the LIS3DH emit a burst of short pulses, and the
@@ -664,7 +672,7 @@ async fn main(spawner: Spawner) {
             InputPin::new_pull_up(Port::B, 12),
             embassy_hc32::intc::EirqTrigger::Falling,
         );
-        if embassy_hc32::intc::register(12, embassy_hc32::intc::Line::new(4).unwrap(), 9).is_err() {
+        if embassy_hc32::intc::register(12, const { line(4) }, 9).is_err() {
             IRQ_REG_FAILURES.fetch_add(1, Ordering::Relaxed);
         }
 
@@ -688,15 +696,25 @@ async fn main(spawner: Spawner) {
         //      and the lowest port number wins, so clear channel 13 elsewhere.
         //   2. Enable the peripheral side (PCR.INTE + EIRQCR) first.
         //   3. Then claim the line, clear pending and enable NVIC (register()).
-        let backlight = init_backlight(1125);
+        // The timer arguments are constants, so this only fails on an edit
+        // that breaks them; stop like a failed clock or panel start.
+        let Ok(backlight) = init_backlight(1125) else {
+            loop {
+                core::hint::spin_loop();
+            }
+        };
 
         // I2C3 wake sources: group 13's window is lines 110..=115 (RM Table 10-2),
         // so each event gets its own line and handler. They must be live before
         // the first awaited transfer below.
-        for (event, line) in [(428u16, 110u8), (429, 111), (430, 112), (431, 113)] {
-            if embassy_hc32::intc::register(event, embassy_hc32::intc::Line::new(line).unwrap(), 8)
-                .is_err()
-            {
+        const I2C3_EVENTS: [(u16, embassy_hc32::intc::Line); 4] = [
+            (428, line(110)),
+            (429, line(111)),
+            (430, line(112)),
+            (431, line(113)),
+        ];
+        for (event, line) in I2C3_EVENTS {
+            if embassy_hc32::intc::register(event, line, 8).is_err() {
                 // Never ignore this: an unrouted line means a wake that never
                 // arrives, which is a hang, not an error code.
                 IRQ_REG_FAILURES.fetch_add(1, Ordering::Relaxed);
@@ -716,7 +734,7 @@ async fn main(spawner: Spawner) {
 
         // Route a software interrupt to INT008.
         // Priorities 8/9 keep them below SysTick (0), so timing never starves.
-        if embassy_hc32::intc::register(8, embassy_hc32::intc::Line::new(8).unwrap(), 9).is_err() {
+        if embassy_hc32::intc::register(8, const { line(8) }, 9).is_err() {
             IRQ_REG_FAILURES.fetch_add(1, Ordering::Relaxed);
         }
         // One software interrupt at startup: if SWI ch8 reads 1 on the test
@@ -744,9 +762,12 @@ async fn main(spawner: Spawner) {
         }
     }
 
-    spawner.spawn(pulse_task().unwrap());
-    spawner.spawn(tilt_task(tilt_input).unwrap());
-    spawner.spawn(button_task(button_inputs).unwrap());
-    spawner.spawn(meter_task().unwrap());
-    spawner.spawn(pd_task::run(pd_input, pc13_input).unwrap());
+    // Each task is spawned once, here, into its default one-slot pool, so a
+    // token is always free (`SpawnError::Busy` needs a second instance).
+    const ONE_SPAWN: &str = "each task is spawned once into its one-slot pool";
+    spawner.spawn(pulse_task().expect(ONE_SPAWN));
+    spawner.spawn(tilt_task(tilt_input).expect(ONE_SPAWN));
+    spawner.spawn(button_task(button_inputs).expect(ONE_SPAWN));
+    spawner.spawn(meter_task().expect(ONE_SPAWN));
+    spawner.spawn(pd_task::run(pd_input, pc13_input).expect(ONE_SPAWN));
 }
