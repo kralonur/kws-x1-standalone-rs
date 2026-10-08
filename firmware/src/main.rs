@@ -32,6 +32,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use embassy_executor::Spawner;
 use embassy_hc32::gpio::{self, AlternateMode, AlternatePin, InputPin, Port};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::channel::Channel;
 use embassy_sync::watch::Watch;
 // The `#[cortex_m_rt::interrupt]` expansion checks `interrupt::INT0xx`, and the
 // PAC exposes the generated `Interrupt` enum through that path.
@@ -39,7 +40,7 @@ use bus::{
     ASYNC_READS, BUS_LATCH, I2C_ERRORS, I2C_FAULT_STEP, I2C_IRQ_COUNT, I2C_LAST_CR1, I2C_LAST_CR4,
     I2C_LAST_SR, I2C3, bus_failed, read_meter, write_meter, write_sensor,
 };
-use button_logic::Page;
+use button_logic::{Advanced, Edit, Page};
 use embassy_time::{Instant, Timer};
 use embedded_graphics::pixelcolor::{Rgb565, RgbColor};
 use firmware_core::buttons as button_logic;
@@ -148,6 +149,9 @@ static PULSES: AtomicU32 = AtomicU32::new(0);
 /// `button_task` sends the input state when it changes; the renderer and PD
 /// trial read it.
 static BUTTON_STATE: Watch<CriticalSectionRawMutex, button_logic::Input, 1> = Watch::new();
+/// PD requests from `button_task` (profile previews, confirmations, the cable
+/// query), applied by the PD session in order.
+static PD_COMMANDS: Channel<CriticalSectionRawMutex, button_logic::PdCommand, 8> = Channel::new();
 // One bitmap, outside both observations and async futures.
 static CABLE_SVIDS: embassy_sync::blocking_mutex::Mutex<
     embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
@@ -402,8 +406,6 @@ const fn line(n: u8) -> embassy_hc32::intc::Line {
 
 /// Heartbeat period in milliseconds; the meter page shows the pulse count.
 const PULSE_MS: u64 = 500;
-/// Button sampling period in milliseconds; debouncing counts these samples.
-const BUTTON_POLL_MS: u64 = 10;
 /// Meter task tick in milliseconds: inputs and the screen are checked this often.
 const METER_TICK_MS: u64 = 10;
 /// INA226 read pace; a deadline, so a slow frame never queues extra reads.
@@ -495,7 +497,7 @@ async fn button_task(inputs: [InputPin; 4]) {
     #[cfg(not(feature = "cable-log"))]
     let fatal = false;
     let mut navigation = if cfg!(feature = "pd-boot-diagnostic") || fatal {
-        button_logic::Navigation::at_page(Page::Pd)
+        button_logic::Navigation::at_page(Page::Advanced(Advanced::Pd))
     } else {
         button_logic::Navigation::default()
     };
@@ -511,13 +513,18 @@ async fn button_task(inputs: [InputPin; 4]) {
         let raw = inputs.iter().enumerate().fold(0u8, |mask, (index, pin)| {
             mask | (u8::from(pin.is_low()) << index)
         });
-        let input = navigation.update(raw);
+        let (input, command) = navigation.update(raw);
+        // The PD session drains these between transactions; a full queue
+        // drops the press, as a missed tap would.
+        if let Some(command) = command {
+            PD_COMMANDS.try_send(command).ok();
+        }
         input_sender.send_if_modified(|current| {
             let changed = *current != Some(input);
             *current = Some(input);
             changed
         });
-        Timer::after_millis(BUTTON_POLL_MS).await;
+        Timer::after_millis(u64::from(button_logic::POLL_MS)).await;
     }
 }
 #[inline(never)]
@@ -577,14 +584,6 @@ fn reading(raw_v: Option<u16>, raw_i: Option<u16>) -> Option<ui::Reading> {
         mv: ina226::bus_millivolts(raw_v),
         ma: i32::from(raw_i as i16) / ina226::COUNTS_PER_MA as i32,
     })
-}
-
-/// Page header with the page's position in the current cycle.
-fn header(title: &str, input: button_logic::Input) -> ui::Header<'_> {
-    ui::Header {
-        title,
-        position: input.page.position(input.settings.debug_pages),
-    }
 }
 
 /// Backlight compare for a settings level, inside `1..BACKLIGHT_PERIOD`.
@@ -660,20 +659,22 @@ async fn meter_task(mut backlight: embassy_hc32::pwm::TimerA4Pwm) {
         }
 
         let mut changed = false;
-        if matches!(page, Page::Meter | Page::Pd) && now >= next_read {
+        // Pages showing live values read the meter; the PD details page reads
+        // only the bus voltage, as before.
+        let reads_current = matches!(page, Page::Overview | Page::Fixed | Page::Pps);
+        let pd_details = page == Page::Advanced(Advanced::Pd);
+        if (reads_current || pd_details) && now >= next_read {
             next_read = now + METER_READ_PERIOD;
             if let Some(v) = read_meter(ina226::BUS_VOLTAGE).await {
                 if Some(v) != last_raw_v {
                     last_raw_v = Some(v);
                     changed = true;
                 }
-                if page == Page::Pd {
+                if pd_details {
                     changed = true;
                 }
             }
-            if page == Page::Meter
-                && let Some(i) = read_meter(ina226::CURRENT).await
-            {
+            if reads_current && let Some(i) = read_meter(ina226::CURRENT).await {
                 if Some(i) != last_raw_i {
                     last_raw_i = Some(i);
                     changed = true;
@@ -707,13 +708,17 @@ async fn meter_task(mut backlight: embassy_hc32::pwm::TimerA4Pwm) {
             dirty = false;
             // SAFETY: this task is the sole framebuffer owner.
             let frame = unsafe { &mut *(fb as *mut Frame) };
+            let header = |title| ui::Header {
+                title,
+                position: page.position(),
+            };
             match page {
-                Page::Meter => {
+                Page::Overview => {
                     render::clear(frame);
                     let observation = latest_observation();
                     ui::draw_meter(
                         &mut Canvas(frame),
-                        &header("OVERVIEW", input),
+                        &header("OVERVIEW"),
                         &ui::Meter {
                             reading: reading(last_raw_v, last_raw_i),
                             peaks,
@@ -723,16 +728,36 @@ async fn meter_task(mut backlight: embassy_hc32::pwm::TimerA4Pwm) {
                         },
                     );
                 }
+                Page::Fixed => {
+                    render::clear(frame);
+                    ui::draw_fixed(
+                        &mut Canvas(frame),
+                        &header("PD PROFILES"),
+                        &pd::offer(&latest_observation()),
+                        input.edit == Edit::Fixed,
+                    );
+                }
+                Page::Pps => {
+                    render::clear(frame);
+                    ui::draw_pps(
+                        &mut Canvas(frame),
+                        &header("PPS"),
+                        &pd::offer(&latest_observation()),
+                        input.edit,
+                        reading(last_raw_v, last_raw_i),
+                    );
+                }
                 Page::Settings => {
                     render::clear(frame);
                     ui::draw_settings(
                         &mut Canvas(frame),
-                        &header("SETTINGS", input),
+                        &header("SETTINGS"),
                         input.settings,
                         input.cursor,
+                        input.edit,
                     );
                 }
-                Page::Irq => {
+                Page::Advanced(Advanced::Irq) => {
                     let (stack_peak, stack_size) = stack_use();
                     unsafe {
                         render_irq_test(
@@ -752,16 +777,16 @@ async fn meter_task(mut backlight: embassy_hc32::pwm::TimerA4Pwm) {
                         );
                     }
                 }
-                Page::Pd | Page::Cable => {
-                    let detail = (page == Page::Cable).then_some(input.detail);
+                Page::Advanced(advanced @ (Advanced::Pd | Advanced::Cable)) => {
+                    let detail = (advanced == Advanced::Cable).then_some(input.detail);
                     unsafe {
                         render_pd(fb, last_raw_v, detail);
                     }
                 }
-                Page::Charger => unsafe {
+                Page::Advanced(Advanced::Charger) => unsafe {
                     render_partner(fb, input.detail);
                 },
-                Page::Ports => {
+                Page::Advanced(Advanced::Ports) => {
                     for (i, p) in ports.iter_mut().enumerate() {
                         let port = [Port::A, Port::B, Port::C, Port::D, Port::E, Port::H];
                         *p = gpio::read_port(port[i]);

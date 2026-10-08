@@ -7,8 +7,9 @@ pub use partner::paint_partner;
 
 use firmware_core::pd_cable::CableStatus;
 use firmware_core::pd_sniff::Supply;
+use firmware_core::pd_spr::Advertised;
 
-use crate::ui::Protocol;
+use crate::ui::{self, Protocol};
 // Compatibility exports are used by different subsets of board host tests.
 #[allow(unused_imports)]
 pub use fusb302_pd::observation::{Phase, SprObservation};
@@ -194,7 +195,9 @@ pub fn protocol(observation: &Observation) -> Protocol {
             Protocol::Pd {
                 revision: spr.peer_revision,
                 mv: spr.target_mv,
-                ma: spr.target_ma,
+                ma: offer(observation)
+                    .fixed_current(spr.target_mv)
+                    .unwrap_or(spr.target_ma),
             }
         };
     }
@@ -206,6 +209,59 @@ pub fn protocol(observation: &Observation) -> Protocol {
         .and_then(|(cc, status)| status.get(usize::from(cc).checked_sub(1)?).copied())
         .and_then(firmware_core::pd_sniff::rp)
         .map_or(Protocol::Unknown, type_c)
+}
+
+/// The charger's offer and this meter's preview and contract, for the
+/// selector pages. The offer comes from this meter's own session, else from
+/// the passthrough sniffer.
+pub fn offer(observation: &Observation) -> ui::Offer {
+    let mut offer = ui::Offer::default();
+    let mut add = |raw: u32| match firmware_core::pd_spr::advertised(raw) {
+        Advertised::Fixed { mv, ma } => offer.push_fixed(mv, ma),
+        Advertised::Pps {
+            min_mv,
+            max_mv,
+            max_ma,
+        } => offer.push_pps(ui::PpsRange {
+            min_mv,
+            max_mv,
+            max_ma,
+        }),
+        Advertised::Other => {}
+    };
+    if let Some(caps) = observation.capabilities {
+        for object in caps.objects.iter().take(usize::from(caps.count)) {
+            add(object.raw);
+        }
+    } else if let Some(sniff) = observation.sniff {
+        for &raw in sniff.caps.iter().take(usize::from(sniff.caps_count)) {
+            add(raw);
+        }
+    }
+    if let Some(spr) = observation.spr {
+        offer.session = true;
+        offer.preview = spr
+            .selected_mv
+            .zip(spr.selected_ma)
+            .map(|(mv, ma)| ui::Supply {
+                mv,
+                ma,
+                pps: spr.selected_pps,
+            });
+        // A fixed Request asks for the profile's maximum current, not the
+        // session's nominal target current, so show the advertised one.
+        let ma = if spr.pps {
+            spr.target_ma
+        } else {
+            offer.fixed_current(spr.target_mv).unwrap_or(spr.target_ma)
+        };
+        offer.contract = (spr.psrdy_seen || spr.contract_seen).then_some(ui::Supply {
+            mv: spr.target_mv,
+            ma,
+            pps: spr.pps,
+        });
+    }
+    offer
 }
 
 /// Attached CC pin (1 or 2): the passthrough sniffer's, else this meter's.

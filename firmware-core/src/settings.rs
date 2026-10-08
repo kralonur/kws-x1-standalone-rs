@@ -12,23 +12,25 @@ const DEFAULT_BRIGHTNESS: u8 = 2;
 pub struct Settings {
     /// Index into [`BRIGHTNESS_PERCENT`].
     pub brightness: u8,
-    /// Add the port and interrupt diagnostic pages to the page cycle.
-    pub debug_pages: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             brightness: DEFAULT_BRIGHTNESS,
-            debug_pages: false,
         }
     }
 }
 
 impl Settings {
-    /// The next brightness level, wrapping from the brightest to the dimmest.
-    pub fn brighter(&mut self) {
-        self.brightness = (self.brightness + 1) % BRIGHTNESS_PERCENT.len() as u8;
+    /// One level brighter (`brighter`) or dimmer, stopping at either end.
+    pub fn step_brightness(&mut self, brighter: bool) {
+        let top = BRIGHTNESS_PERCENT.len() as u8 - 1;
+        self.brightness = if brighter {
+            (self.brightness + 1).min(top)
+        } else {
+            self.brightness.saturating_sub(1)
+        };
     }
 
     pub fn brightness_percent(&self) -> u8 {
@@ -42,17 +44,8 @@ pub enum Item {
     #[default]
     Brightness,
     ResetPeaks,
-    DebugPages,
 }
 
 impl Item {
-    pub const ALL: [Self; 3] = [Self::Brightness, Self::ResetPeaks, Self::DebugPages];
-
-    pub fn next(self) -> Self {
-        match self {
-            Self::Brightness => Self::ResetPeaks,
-            Self::ResetPeaks => Self::DebugPages,
-            Self::DebugPages => Self::Brightness,
-        }
-    }
+    pub const ALL: [Self; 2] = [Self::Brightness, Self::ResetPeaks];
 }

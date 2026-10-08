@@ -134,8 +134,9 @@ fn input() -> firmware_core::buttons::Input {
 }
 
 fn detail_page() -> Option<u32> {
+    use firmware_core::buttons::{Advanced, Page};
     let input = input();
-    (input.page == firmware_core::buttons::Page::Cable).then_some(input.detail)
+    (input.page == Page::Advanced(Advanced::Cable)).then_some(input.detail)
 }
 
 fn control(
@@ -143,12 +144,15 @@ fn control(
     selection: &firmware_core::pd_spr::Selection,
     store: Option<&dyn firmware_core::pd_svids::Store>,
 ) {
-    selection.update_buttons(input());
+    while let Ok(command) = crate::PD_COMMANDS.try_receive() {
+        selection.apply(command);
+    }
     pd::control_cable_selection(observation, selection, detail_page(), store);
 }
 
+/// Back held (for the session's stop delay) ends the session.
 fn stop_requested() -> bool {
-    input().pressed & 3 == 3
+    input().pressed & firmware_core::buttons::BACK != 0
 }
 
 use firmware_core::pd_spr;
@@ -172,6 +176,9 @@ impl pd_spr::Timer for Clock {
 
 pub async fn run(observation: &mut pd::Observation, report: pd_cc::Report) {
     let selection = pd_spr::Selection::new();
+    // Presses made before this session (e.g. an OK with no charger) must not
+    // request anything now: only commands sent during the session apply.
+    crate::PD_COMMANDS.clear();
     let mut bus = SharedBus;
     let clock = Clock;
     let mut delay = TimedDelay;

@@ -2,8 +2,8 @@
 //!
 //! The original firmware configures four button inputs as active-low with
 //! pull-ups: PB2, PB10, PH0 and PC14, each treating a low level as pressed.
-//! Physical labels are still unknown, so this module reports pin-level states
-//! rather than names.
+//! They are the Left, Right, OK and Back buttons, as identified on
+//! the device.
 #![allow(dead_code)]
 
 use crate::settings::{Item, Settings};
@@ -54,66 +54,127 @@ impl Debounced {
     }
 }
 
-/// Button roles, as bits of the stable pressed mask (bit `n` is `PINS[n]`).
-/// PB2 steps (sub-pages, settings cursor, PD preview), PB10 selects (settings
-/// item, peak reset, PD confirm), PH0 advances the page and PC14 returns home.
-pub const STEP: u8 = 1 << 0;
-pub const SELECT: u8 = 1 << 1;
-pub const NEXT_PAGE: u8 = 1 << 2;
-pub const HOME: u8 = 1 << 3;
+/// Button bits of the stable pressed mask (bit `n` is `PINS[n]`).
+pub const LEFT: u8 = 1 << 0;
+pub const RIGHT: u8 = 1 << 1;
+pub const OK: u8 = 1 << 2;
+pub const BACK: u8 = 1 << 3;
+const LEFT_RIGHT: u8 = LEFT | RIGHT;
 
-/// Screen pages, in [`NEXT_PAGE`] order. The two diagnostic pages are only
-/// in the cycle while [`Settings::debug_pages`] is on.
+/// Button sampling period in milliseconds; the hold times below are counted
+/// in these samples.
+pub const POLL_MS: u32 = 10;
+/// Left and Right held together this long toggle the advanced pages.
+const CHORD_SAMPLES: u32 = 500 / POLL_MS;
+/// A long OK press (cable query on the advanced cable page).
+const LONG_OK_SAMPLES: u32 = 500 / POLL_MS;
+/// A held Left or Right repeats after this delay, at this period.
+const REPEAT_DELAY_SAMPLES: u32 = 500 / POLL_MS;
+const REPEAT_SAMPLES: u32 = 100 / POLL_MS;
+/// PPS steps per press and per repeat: 20 mV is the PPS voltage resolution
+/// and 50 mA the PPS current resolution (USB PD Table 6.21).
+const PPS_MV_STEP: i16 = 20;
+const PPS_MV_REPEAT: i16 = 100;
+const PPS_MA_STEP: i16 = 50;
+const PPS_MA_REPEAT: i16 = 250;
+
+/// Everyday pages, in Left/Right order.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Page {
     #[default]
-    Meter,
-    /// PD session and the fixed/PPS option selection.
+    Overview,
+    /// Fixed PD profile selector.
+    Fixed,
+    /// PPS voltage and current selector.
+    Pps,
+    Settings,
+    /// Detailed information, opened by holding Left and Right together.
+    Advanced(Advanced),
+}
+
+/// Detailed information pages, in OK order.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Advanced {
+    /// PD session state.
+    #[default]
     Pd,
     /// What the charger said about itself, on sub-pages.
     Charger,
     /// Cable E-marker details, on sub-pages.
     Cable,
-    Settings,
     /// GPIO port levels and frame timing.
     Ports,
     /// Interrupt and I2C fault counters.
     Irq,
 }
 
+const EVERYDAY: [Page; 4] = [Page::Overview, Page::Fixed, Page::Pps, Page::Settings];
+const ADVANCED: [Advanced; 5] = [
+    Advanced::Pd,
+    Advanced::Charger,
+    Advanced::Cable,
+    Advanced::Ports,
+    Advanced::Irq,
+];
+
+/// `items[index of current ± 1]`, wrapping.
+fn cycle<T: Copy + PartialEq>(items: &[T], current: T, forward: bool) -> T {
+    let index = items.iter().position(|item| *item == current).unwrap_or(0);
+    let next = if forward {
+        index + 1
+    } else {
+        index + items.len() - 1
+    };
+    items[next % items.len()]
+}
+
 impl Page {
-    fn next(self, debug_pages: bool) -> Self {
-        match self {
-            Self::Meter => Self::Pd,
-            Self::Pd => Self::Charger,
-            Self::Charger => Self::Cable,
-            Self::Cable => Self::Settings,
-            Self::Settings if debug_pages => Self::Ports,
-            Self::Ports => Self::Irq,
-            Self::Settings | Self::Irq => Self::Meter,
-        }
+    /// One-based position in its group (everyday or advanced) and the group size.
+    pub fn position(self) -> (u8, u8) {
+        let (index, count) = match self {
+            Self::Advanced(page) => (
+                ADVANCED.iter().position(|item| *item == page),
+                ADVANCED.len(),
+            ),
+            page => (
+                EVERYDAY.iter().position(|item| *item == page),
+                EVERYDAY.len(),
+            ),
+        };
+        (index.map_or(0, |index| index as u8 + 1), count as u8)
     }
+}
 
-    /// One-based position in the page cycle and the cycle length; the
-    /// position is 0 for a diagnostic page outside the cycle.
-    pub fn position(self, debug_pages: bool) -> (u8, u8) {
-        let (mut page, mut index, mut count) = (Self::Meter, 0, 0);
-        loop {
-            count += 1;
-            if page == self {
-                index = count;
-            }
-            page = page.next(debug_pages);
-            if page == Self::Meter {
-                return (index, count);
-            }
-        }
-    }
+/// What Left, Right and OK are editing on the current page. `None` means
+/// Left/Right move between pages.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Edit {
+    #[default]
+    None,
+    /// Choosing a fixed profile.
+    Fixed,
+    PpsVoltage,
+    PpsCurrent,
+    /// Moving between settings rows.
+    SettingsRows,
+    Brightness,
+}
 
-    /// Pages whose sub-page [`STEP`] and [`SELECT`] move.
-    fn has_detail(self) -> bool {
-        matches!(self, Self::Charger | Self::Cable)
-    }
+/// A request for the PD session, sent by the input task. Previews only change
+/// what is shown; nothing is transmitted before [`PdCommand::Confirm`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PdCommand {
+    /// Preview the next (+1) or previous (-1) fixed profile; 0 previews the
+    /// current or first one.
+    StepFixed(i8),
+    /// Preview a PPS voltage change in mV; 0 previews the first PPS range.
+    PpsVoltage(i16),
+    /// Preview a PPS current change in mA.
+    PpsCurrent(i16),
+    /// Request the previewed profile.
+    Confirm,
+    /// Ask the cable for its E-marker identity (from fixed 5 V only).
+    QueryCable,
 }
 
 /// One coherent input state, published by the input task as a unit.
@@ -122,7 +183,8 @@ pub struct Input {
     /// Stable pressed mask; bit `n` is `PINS[n]`.
     pub pressed: u8,
     pub page: Page,
-    /// Sub-page of the charger and cable pages.
+    pub edit: Edit,
+    /// Sub-page of the advanced charger and cable pages.
     pub detail: u32,
     pub settings: Settings,
     /// Highlighted settings row.
@@ -133,12 +195,23 @@ pub struct Input {
 }
 
 /// Navigation and settings, owned by the input task rather than the renderer,
-/// so a render backlog never loses taps. [`HOME`] wins over a simultaneous
-/// [`NEXT_PAGE`].
+/// so a render backlog never loses taps.
+///
+/// Left and Right act when released, so a press that becomes a Left+Right
+/// chord does nothing else; OK acts when released unless it was held long.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Navigation {
     debounce: Debounced,
     input: Input,
+    /// Both Left and Right were down during the current press.
+    chord: bool,
+    /// The current Left/Right press already repeated.
+    repeated: bool,
+    /// Samples the current Left/Right press (or chord) has been held.
+    held: u32,
+    /// Samples OK has been held, and whether that hold already acted.
+    ok_held: u32,
+    ok_long: bool,
 }
 
 impl Navigation {
@@ -149,50 +222,144 @@ impl Navigation {
         navigation
     }
 
-    /// Feed one sample and return the resulting input state.
-    pub fn update(&mut self, raw_pressed: u8) -> Input {
+    /// Feed one sample; returns the input state and any PD session request.
+    pub fn update(&mut self, raw_pressed: u8) -> (Input, Option<PdCommand>) {
         let before = self.debounce.stable();
         let after = self.debounce.update(raw_pressed, DEFAULT_THRESHOLD);
         let rising = after & !before;
+        let falling = before & !after;
+        self.input.pressed = after;
+        let mut command = None;
+
+        // A lone Left/Right press steps when released, unless it repeated.
+        if !self.chord && !self.repeated {
+            if falling & LEFT != 0 {
+                command = self.step(false, false);
+            } else if falling & RIGHT != 0 {
+                command = self.step(true, false);
+            }
+        }
+        let left_right = after & LEFT_RIGHT;
+        if left_right == LEFT_RIGHT {
+            if !self.chord {
+                self.chord = true;
+                self.held = 0;
+            }
+            self.held += 1;
+            if self.held == CHORD_SAMPLES {
+                self.toggle_advanced();
+            }
+        } else if left_right != 0 && !self.chord {
+            self.held += 1;
+            if self.held >= REPEAT_DELAY_SAMPLES
+                && (self.held - REPEAT_DELAY_SAMPLES).is_multiple_of(REPEAT_SAMPLES)
+                && matches!(self.input.edit, Edit::PpsVoltage | Edit::PpsCurrent)
+            {
+                self.repeated = true;
+                command = self.step(left_right == RIGHT, true);
+            }
+        } else if left_right == 0 {
+            self.chord = false;
+            self.repeated = false;
+            self.held = 0;
+        }
+
+        if after & OK != 0 {
+            self.ok_held += 1;
+            if self.ok_held == LONG_OK_SAMPLES && self.input.page == Page::Advanced(Advanced::Cable)
+            {
+                self.ok_long = true;
+                command = Some(PdCommand::QueryCable);
+            }
+        } else {
+            if falling & OK != 0 && !self.ok_long {
+                command = self.ok().or(command);
+            }
+            self.ok_held = 0;
+            self.ok_long = false;
+        }
+        if rising & BACK != 0 {
+            self.back();
+        }
+        (self.input, command)
+    }
+
+    fn go(&mut self, page: Page) {
+        self.input.page = page;
+        self.input.edit = Edit::None;
+        self.input.detail = 0;
+    }
+
+    fn toggle_advanced(&mut self) {
+        self.go(match self.input.page {
+            Page::Advanced(_) => Page::Overview,
+            _ => Page::Advanced(Advanced::default()),
+        });
+    }
+
+    fn back(&mut self) {
         let input = &mut self.input;
-        input.pressed = after;
-        if rising & NEXT_PAGE != 0 {
-            input.page = input.page.next(input.settings.debug_pages);
-            input.detail = 0;
+        match input.edit {
+            Edit::Brightness => input.edit = Edit::SettingsRows,
+            Edit::None => self.go(Page::Overview),
+            _ => input.edit = Edit::None,
         }
-        if rising & HOME != 0 {
-            input.page = Page::Meter;
-            input.detail = 0;
+    }
+
+    /// Left (`forward` false) or Right; `repeat` for a held button.
+    fn step(&mut self, forward: bool, repeat: bool) -> Option<PdCommand> {
+        let sign = if forward { 1 } else { -1 };
+        let input = &mut self.input;
+        match (input.page, input.edit) {
+            (Page::Advanced(_), _) => {
+                input.detail = if forward {
+                    input.detail.wrapping_add(1) & 0x00ff_ffff
+                } else {
+                    input.detail.saturating_sub(1)
+                };
+            }
+            (page, Edit::None) => self.go(cycle(&EVERYDAY, page, forward)),
+            (_, Edit::Fixed) => return Some(PdCommand::StepFixed(sign as i8)),
+            (_, Edit::PpsVoltage) => {
+                let step = if repeat { PPS_MV_REPEAT } else { PPS_MV_STEP };
+                return Some(PdCommand::PpsVoltage(sign * step));
+            }
+            (_, Edit::PpsCurrent) => {
+                let step = if repeat { PPS_MA_REPEAT } else { PPS_MA_STEP };
+                return Some(PdCommand::PpsCurrent(sign * step));
+            }
+            (_, Edit::SettingsRows) => input.cursor = cycle(&Item::ALL, input.cursor, forward),
+            (_, Edit::Brightness) => input.settings.step_brightness(forward),
         }
-        match input.page {
-            page if page.has_detail() => {
-                if rising & STEP != 0 {
-                    input.detail = input.detail.wrapping_add(1) & 0x00ff_ffff;
-                }
-                if rising & SELECT != 0 {
-                    input.detail = input.detail.saturating_sub(1);
-                }
+        None
+    }
+
+    fn ok(&mut self) -> Option<PdCommand> {
+        let input = &mut self.input;
+        match (input.page, input.edit) {
+            (Page::Advanced(page), _) => self.go(Page::Advanced(cycle(&ADVANCED, page, true))),
+            (Page::Fixed, Edit::None) => {
+                input.edit = Edit::Fixed;
+                return Some(PdCommand::StepFixed(0));
             }
-            Page::Settings => {
-                if rising & STEP != 0 {
-                    input.cursor = input.cursor.next();
-                }
-                if rising & SELECT != 0 {
-                    match input.cursor {
-                        Item::Brightness => input.settings.brighter(),
-                        Item::ResetPeaks => input.peaks_reset = input.peaks_reset.wrapping_add(1),
-                        Item::DebugPages => {
-                            input.settings.debug_pages = !input.settings.debug_pages;
-                        }
-                    }
-                }
+            (Page::Pps, Edit::None) => {
+                input.edit = Edit::PpsVoltage;
+                return Some(PdCommand::PpsVoltage(0));
             }
-            Page::Meter if rising & SELECT != 0 => {
-                input.peaks_reset = input.peaks_reset.wrapping_add(1);
+            (_, Edit::PpsVoltage) => input.edit = Edit::PpsCurrent,
+            (_, Edit::Fixed | Edit::PpsCurrent) => {
+                input.edit = Edit::None;
+                return Some(PdCommand::Confirm);
             }
-            _ => {}
+            (Page::Settings, Edit::None) => input.edit = Edit::SettingsRows,
+            (_, Edit::SettingsRows) => match input.cursor {
+                Item::Brightness => input.edit = Edit::Brightness,
+                Item::ResetPeaks => input.peaks_reset = input.peaks_reset.wrapping_add(1),
+            },
+            (_, Edit::Brightness) => input.edit = Edit::SettingsRows,
+            (Page::Overview, Edit::None) => {}
         }
-        *input
+        None
     }
 }
 

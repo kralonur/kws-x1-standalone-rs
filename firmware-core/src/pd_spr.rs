@@ -1,5 +1,7 @@
 //! Board limits and button adapter for the reusable PD session engine.
 use core::cell::Cell;
+
+use crate::buttons::PdCommand;
 use pd_protocol::pd_spr as shared;
 use usbpd::protocol_layer::message::data::{request, source_capabilities};
 
@@ -27,6 +29,47 @@ pub const REQUEST_MA: u32 = 100;
 /// object's Maximum Current; PD objects never exceed 5 A, so 12 A never binds.
 pub const MAX_CURRENT_MA: u32 = 12_000;
 pub const PPS_REFRESH_MS: u64 = 4_000;
+/// Fixed supply PDO units: 50 mV voltage, 10 mA maximum current (USB PD Table 6.9).
+const FIXED_VOLTAGE_UNIT_MV: u16 = 50;
+const FIXED_CURRENT_UNIT_MA: u16 = 10;
+/// SPR PPS APDO voltage unit: 100 mV (USB PD Table 6.13).
+const PPS_VOLTAGE_UNIT_MV: u16 = 100;
+/// PPS current unit: 50 mA, in the APDO and the PPS Request (USB PD Tables
+/// 6.13 and 6.21).
+const PPS_CURRENT_UNIT_MA: u16 = 50;
+
+/// What one advertised power data object offers, for display.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Advertised {
+    Fixed {
+        mv: u16,
+        ma: u16,
+    },
+    Pps {
+        min_mv: u16,
+        max_mv: u16,
+        max_ma: u16,
+    },
+    /// Battery, variable, EPR or unknown objects.
+    Other,
+}
+
+/// Decode one raw Source_Capabilities object.
+pub fn advertised(raw: u32) -> Advertised {
+    use source_capabilities::{Augmented, PowerDataObject, parse_raw_pdo};
+    match parse_raw_pdo(raw) {
+        PowerDataObject::FixedSupply(pdo) => Advertised::Fixed {
+            mv: pdo.raw_voltage() * FIXED_VOLTAGE_UNIT_MV,
+            ma: pdo.raw_max_current() * FIXED_CURRENT_UNIT_MA,
+        },
+        PowerDataObject::Augmented(Augmented::Spr(pdo)) => Advertised::Pps {
+            min_mv: pdo.raw_min_voltage() as u16 * PPS_VOLTAGE_UNIT_MV,
+            max_mv: pdo.raw_max_voltage() as u16 * PPS_VOLTAGE_UNIT_MV,
+            max_ma: pdo.raw_max_current() as u16 * PPS_CURRENT_UNIT_MA,
+        },
+        _ => Advertised::Other,
+    }
+}
 
 pub struct BoardLimits;
 impl shared::Limits for BoardLimits {
@@ -79,11 +122,6 @@ pub fn request_fixed(
 
 pub struct Selection {
     inner: shared::Selection<BoardLimits>,
-    held_since_ms: Cell<u64>,
-    pb10_held_since_ms: Cell<u64>,
-    pb10_held: Cell<bool>,
-    repeat_ms: Cell<u64>,
-    buttons: Cell<u8>,
     mode_cursor: Cell<Option<u16>>,
 }
 impl core::ops::Deref for Selection {
@@ -96,11 +134,6 @@ impl Selection {
     pub const fn new() -> Self {
         Self {
             inner: shared::Selection::new(),
-            held_since_ms: Cell::new(0),
-            pb10_held_since_ms: Cell::new(0),
-            pb10_held: Cell::new(false),
-            repeat_ms: Cell::new(0),
-            buttons: Cell::new(0),
             mode_cursor: Cell::new(None),
         }
     }
@@ -110,66 +143,80 @@ impl Selection {
     pub fn set_mode_cursor(&self, index: Option<u16>) {
         self.mode_cursor.set(index);
     }
-    /// PB2 previews, PB10 confirms/holds. Screen and hold timing stay board-local.
-    pub fn update_buttons(&self, input: crate::buttons::Input) {
-        let buttons = input.pressed;
-        let old = self.buttons.replace(buttons);
-        let rising = buttons & !old;
-        let falling = !buttons & old;
-        let now = self.now_ms();
-        if input.page != crate::buttons::Page::Pd
-            || buttons & 3 == 3
-            || self.has_pending()
-            || self.request_in_flight()
-            || self.cable_active()
-        {
-            self.held_since_ms.set(now);
-            self.repeat_ms.set(now);
-            self.pb10_held_since_ms.set(now);
-            // A PB10 press during a busy period (cable query, Request, other
-            // page) is used up until released: holding it past the end must
-            // not start another query or confirm 500 ms later.
-            self.pb10_held.set(buttons & 2 != 0);
-            return;
-        }
-        if self.option_count() == 0 {
-            return;
-        }
-        let is_fixed = !self.candidate_is_pps();
-        if rising & 2 != 0 {
-            self.pb10_held_since_ms.set(now);
-            self.pb10_held.set(false);
-        }
-        if buttons & 2 != 0
-            && !self.pb10_held.get()
-            && now.saturating_sub(self.pb10_held_since_ms.get()) >= 500
-        {
-            if is_fixed {
-                self.request_cable();
-            } else {
-                self.toggle_adjustment();
+    /// Apply one request from the input task. Previews go through the shared
+    /// selection's own checks; only `Confirm` schedules a Request.
+    pub fn apply(&self, command: PdCommand) {
+        match command {
+            PdCommand::StepFixed(step) => self.step_fixed(step),
+            PdCommand::PpsVoltage(delta) => self.adjust_pps(delta, 0),
+            PdCommand::PpsCurrent(delta) => self.adjust_pps(0, delta),
+            PdCommand::Confirm => {
+                self.confirm();
             }
-            self.pb10_held.set(true);
+            PdCommand::QueryCable => {
+                self.request_cable();
+            }
         }
-        let should_confirm = (is_fixed && rising & 2 != 0)
-            || (!is_fixed && falling & 2 != 0 && !self.pb10_held.get());
-        if should_confirm {
-            self.confirm();
+    }
+
+    fn options(&self) -> impl Iterator<Item = shared::Target> + '_ {
+        (0..self.option_count()).filter_map(|index| self.option(index))
+    }
+
+    /// Preview the fixed profile `step` places from the previewed one (the
+    /// first one when a PPS range is previewed).
+    fn step_fixed(&self, step: i8) {
+        let mut fixed = [None; 7];
+        let mut count = 0;
+        for (slot, option) in fixed
+            .iter_mut()
+            .zip(self.options().filter(|option| option.pps_object == 0))
+        {
+            *slot = Some(option);
+            count += 1;
         }
-        if buttons & 2 == 0 {
-            self.pb10_held.set(false);
+        if count == 0 {
+            return;
         }
-        if rising & 1 != 0 {
-            self.held_since_ms.set(now);
-            self.repeat_ms.set(now);
+        let current = fixed[..count].iter().position(|option| {
+            !self.candidate_is_pps() && option.is_some_and(|o| o.mv == self.candidate_mv())
+        });
+        let index = current.map_or(0, |index| {
+            (index as isize + isize::from(step)).rem_euclid(count as isize) as usize
+        });
+        if let Some(option) = fixed[index] {
+            self.preview(option);
         }
-        let repeat = !is_fixed
-            && buttons & 1 != 0
-            && now.saturating_sub(self.held_since_ms.get()) >= 500
-            && now.saturating_sub(self.repeat_ms.get()) >= 100;
-        if rising & 1 != 0 || repeat {
-            self.repeat_ms.set(now);
-            self.advance(if repeat { 100 } else { 20 }, if repeat { 250 } else { 50 });
+    }
+
+    /// Preview a PPS voltage/current change, in any advertised range that
+    /// accepts it. A voltage rise lowers the current when the new voltage
+    /// allows less; a change no range accepts leaves the preview unchanged.
+    fn adjust_pps(&self, delta_mv: i16, delta_ma: i16) {
+        if !self.candidate_is_pps() {
+            if let Some(first) = self.options().find(|option| option.pps_object != 0) {
+                self.preview(first);
+            }
+            return;
+        }
+        let mv = (i32::from(self.candidate_mv()) + i32::from(delta_mv)).clamp(0, 0xffff) as u16;
+        let mut ma = (i32::from(self.candidate_ma()) + i32::from(delta_ma))
+            .clamp(i32::from(PPS_MIN_MA), 0xffff) as u16;
+        loop {
+            for option in self.options().filter(|option| option.pps_object != 0) {
+                let target = shared::Target {
+                    mv,
+                    ma,
+                    pps_object: option.pps_object,
+                };
+                if self.preview(target) {
+                    return;
+                }
+            }
+            if delta_ma != 0 || ma <= PPS_MIN_MA {
+                return;
+            }
+            ma = ma.saturating_sub(PPS_CURRENT_UNIT_MA).max(PPS_MIN_MA);
         }
     }
 }
