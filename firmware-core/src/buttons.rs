@@ -59,14 +59,11 @@ pub const LEFT: u8 = 1 << 0;
 pub const RIGHT: u8 = 1 << 1;
 pub const OK: u8 = 1 << 2;
 pub const BACK: u8 = 1 << 3;
-const LEFT_RIGHT: u8 = LEFT | RIGHT;
 
 /// Button sampling period in milliseconds; the hold times below are counted
 /// in these samples.
 pub const POLL_MS: u32 = 10;
-/// Left and Right held together this long toggle the advanced pages.
-const CHORD_SAMPLES: u32 = 500 / POLL_MS;
-/// A long OK press (cable query on the advanced cable page).
+/// A long OK press (cable query on the cable page).
 const LONG_OK_SAMPLES: u32 = 500 / POLL_MS;
 /// A held Left or Right repeats after this delay, at this period.
 const REPEAT_DELAY_SAMPLES: u32 = 500 / POLL_MS;
@@ -80,7 +77,7 @@ const PPS_MA_REPEAT: i16 = 250;
 
 /// The screen and what its Left, Right and OK act on. Each page carries only
 /// its own state, so e.g. a PPS edit outside the PPS page cannot exist.
-/// Left/Right cycle the everyday pages; Back on the overview opens the
+/// Left/Right cycle the pages in `PAGES`; Back on the overview opens the
 /// settings.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Page {
@@ -93,9 +90,13 @@ pub enum Page {
     Pps(PpsFocus),
     /// Opened by Back on the overview.
     Settings(SettingsFocus),
-    /// Detailed information, opened by holding Left and Right together;
-    /// `detail` is the sub-page of the charger and cable pages.
-    Advanced { page: Advanced, detail: u32 },
+    /// A detail list shown from row `top`; while `scrolling` (OK), Left/Right
+    /// move it instead of changing pages.
+    Detail {
+        page: Detail,
+        top: u16,
+        scrolling: bool,
+    },
 }
 
 /// What Left/Right change on the PPS page.
@@ -135,15 +136,15 @@ impl SettingsFocus {
     }
 }
 
-/// Detailed information pages, in OK order.
+/// Detail pages, in Left/Right order after the selectors.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Advanced {
+pub enum Detail {
     /// PD session state.
     #[default]
     Pd,
-    /// What the charger said about itself, on sub-pages.
+    /// What the charger said about itself.
     Charger,
-    /// Cable E-marker details, on sub-pages.
+    /// Cable E-marker details.
     Cable,
     /// GPIO port levels and frame timing.
     Ports,
@@ -151,19 +152,19 @@ pub enum Advanced {
     Irq,
 }
 
-/// The everyday pages as Left/Right enter them.
-const EVERYDAY: [Page; 3] = [
+/// The pages as Left/Right enter them.
+const PAGES: [Page; 8] = [
     Page::Overview,
     Page::Fixed { choosing: false },
     Page::Pps(PpsFocus::Browse),
+    Page::detail(Detail::Pd),
+    Page::detail(Detail::Charger),
+    Page::detail(Detail::Cable),
+    Page::detail(Detail::Ports),
+    Page::detail(Detail::Irq),
 ];
-const ADVANCED: [Advanced; 5] = [
-    Advanced::Pd,
-    Advanced::Charger,
-    Advanced::Cable,
-    Advanced::Ports,
-    Advanced::Irq,
-];
+/// Index of the first detail page in `PAGES`.
+const FIRST_DETAIL: usize = 3;
 
 /// `items[index ± 1]`, wrapping.
 fn cycle<T: Copy>(items: &[T], index: usize, forward: bool) -> T {
@@ -176,39 +177,45 @@ fn cycle<T: Copy>(items: &[T], index: usize, forward: bool) -> T {
 }
 
 impl Page {
-    /// An advanced page at its first sub-page.
-    pub const fn advanced(page: Advanced) -> Self {
-        Self::Advanced { page, detail: 0 }
+    /// A detail page at the top of its list, not scrolling.
+    pub const fn detail(page: Detail) -> Self {
+        Self::Detail {
+            page,
+            top: 0,
+            scrolling: false,
+        }
     }
 
-    /// Index into `EVERYDAY`.
-    fn everyday(self) -> Option<usize> {
+    /// Index into `PAGES`; `None` for the settings page, which is outside
+    /// the cycle.
+    fn index(self) -> Option<usize> {
         match self {
             Self::Overview => Some(0),
             Self::Fixed { .. } => Some(1),
             Self::Pps(_) => Some(2),
-            Self::Settings(_) | Self::Advanced { .. } => None,
+            Self::Detail { page, .. } => Some(FIRST_DETAIL + page as usize),
+            Self::Settings(_) => None,
         }
     }
 
-    /// One-based position in its group (everyday or advanced) and the group
-    /// size; `None` for the settings page, which is outside both.
+    /// One-based position in the page cycle and the cycle length; `None` for
+    /// the settings page.
     pub fn position(self) -> Option<(u8, u8)> {
-        let (index, count) = match self {
-            Self::Advanced { page, .. } => (page as usize, ADVANCED.len()),
-            page => (page.everyday()?, EVERYDAY.len()),
-        };
-        Some((index as u8 + 1, count as u8))
+        Some((self.index()? as u8 + 1, PAGES.len() as u8))
     }
 
-    /// Left/Right change a value here, rather than moving between pages or
-    /// rows.
+    /// Left/Right change a value or scroll here, rather than moving between
+    /// pages or rows.
     pub fn editing(self) -> bool {
         matches!(
             self,
             Self::Fixed { choosing: true }
                 | Self::Pps(PpsFocus::Voltage | PpsFocus::Current)
                 | Self::Settings(SettingsFocus::Brightness | SettingsFocus::Rotation)
+                | Self::Detail {
+                    scrolling: true,
+                    ..
+                }
         )
     }
 }
@@ -245,23 +252,24 @@ pub struct Input {
 /// Navigation and settings, owned by the input task rather than the renderer,
 /// so a render backlog never loses taps.
 ///
-/// Left and Right act when released, so a press that becomes a Left+Right
-/// chord does nothing else; OK acts when released unless it was held long.
+/// Left and Right act when released, unless the press already repeated; OK
+/// acts when released unless it was held long.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Navigation {
     debounce: Debounced,
     input: Input,
-    /// Both Left and Right were down during the current press.
-    chord: bool,
     /// The current Left/Right press already repeated.
     repeated: bool,
-    /// Samples the current Left/Right press (or chord) has been held.
+    /// Samples the current Left/Right press has been held.
     held: u32,
     /// Samples OK has been held, and whether that hold already acted.
     ok_held: u32,
     ok_long: bool,
     /// A sink session runs, so the PD and PPS pages can select.
     selectable: bool,
+    /// Last row the shown detail list can start at, as the renderer laid it
+    /// out.
+    list_end: u16,
 }
 
 impl Navigation {
@@ -278,7 +286,16 @@ impl Navigation {
     pub fn set_selectable(&mut self, selectable: bool) {
         self.selectable = selectable;
         if !selectable && matches!(self.input.page, Page::Fixed { .. } | Page::Pps(_)) {
-            self.input.page = EVERYDAY[self.input.page.everyday().unwrap_or(0)];
+            self.input.page = PAGES[self.input.page.index().unwrap_or(0)];
+        }
+    }
+
+    /// The last row the shown detail list can start at; a list that got
+    /// shorter scrolls back.
+    pub fn set_list_end(&mut self, end: u16) {
+        self.list_end = end;
+        if let Page::Detail { top, .. } = &mut self.input.page {
+            *top = (*top).min(end);
         }
     }
 
@@ -291,38 +308,32 @@ impl Navigation {
         self.input.pressed = after;
         let mut command = None;
 
-        // A lone Left/Right press steps when released, unless it repeated.
-        if !self.chord && !self.repeated {
+        // A Left/Right press steps when released, unless it repeated.
+        if !self.repeated {
             if falling & LEFT != 0 {
                 command = self.step(false, false);
             } else if falling & RIGHT != 0 {
                 command = self.step(true, false);
             }
         }
-        let left_right = after & LEFT_RIGHT;
-        if left_right == LEFT_RIGHT {
-            if !self.chord {
-                self.chord = true;
-                self.held = 0;
-            }
-            self.held += 1;
-            if self.held == CHORD_SAMPLES {
-                self.toggle_advanced();
-            }
-        } else if left_right != 0 && !self.chord {
+        let left_right = after & (LEFT | RIGHT);
+        if left_right == LEFT || left_right == RIGHT {
             self.held += 1;
             if self.held >= REPEAT_DELAY_SAMPLES
                 && (self.held - REPEAT_DELAY_SAMPLES).is_multiple_of(REPEAT_SAMPLES)
                 && matches!(
                     self.input.page,
                     Page::Pps(PpsFocus::Voltage | PpsFocus::Current)
+                        | Page::Detail {
+                            scrolling: true,
+                            ..
+                        }
                 )
             {
                 self.repeated = true;
                 command = self.step(left_right == RIGHT, true);
             }
         } else if left_right == 0 {
-            self.chord = false;
             self.repeated = false;
             self.held = 0;
         }
@@ -332,8 +343,8 @@ impl Navigation {
             if self.ok_held == LONG_OK_SAMPLES
                 && matches!(
                     self.input.page,
-                    Page::Advanced {
-                        page: Advanced::Cable,
+                    Page::Detail {
+                        page: Detail::Cable,
                         ..
                     }
                 )
@@ -354,13 +365,6 @@ impl Navigation {
         (self.input, command)
     }
 
-    fn toggle_advanced(&mut self) {
-        self.input.page = match self.input.page {
-            Page::Advanced { .. } => Page::Overview,
-            _ => Page::advanced(Advanced::default()),
-        };
-    }
-
     fn back(&mut self) {
         let page = &mut self.input.page;
         *page = match *page {
@@ -370,6 +374,15 @@ impl Navigation {
             Page::Settings(focus @ (SettingsFocus::Brightness | SettingsFocus::Rotation)) => {
                 Page::Settings(SettingsFocus::Row(focus.row()))
             }
+            Page::Detail {
+                page,
+                top,
+                scrolling: true,
+            } => Page::Detail {
+                page,
+                top,
+                scrolling: false,
+            },
             _ => Page::Overview,
         };
     }
@@ -379,11 +392,15 @@ impl Navigation {
         let sign = if forward { 1 } else { -1 };
         let input = &mut self.input;
         match &mut input.page {
-            Page::Advanced { detail, .. } => {
-                *detail = if forward {
-                    detail.wrapping_add(1) & 0x00ff_ffff
+            Page::Detail {
+                top,
+                scrolling: true,
+                ..
+            } => {
+                *top = if forward {
+                    top.saturating_add(1).min(self.list_end)
                 } else {
-                    detail.saturating_sub(1)
+                    top.saturating_sub(1)
                 };
             }
             Page::Settings(SettingsFocus::Row(item)) => {
@@ -402,8 +419,8 @@ impl Navigation {
                 return Some(PdCommand::PpsCurrent(sign * step));
             }
             page => {
-                let index = page.everyday().unwrap_or(0);
-                *page = cycle(&EVERYDAY, index, forward);
+                let index = page.index().unwrap_or(0);
+                *page = cycle(&PAGES, index, forward);
             }
         }
         None
@@ -412,9 +429,18 @@ impl Navigation {
     fn ok(&mut self) -> Option<PdCommand> {
         let input = &mut self.input;
         let (page, command) = match input.page {
-            Page::Advanced { page, .. } => {
-                (Page::advanced(cycle(&ADVANCED, page as usize, true)), None)
-            }
+            Page::Detail {
+                page,
+                top,
+                scrolling,
+            } => (
+                Page::Detail {
+                    page,
+                    top,
+                    scrolling: !scrolling,
+                },
+                None,
+            ),
             page @ (Page::Fixed { choosing: false } | Page::Pps(PpsFocus::Browse))
                 if !self.selectable =>
             {

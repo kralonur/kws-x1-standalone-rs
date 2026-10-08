@@ -42,7 +42,7 @@ use bus::{
     ASYNC_READS, BUS_LATCH, I2C_ERRORS, I2C_FAULT_STEP, I2C_IRQ_COUNT, I2C_LAST_CR1, I2C_LAST_CR4,
     I2C_LAST_SR, I2C3, bus_failed, read_meter, write_meter, write_sensor,
 };
-use button_logic::{Advanced, Page};
+use button_logic::{Detail, Page};
 use embassy_time::{Instant, Timer};
 use embedded_graphics::pixelcolor::{Rgb565, RgbColor};
 use firmware_core::buttons as button_logic;
@@ -51,7 +51,7 @@ use hc32f460_pac::interrupt;
 use panel::Orientation;
 #[cfg(not(any(feature = "pd-boot-diagnostic", feature = "cable-log")))]
 use panic_halt as _;
-use render::{Canvas, Counters, Frame, clear_screen, render_irq_test, render_ports};
+use render::{Canvas, Counters, Frame};
 
 /// Return addresses the walk accepts: the application image after its initial
 /// stack pointer word, up to the end of the flash tool's application erase
@@ -155,6 +155,9 @@ static BUTTON_STATE: Watch<CriticalSectionRawMutex, button_logic::Input, 1> = Wa
 /// PD requests from `button_task` (profile previews, confirmations, the cable
 /// query), applied by the PD session in order.
 static PD_COMMANDS: Channel<CriticalSectionRawMutex, button_logic::PdCommand, 8> = Channel::new();
+/// How the renderer laid out the shown detail list: `button_task` limits
+/// scrolling to it and the PD trial reads the cable section in view.
+static DETAIL_VIEW: Watch<CriticalSectionRawMutex, (Detail, ui::ListView), 1> = Watch::new();
 // One bitmap, outside both observations and async futures.
 static CABLE_SVIDS: embassy_sync::blocking_mutex::Mutex<
     embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
@@ -504,7 +507,7 @@ async fn button_task(
     #[cfg(not(feature = "cable-log"))]
     let fatal = false;
     let mut navigation = if cfg!(feature = "pd-boot-diagnostic") || fatal {
-        button_logic::Navigation::new(Page::advanced(Advanced::Pd), saved)
+        button_logic::Navigation::new(Page::detail(Detail::Pd), saved)
     } else {
         button_logic::Navigation::new(Page::Overview, saved)
     };
@@ -523,6 +526,9 @@ async fn button_task(
         // Selecting needs a sink session that has received the charger's offer.
         let observation = latest_observation();
         navigation.set_selectable(observation.spr.is_some() && observation.capabilities.is_some());
+        if let Some((_, view)) = DETAIL_VIEW.try_get() {
+            navigation.set_list_end(view.end);
+        }
         let (input, command) = navigation.update(raw);
         // Save once a value is no longer being changed.
         if !input.page.editing() {
@@ -541,8 +547,9 @@ async fn button_task(
         Timer::after_millis(u64::from(button_logic::POLL_MS)).await;
     }
 }
-#[inline(never)]
-unsafe fn render_pd(framebuffer: *mut u16, raw_vbus: Option<u16>, cable_detail: Option<u32>) {
+/// The latest observation as the detail pages show it, with the live bus
+/// voltage and, in the logging builds, the previous boot's record.
+fn detail_observation(raw_vbus: Option<u16>) -> pd::Observation {
     let mut observation = latest_observation();
     #[cfg(feature = "pd-boot-diagnostic")]
     {
@@ -564,26 +571,7 @@ unsafe fn render_pd(framebuffer: *mut u16, raw_vbus: Option<u16>, cable_detail: 
             .filter(|_| !bus_failed())
             .map(|raw| ina226::bus_millivolts(raw).min(u16::MAX as u32) as u16);
     }
-    unsafe {
-        clear_screen(framebuffer);
-        // This task is the sole framebuffer owner; other tasks publish values.
-        if let Some(page) = cable_detail {
-            let svid = pd::cable_svid_index(observation, page)
-                .and_then(|index| firmware_core::pd_svids::Store::at(&CABLE_SVID_STORE, index));
-            pd::paint_cable(&mut *(framebuffer as *mut Frame), observation, page, svid);
-        } else {
-            pd::paint(&mut *(framebuffer as *mut Frame), observation);
-        }
-    }
-}
-
-/// Charger info page (`pd::partner_lines`); `page` selects the sub-page.
-unsafe fn render_partner(framebuffer: *mut u16, page: u32) {
-    let observation = latest_observation();
-    unsafe {
-        clear_screen(framebuffer);
-        pd::paint_partner(&mut *(framebuffer as *mut Frame), observation, page);
-    }
+    observation
 }
 
 /// Meter page values from the latest raw INA226 registers; `None` until both
@@ -632,6 +620,7 @@ async fn meter_task(mut backlight: embassy_hc32::pwm::TimerA4Pwm) {
     let mut last_secs = u32::MAX;
     let mut last_pulse = None;
     let mut ports = [0u16; 6];
+    let detail_sender = DETAIL_VIEW.sender();
 
     loop {
         let now = Instant::now();
@@ -683,7 +672,13 @@ async fn meter_task(mut backlight: embassy_hc32::pwm::TimerA4Pwm) {
         // Pages showing live values read the meter; the PD details page reads
         // only the bus voltage, as before.
         let reads_current = matches!(page, Page::Overview | Page::Fixed { .. } | Page::Pps(_));
-        let pd_details = page == Page::advanced(Advanced::Pd);
+        let pd_details = matches!(
+            page,
+            Page::Detail {
+                page: Detail::Pd,
+                ..
+            }
+        );
         if (reads_current || pd_details) && now >= next_read {
             next_read = now + METER_READ_PERIOD;
             if let Some(v) = read_meter(ina226::BUS_VOLTAGE).await {
@@ -777,15 +772,65 @@ async fn meter_task(mut backlight: embassy_hc32::pwm::TimerA4Pwm) {
                         focus,
                     );
                 }
-                Page::Advanced {
-                    page: Advanced::Irq,
-                    ..
+                Page::Detail {
+                    page: detail,
+                    top,
+                    scrolling,
                 } => {
-                    let (stack_peak, stack_size) = stack_use();
-                    unsafe {
-                        render_irq_test(
-                            fb,
-                            Counters {
+                    render::clear(frame);
+                    let observation = detail_observation(last_raw_v);
+                    let canvas = &mut Canvas(frame);
+                    let position = page.position();
+                    let view = match detail {
+                        Detail::Pd => ui::draw_detail(
+                            canvas,
+                            detail,
+                            position,
+                            core::iter::once(pd::lines(observation))
+                                .chain(pd::caps_lines(observation)),
+                            top,
+                            scrolling,
+                        ),
+                        Detail::Charger => ui::draw_detail(
+                            canvas,
+                            detail,
+                            position,
+                            (0..pd::partner_sections(observation))
+                                .map(|section| pd::partner_lines(observation, section)),
+                            top,
+                            scrolling,
+                        ),
+                        Detail::Cable => ui::draw_detail(
+                            canvas,
+                            detail,
+                            position,
+                            (0..pd::cable_sections(observation)).map(|section| {
+                                let svid =
+                                    pd::cable_svid_index(observation, section).and_then(|index| {
+                                        firmware_core::pd_svids::Store::at(&CABLE_SVID_STORE, index)
+                                    });
+                                pd::cable_lines(observation, section, svid)
+                            }),
+                            top,
+                            scrolling,
+                        ),
+                        Detail::Ports => {
+                            let names = [Port::A, Port::B, Port::C, Port::D, Port::E, Port::H];
+                            for (levels, port) in ports.iter_mut().zip(names) {
+                                *levels = gpio::read_port(port);
+                            }
+                            ui::draw_detail(
+                                canvas,
+                                detail,
+                                position,
+                                core::iter::once(render::ports_lines(&ports)),
+                                top,
+                                scrolling,
+                            )
+                        }
+                        Detail::Irq => {
+                            let (stack_peak, stack_size) = stack_use();
+                            let counters = Counters {
                                 step: I2C_FAULT_STEP.load(Ordering::Relaxed),
                                 sr: I2C_LAST_SR.load(Ordering::Relaxed),
                                 cr1: I2C_LAST_CR1.load(Ordering::Relaxed),
@@ -795,37 +840,22 @@ async fn meter_task(mut backlight: embassy_hc32::pwm::TimerA4Pwm) {
                                 reg_failures: IRQ_REG_FAILURES.load(Ordering::Relaxed),
                                 errors: I2C_ERRORS.load(Ordering::Relaxed),
                                 reads: ASYNC_READS.load(Ordering::Relaxed),
-                            },
-                            bus_failed(),
-                        );
-                    }
-                }
-                Page::Advanced {
-                    page: page @ (Advanced::Pd | Advanced::Cable),
-                    detail,
-                } => {
-                    let detail = (page == Advanced::Cable).then_some(detail);
-                    unsafe {
-                        render_pd(fb, last_raw_v, detail);
-                    }
-                }
-                Page::Advanced {
-                    page: Advanced::Charger,
-                    detail,
-                } => unsafe {
-                    render_partner(fb, detail);
-                },
-                Page::Advanced {
-                    page: Advanced::Ports,
-                    ..
-                } => {
-                    for (i, p) in ports.iter_mut().enumerate() {
-                        let port = [Port::A, Port::B, Port::C, Port::D, Port::E, Port::H];
-                        *p = gpio::read_port(port[i]);
-                    }
-                    unsafe {
-                        render_ports(fb, &ports);
-                    }
+                            };
+                            ui::draw_detail(
+                                canvas,
+                                detail,
+                                position,
+                                core::iter::once(render::irq_lines(counters, bus_failed())),
+                                top,
+                                scrolling,
+                            )
+                        }
+                    };
+                    detail_sender.send_if_modified(|current| {
+                        let changed = *current != Some((detail, view));
+                        *current = Some((detail, view));
+                        changed
+                    });
                 }
             }
             let frame_start = Instant::now();

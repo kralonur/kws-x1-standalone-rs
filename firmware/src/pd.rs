@@ -2,8 +2,8 @@
 mod cable;
 mod partner;
 
-pub use cable::{cable_svid_index, control_cable_selection, paint_cable};
-pub use partner::paint_partner;
+pub use cable::{cable_lines, cable_sections, cable_svid_index, control_cable_selection};
+pub use partner::{partner_lines, partner_sections};
 
 use firmware_core::pd_cable::CableStatus;
 use firmware_core::pd_sniff::Supply;
@@ -569,7 +569,6 @@ fn sniff_lines(sniff: SniffObservation) -> [[u8; 24]; 8] {
                 },
             );
         }
-        put(&mut rows[7], b"NEXT PAGE: CAPS");
         return rows;
     }
     for (row, entry) in rows[1..].iter_mut().zip(sniff.log.entries()) {
@@ -578,7 +577,11 @@ fn sniff_lines(sniff: SniffObservation) -> [[u8; 24]; 8] {
     rows
 }
 
-/// Passthrough detail page: the latest advertised Source_Capabilities.
+/// Passthrough: the latest advertised Source_Capabilities, after `lines`.
+pub fn caps_lines(observation: Observation) -> Option<[[u8; 24]; 8]> {
+    observation.sniff.map(sniff_caps_lines)
+}
+
 fn sniff_caps_lines(sniff: SniffObservation) -> [[u8; 24]; 8] {
     use firmware_core::pd_sniff::{Row, describe_pdo};
     let mut rows = [[b' '; 24]; 8];
@@ -794,13 +797,13 @@ fn spr_lines(observation: Observation, spr: SprObservation) -> [[u8; 24]; 8] {
     }
     if observation.phase == Phase::Negotiating && spr.psrdy_seen {
         rows[6] = [b' '; 24];
-        put(&mut rows[6], b"HOLD PB2 PB10 TO STOP");
+        put(&mut rows[6], b"HOLD BACK TO STOP");
     }
     if observation.phase == Phase::Negotiating
         && let Some(mv) = spr.selected_mv
     {
         rows[6] = [b' '; 24];
-        put(&mut rows[6], b"SEL:--V PB2 NEXT PB10 OK");
+        put(&mut rows[6], b"SEL:--V");
         decimal_voltage(&mut rows[6], 4, mv);
         if spr.selected_pps {
             rows[6].fill(b' ');
@@ -825,7 +828,6 @@ fn spr_lines(observation: Observation, spr: SprObservation) -> [[u8; 24]; 8] {
         } else if let Some(report) = spr.cable_report {
             rows[5].fill(b' ');
             rows[6].fill(b' ');
-            put(&mut rows[6], b"PB2 NEXT PB10 OK");
             match report.status {
                 CableStatus::Identity => {
                     let decoded = (report.count <= 7).then(|| {
@@ -1008,24 +1010,6 @@ fn decimal2(row: &mut [u8; 24], start: usize, milli: u16) {
     row[start + 1] = b'0' + ((milli / 1000) % 10) as u8;
     row[start + 3] = b'0' + ((milli / 100) % 10) as u8;
     row[start + 4] = b'0' + ((milli / 10) % 10) as u8;
-}
-
-/// Paint the PD rows into the caller-owned, already-cleared frame: eight
-/// 16 px rows fit the 135 px panel.
-pub fn paint(framebuffer: &mut crate::render::Frame, observation: Observation) {
-    paint_lines(framebuffer, lines(observation));
-}
-
-fn paint_lines(framebuffer: &mut crate::render::Frame, rows: [[u8; 24]; 8]) {
-    for (line_index, line) in rows.iter().enumerate() {
-        crate::render::draw_text(
-            framebuffer,
-            &crate::render::SMALL_FONT,
-            12,
-            6 + line_index * 16,
-            line,
-        );
-    }
 }
 
 fn put(row: &mut [u8; 24], text: &[u8]) {

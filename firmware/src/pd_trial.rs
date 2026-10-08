@@ -133,15 +133,18 @@ fn input() -> firmware_core::buttons::Input {
     crate::BUTTON_STATE.try_get().unwrap_or_default()
 }
 
+/// The cable list section at the top of the screen, while it is shown.
 fn detail_page() -> Option<u32> {
-    use firmware_core::buttons::{Advanced, Page};
-    match input().page {
-        Page::Advanced {
-            page: Advanced::Cable,
-            detail,
-        } => Some(detail),
-        _ => None,
-    }
+    use firmware_core::buttons::{Detail, Page};
+    let shown = matches!(
+        input().page,
+        Page::Detail {
+            page: Detail::Cable,
+            ..
+        }
+    );
+    let (page, view) = crate::DETAIL_VIEW.try_get()?;
+    (shown && page == Detail::Cable).then_some(u32::from(view.section))
 }
 
 fn control(

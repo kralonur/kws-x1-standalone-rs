@@ -1,5 +1,5 @@
-//! Graphical pages: overview, PD profile and PPS selectors and settings,
-//! drawn with `embedded-graphics` primitives and `u8g2-fonts` text on any
+//! Graphical pages: overview, PD profile and PPS selectors, settings and
+//! the scrolling detail lists, drawn with `embedded-graphics` primitives and `u8g2-fonts` text on any
 //! RGB565 target. The renderer gathers the values; nothing here touches
 //! hardware.
 
@@ -9,7 +9,7 @@ use embedded_graphics::primitives::{
     Circle, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle, RoundedRectangle, StyledDrawable,
     Triangle,
 };
-use firmware_core::buttons::{PpsFocus, SettingsFocus};
+use firmware_core::buttons::{Detail, PpsFocus, SettingsFocus};
 use firmware_core::settings::{BRIGHTNESS_PERCENT, Item, Rotation, Settings};
 use u8g2_fonts::FontRenderer;
 use u8g2_fonts::fonts;
@@ -991,4 +991,104 @@ fn brightness_bars<D: DrawTarget<Color = Rgb565>>(
             color,
         );
     }
+}
+
+/// One section of a detail list: up to eight rows of 24 characters; row 0
+/// is the section heading, and blank rows are left out.
+pub type Lines = [[u8; 24]; 8];
+
+/// How a detail list was laid out, for the input and PD tasks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ListView {
+    /// Last row the list can start at.
+    pub end: u16,
+    /// Section of the row at the top of the screen.
+    pub section: u16,
+}
+
+/// Detail list rows on screen, their pitch and the first baseline (below
+/// the header rule).
+const LIST_ROWS: u16 = 8;
+const LIST_PITCH: i32 = 12;
+const LIST_BASELINE: i32 = 34;
+/// Scrollbar track along the right edge.
+const SCROLL_TRACK: Rectangle = Rectangle::new(Point::new(RIGHT + 1, 25), Size::new(3, 94));
+
+/// A detail page: the non-blank rows of `sections` from row `top`, with a
+/// scrollbar lit while `scrolling`.
+pub fn draw_detail<D: DrawTarget<Color = Rgb565>>(
+    target: &mut D,
+    page: Detail,
+    position: Option<(u8, u8)>,
+    sections: impl IntoIterator<Item = Lines>,
+    top: u16,
+    scrolling: bool,
+) -> ListView {
+    let (title, accent) = match page {
+        Detail::Pd => ("PD SESSION", GREEN),
+        Detail::Charger => ("CHARGER", ORANGE),
+        Detail::Cable => ("CABLE", CYAN),
+        Detail::Ports => ("PORTS", MAGENTA),
+        Detail::Irq => ("SYSTEM", YELLOW),
+    };
+    draw_header(target, &Header { title, position }, accent);
+    let mut rows = 0u16;
+    let mut view = ListView::default();
+    for (section, lines) in sections.into_iter().enumerate() {
+        for (index, line) in lines.iter().enumerate() {
+            let mut printable = [b' '; 24];
+            for (cell, &byte) in printable.iter_mut().zip(line) {
+                if byte.is_ascii_graphic() {
+                    *cell = byte;
+                }
+            }
+            let content = core::str::from_utf8(&printable).unwrap_or("").trim_end();
+            if content.is_empty() {
+                continue;
+            }
+            if rows <= top {
+                view.section = section as u16;
+            }
+            if let Some(slot) = rows.checked_sub(top).filter(|slot| *slot < LIST_ROWS) {
+                let (x, color) = if index == 0 {
+                    (LEFT, accent)
+                } else {
+                    (LEFT + 6, WHITE)
+                };
+                text(
+                    target,
+                    &PLAIN,
+                    content,
+                    Point::new(x, LIST_BASELINE + LIST_PITCH * i32::from(slot)),
+                    HorizontalAlignment::Left,
+                    color,
+                );
+            }
+            rows = rows.saturating_add(1);
+        }
+    }
+    view.end = rows.saturating_sub(LIST_ROWS);
+    if view.end > 0 {
+        fill(target, SCROLL_TRACK, RULE);
+        let track = SCROLL_TRACK.size.height;
+        let thumb = (track * u32::from(LIST_ROWS) / u32::from(rows)).max(8);
+        let offset = (track - thumb) * u32::from(top.min(view.end)) / u32::from(view.end);
+        fill(
+            target,
+            Rectangle::new(
+                SCROLL_TRACK.top_left + Point::new(0, offset as i32),
+                Size::new(SCROLL_TRACK.size.width, thumb),
+            ),
+            if scrolling { accent } else { MUTED },
+        );
+    }
+    hint(
+        target,
+        match (scrolling, view.end > 0) {
+            (true, _) => "< > scroll    OK done",
+            (false, true) => "OK scroll    < > pages",
+            (false, false) => "< > pages    BACK home",
+        },
+    );
+    view
 }

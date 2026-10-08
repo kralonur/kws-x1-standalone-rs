@@ -1,14 +1,21 @@
 //! Cable page: the cable identity, SVIDs and modes, and the SVID selection.
 
-use super::{CableStatus, Observation, Phase, hex, paint_lines, put, sniff_caps_lines};
+use super::{CableStatus, Observation, Phase, hex, put};
 
-pub fn paint_cable(
-    framebuffer: &mut crate::render::Frame,
-    observation: Observation,
-    page: u32,
-    svid: Option<u16>,
-) {
-    paint_lines(framebuffer, cable_lines(observation, page, svid));
+/// Sections of the cable list: identity fields six per section, the latest
+/// SVID reply in two, two per SVID for its modes, then manufacturer info and
+/// both cable statuses; one section while there is no identity.
+pub fn cable_sections(observation: Observation) -> u32 {
+    let Some(spr) = observation.spr.filter(|_| observation.sniff.is_none()) else {
+        return 1;
+    };
+    let Some(report) = spr.cable_report else {
+        return 1;
+    };
+    match firmware_core::pd_cable_details::field_count(&report) {
+        0 => 1,
+        fields => (fields.div_ceil(6) + 2 + spr.cable_modes.count as usize * 2 + 3) as u32,
+    }
 }
 
 /// Selected SVID's ascending-set index; no bitmap is copied into observations.
@@ -58,22 +65,24 @@ pub fn cable_svid_index(observation: Observation, page: u32) -> Option<u16> {
     }
     let start = fields.div_ceil(6) + 2;
     let end = start + spr.cable_modes.count as usize * 2;
-    let page = page as usize % (end + 3);
+    let page = page as usize;
     (start..end)
         .contains(&page)
         .then(|| ((page - start) / 2) as u16)
 }
 
-/// Raw identity, latest SVID reply and selected mode, plus decoded identity fields.
-/// Encoded values use hexadecimal; they are claims, not electrical measurements.
+/// Section `page` of [`cable_sections`]: raw identity, latest SVID reply and
+/// selected mode, plus decoded identity fields. Encoded values use
+/// hexadecimal; they are claims, not electrical measurements. A section that
+/// continues the previous one has no heading.
 pub fn cable_lines(observation: Observation, page: u32, svid: Option<u16>) -> [[u8; 24]; 8] {
     use firmware_core::{pd_cable_details, pd_cable_modes::Status};
-    if let Some(sniff) = observation.sniff {
-        return sniff_caps_lines(sniff);
-    }
     let mut rows = [[b' '; 24]; 8];
     put(&mut rows[0], b"E-MARKER DETAILS");
-    put(&mut rows[7], b"PB2 NEXT PB10 PREV HEX");
+    if observation.sniff.is_some() {
+        put(&mut rows[1], b"PASSTHROUGH: NOT ASKED");
+        return rows;
+    }
     let Some(spr) = observation.spr else {
         put(&mut rows[1], b"NO DISCOVERY YET");
         return rows;
@@ -86,7 +95,7 @@ pub fn cable_lines(observation: Observation, page: u32, svid: Option<u16>) -> [[
             } else if spr.cable_active {
                 b"DISCOVERY IN PROGRESS"
             } else {
-                b"HOLD PB10 ON PD 5V PAGE"
+                b"HOLD OK AT FIXED 5V"
             },
         );
         return rows;
@@ -106,10 +115,11 @@ pub fn cable_lines(observation: Observation, page: u32, svid: Option<u16>) -> [[
     let discovery = spr.cable_modes;
     let svid_pages = 2; // latest raw reply, not a transcript of every list packet
     let extended_start = identity_pages + svid_pages + discovery.count as usize * 2;
-    let page = page as usize % (extended_start + 3);
-    hex(&mut rows[0], 16, ((page + 1) >> 16) as u16);
-    hex(&mut rows[0], 20, (page + 1) as u16);
+    let page = page as usize;
     if page < identity_pages {
+        if page > 0 {
+            rows[0].fill(b' ');
+        }
         for row in 0..6 {
             if let Some(field) = pd_cable_details::field(&report, page * 6 + row) {
                 let name = field.name.as_bytes();
@@ -200,9 +210,12 @@ pub fn cable_lines(observation: Observation, page: u32, svid: Option<u16>) -> [[
         }
     } else {
         let page = page - identity_pages;
+        rows[0].fill(b' ');
         let (status, objects, count, offset) = if page < svid_pages {
-            put(&mut rows[0], b"LAST SVID REPLY");
-            hex(&mut rows[0], 20, discovery.count);
+            if page == 0 {
+                put(&mut rows[0], b"LAST SVID REPLY");
+                hex(&mut rows[0], 20, discovery.count);
+            }
             (
                 discovery.status,
                 discovery.svid_objects.as_slice(),
@@ -211,7 +224,9 @@ pub fn cable_lines(observation: Observation, page: u32, svid: Option<u16>) -> [[
             )
         } else {
             let mode = &discovery.mode;
-            if let Some(svid) = svid {
+            if page % 2 == 1 {
+                // Continues the previous section.
+            } else if let Some(svid) = svid {
                 put(&mut rows[0], b"SVID:---- MODES SORTED");
                 hex(&mut rows[0], 5, svid);
             } else {
@@ -230,8 +245,12 @@ pub fn cable_lines(observation: Observation, page: u32, svid: Option<u16>) -> [[
                 ((page - svid_pages) % 2) * 5,
             )
         };
-        put(&mut rows[1], status_caption(status));
-        if page >= svid_pages && status == Status::NotQueried {
+        // Every list takes two sections; the second continues the words.
+        let first = page.is_multiple_of(2);
+        if first {
+            put(&mut rows[1], status_caption(status));
+        }
+        if first && page >= svid_pages && status == Status::NotQueried {
             put(
                 &mut rows[1],
                 if discovery.status != Status::Ack {

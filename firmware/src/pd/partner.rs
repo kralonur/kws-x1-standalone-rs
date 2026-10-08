@@ -1,17 +1,32 @@
 //! Charger page: what the Source said about itself.
 
-use super::{Observation, decimal3, decimal4, hex, hex8, paint_lines, put};
+use super::{Observation, decimal3, decimal4, hex, hex8, put};
 
-/// Charger page: what the Source said about itself in reply to the
-/// information requests (`pd_partner`), on three sub-pages (PB2/PB10). These
-/// are the Source's claims, not measurements.
+/// Sections of the charger list: three with a PD session, else one.
+pub fn partner_sections(observation: Observation) -> u32 {
+    if observation.spr.is_some() && observation.sniff.is_none() {
+        3
+    } else {
+        1
+    }
+}
+
+/// Section `page` of [`partner_sections`]: what the Source said about itself
+/// in reply to the information requests (`pd_partner`). These are the
+/// Source's claims, not measurements.
 pub fn partner_lines(observation: Observation, page: u32) -> [[u8; 24]; 8] {
     use firmware_core::pd_partner::Answer;
     let mut rows = [[b' '; 24]; 8];
     let sub = page % 3;
     let second = sub == 1;
-    put(&mut rows[0], b"CHARGER INFO        -/3");
-    rows[0][20] = b'1' + sub as u8;
+    put(
+        &mut rows[0],
+        match sub {
+            0 => b"IDENTITY",
+            1 => b"PEAKS AND MAKER",
+            _ => b"POWER STATUS",
+        },
+    );
     let Some(spr) = observation.spr.filter(|_| observation.sniff.is_none()) else {
         put(&mut rows[1], b"NO PD SESSION");
         return rows;
@@ -171,7 +186,7 @@ fn answer_caption<T>(answer: &firmware_core::pd_partner::Answer<T>) -> &'static 
     }
 }
 
-/// Third charger sub-page: Source_Info and the latest Status.
+/// Third charger section: Source_Info and the latest Status.
 fn status_rows(
     mut rows: [[u8; 24]; 8],
     partner: firmware_core::pd_partner::PartnerInfo,
@@ -256,9 +271,4 @@ fn status_rows(
         }
     }
     rows
-}
-
-/// Paint the charger page (`partner_lines`).
-pub fn paint_partner(framebuffer: &mut crate::render::Frame, observation: Observation, page: u32) {
-    paint_lines(framebuffer, partner_lines(observation, page));
 }
