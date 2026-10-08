@@ -4,7 +4,10 @@
 use embassy_hc32::gpio::{AlternateMode, AlternatePin, Level, OutputPin, Port};
 use kws_x1_core::panel;
 
-const BUDGET: u32 = 200_000;
+/// Polls of the DMA channel state before the stop is treated as failed. The
+/// channel stops after its current read/write (RM 14.3.11), so this is a
+/// generous chosen bound, not a measured or specified time.
+const DMA_STOP_POLLS: u32 = 200_000;
 trait Bus {
     async fn idle(&mut self) -> bool;
     fn dc(&mut self, data: bool);
@@ -79,24 +82,31 @@ async fn delay(ms: u32) -> bool {
     true
 }
 
+/// PWC_FCG0 and its DMA2 bit: set while DMA2's function clock is stopped (RM 5.7.13).
+const PWC_FCG0: *const u32 = 0x4004_8000 as *const u32;
+const FCG0_DMA2_STOPPED: u32 = 1 << 15;
+/// DMA2 channel enable and channel state registers: base 0x4005_3400 plus
+/// 0x1c and 0x24 (RM 14.5).
+const DMA2_CHEN: *mut u32 = 0x4005_341c as *mut u32;
+const DMA2_CHSTAT: *const u32 = 0x4005_3424 as *const u32;
+/// CHEN[0] and CHSTAT CHACT[0]: channel 0 enabled and active (RM 14.5.8, 14.5.11).
+const CHEN0: u32 = 1 << 0;
+const CHACT0: u32 = 1 << 16;
+
 fn dma0_idle(enable: u32, status: u32) -> bool {
-    enable & 1 == 0 && status & (1 << 16) == 0
+    enable & CHEN0 == 0 && status & CHACT0 == 0
 }
 
-/// Stop only display DMA2 channel0 if its clock is already enabled. RM14.3.11
+/// Stop only display DMA2 channel0 if its clock is already enabled. RM 14.3.11
 /// says disabling terminates after the current read/write; wait for CHACT0 too.
 unsafe fn stop_display_dma() -> bool {
     unsafe {
-        if (0x40048000 as *const u32).read_volatile() & (1 << 15) != 0 {
+        if PWC_FCG0.read_volatile() & FCG0_DMA2_STOPPED != 0 {
             return true;
         }
-        let enable = 0x4005341c as *mut u32;
-        enable.write_volatile(enable.read_volatile() & !1);
-        for _ in 0..BUDGET {
-            if dma0_idle(
-                enable.read_volatile(),
-                (0x40053424 as *const u32).read_volatile(),
-            ) {
+        DMA2_CHEN.write_volatile(DMA2_CHEN.read_volatile() & !CHEN0);
+        for _ in 0..DMA_STOP_POLLS {
+            if dma0_idle(DMA2_CHEN.read_volatile(), DMA2_CHSTAT.read_volatile()) {
                 return true;
             }
         }
