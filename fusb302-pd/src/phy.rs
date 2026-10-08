@@ -835,6 +835,11 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         if self.reset.is_some() && !(soft_reset || reset_accept) {
             return Err(Error::Request);
         }
+        // One Request at a time: none while its Accept/Reject/Wait is awaited
+        // (PE_SNK_Select_Capability) or power transitions (PE_SNK_Transition_Sink).
+        if is_request && (self.request_reply || self.power_transition) {
+            return Err(Error::Request);
+        }
         let cable_optional = sop == Sop::Cable
             && self.cable_phase == CablePhase::Identity
             && (header >> 6) & 3 == 2
