@@ -143,7 +143,8 @@ static mut FRAMEBUFFER: core::mem::MaybeUninit<Frame> = core::mem::MaybeUninit::
 /// Incremented by `pulse_task` every [`PULSE_MS`].
 static PULSES: AtomicU32 = AtomicU32::new(0);
 /// Coherent input snapshot: buttons 0..3, main page 4..6, cable detail 8..31.
-static BUTTON_STATE: AtomicU32 = AtomicU32::new(0);
+/// `button_task` sends it when it changes; the renderer and PD trial read it.
+static BUTTON_STATE: Watch<CriticalSectionRawMutex, u32, 1> = Watch::new();
 // One bitmap, outside both observations and async futures.
 static CABLE_SVIDS: embassy_sync::blocking_mutex::Mutex<
     embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
@@ -482,6 +483,7 @@ async fn button_task(inputs: [InputPin; 4]) {
     } else {
         button_logic::Navigation::default()
     };
+    let input_sender = BUTTON_STATE.sender();
     let mut previous = Instant::now();
     loop {
         let now = Instant::now();
@@ -494,7 +496,11 @@ async fn button_task(inputs: [InputPin; 4]) {
             mask | (u8::from(pin.is_low()) << index)
         });
         let snapshot = u32::from(navigation.update(raw)) | (navigation.detail() << 8);
-        BUTTON_STATE.store(snapshot, Ordering::Relaxed);
+        input_sender.send_if_modified(|current| {
+            let changed = *current != Some(snapshot);
+            *current = Some(snapshot);
+            changed
+        });
         Timer::after_millis(BUTTON_POLL_MS).await;
     }
 }
@@ -554,7 +560,8 @@ unsafe fn render_partner(framebuffer: *mut u16, page: u32) {
 #[embassy_executor::task]
 async fn meter_task() {
     let fb = framebuffer();
-    let mut last_buttons = u32::MAX;
+    let mut input_updates = BUTTON_STATE.anon_receiver();
+    let mut buttons = 0;
     let mut dirty = true;
     // Last raw readings, `u16::MAX` until the first read; a changed reading
     // redraws the meter page.
@@ -581,12 +588,11 @@ async fn meter_task() {
         }
 
         // The input task owns debounce/navigation, independently of this frame.
-        let buttons = BUTTON_STATE.load(Ordering::Relaxed);
-        let page = ((buttons >> 4) & 7) as u8;
-        if buttons != last_buttons {
-            last_buttons = buttons;
+        if let Some(update) = input_updates.try_changed() {
+            buttons = update;
             dirty = true;
         }
+        let page = ((buttons >> 4) & 7) as u8;
 
         // `tilt_task` owns the orientation (it flipped and reconfigured the
         // sensor); this task only follows it for flushing and redraws.

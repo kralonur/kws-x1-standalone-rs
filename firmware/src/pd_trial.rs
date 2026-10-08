@@ -127,12 +127,18 @@ impl pd_spr_phy::GatedBus for SharedBus {
     }
 }
 
+/// Latest input snapshot from `button_task`; 0 (nothing pressed, meter page)
+/// until its first poll.
+fn input_snapshot() -> u32 {
+    crate::BUTTON_STATE.try_get().unwrap_or(0)
+}
+
 fn buttons() -> u8 {
-    crate::BUTTON_STATE.load(core::sync::atomic::Ordering::Relaxed) as u8
+    input_snapshot() as u8
 }
 
 fn detail_page() -> Option<u32> {
-    let snapshot = crate::BUTTON_STATE.load(core::sync::atomic::Ordering::Relaxed);
+    let snapshot = input_snapshot();
     ((snapshot >> 4) & 7 == 4).then_some(snapshot >> 8)
 }
 
@@ -146,7 +152,7 @@ fn control(
 }
 
 fn stop_requested() -> bool {
-    crate::BUTTON_STATE.load(core::sync::atomic::Ordering::Relaxed) & 3 == 3
+    input_snapshot() & 3 == 3
 }
 
 use firmware_core::pd_spr;
