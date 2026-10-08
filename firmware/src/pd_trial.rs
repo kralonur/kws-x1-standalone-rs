@@ -1,5 +1,6 @@
 //! Persistent female-port fixed-target SPR session; one bus lease per transaction.
-use crate::{BUS_LATCH, bus_failed, note_bus_failure, pd, pd_cc, pd_service, pd_spr_phy};
+use crate::bus::{BUS_LATCH, bus_failed, note_bus_failure};
+use crate::{pd, pd_cc, pd_service, pd_spr_phy};
 use embedded_hal_async::i2c::{ErrorType, I2c, Operation};
 
 struct SharedBus;
@@ -48,7 +49,7 @@ impl I2c for SharedBus {
         operations: &mut [Operation<'_>],
     ) -> Result<(), Self::Error> {
         let asked = embassy_time::Instant::now();
-        let mut guard = crate::I2C3.lock().await;
+        let mut guard = crate::bus::I2C3.lock().await;
         let locked = note_max(&LOCK_WAIT_MAX, asked);
         if bus_failed() {
             return Err(embassy_hc32::i2c::Error::NotReady);
@@ -94,7 +95,7 @@ impl pd_spr_phy::GatedBus for SharedBus {
         bytes: &[u8],
     ) -> Result<([u8; 2], bool), Self::Error> {
         let asked = embassy_time::Instant::now();
-        let mut guard = crate::I2C3.lock().await;
+        let mut guard = crate::bus::I2C3.lock().await;
         note_max(&LOCK_WAIT_MAX, asked);
         if bus_failed() {
             return Err(embassy_hc32::i2c::Error::NotReady);

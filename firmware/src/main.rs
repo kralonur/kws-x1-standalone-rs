@@ -9,6 +9,7 @@
 #![no_std]
 #![no_main]
 
+mod bus;
 mod clock_setup;
 #[path = "panel.rs"]
 mod panel;
@@ -17,11 +18,6 @@ mod pd_cc;
 mod pd_spr_phy;
 mod pd_trial;
 
-// Board-owned shared bus: platform drivers never depend on X1 task ownership.
-static I2C3: embassy_sync::mutex::Mutex<
-    embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
-    Option<embassy_hc32::i2c::I2c3>,
-> = embassy_sync::mutex::Mutex::new(None);
 mod pd_service;
 mod pd_sniff;
 mod render;
@@ -33,10 +29,14 @@ use embassy_executor::Spawner;
 use embassy_hc32::gpio::{self, AlternateMode, AlternatePin, InputPin, Port};
 // The `#[cortex_m_rt::interrupt]` expansion checks `interrupt::INT0xx`, and the
 // PAC exposes the generated `Interrupt` enum through that path.
+use bus::{
+    ASYNC_READS, BUS_LATCH, I2C_ERRORS, I2C_FAULT_STEP, I2C_IRQ_COUNT, I2C_LAST_CR1, I2C_LAST_CR4,
+    I2C_LAST_SR, I2C3, INA_CONFIG, SENSOR_CONFIG, bus_failed, note_bus_failure, read_meter,
+    write_meter, write_sensor,
+};
 use embassy_time::{Instant, Timer};
 use hc32f460_pac::interrupt;
 use kws_x1_core::buttons as button_logic;
-use kws_x1_core::latch::Latch;
 #[cfg(not(any(feature = "pd-boot-diagnostic", feature = "cable-log")))]
 use panic_halt as _;
 use render::{Counters, clear_screen, glyph, render_irq_test, render_measure, render_ports};
@@ -216,34 +216,10 @@ static ROTATION: AtomicU32 = AtomicU32::new(0);
 /// Completed 180-degree flips, shown next to the raw edge count.
 static TILT_FLIPS: AtomicU32 = AtomicU32::new(0);
 
-/// How many times the four I2C3 interrupt lines fired. Zero means the wake path
-/// (routing or `CR2` arming) never worked; a climbing count means the waits are
-/// woken and any failure is in the transaction logic instead.
-static I2C_IRQ_COUNT: AtomicU32 = AtomicU32::new(0);
-
-/// The two chips on I2C3: the INA226 meter and the LIS3DH tilt sensor.
-const INA226_ADDR: u8 = 0x40;
-const LIS3DH_ADDR: u8 = 0x18;
-
-/// Completed async I2C3 reads and failures, shown on the test page. Timeouts
-/// (no wake at all) and bus errors (NACK/arbitration/timeout flag) are counted
-/// separately: they point at completely different faults.
-static ASYNC_READS: AtomicU32 = AtomicU32::new(0);
-static I2C_ERRORS: AtomicU32 = AtomicU32::new(0);
-static I2C_TIMEOUTS: AtomicU32 = AtomicU32::new(0);
-/// `SR` and `CR1` as they stood when the bus last failed, for diagnosis.
-static I2C_LAST_SR: AtomicU32 = AtomicU32::new(0);
-static I2C_LAST_CR1: AtomicU32 = AtomicU32::new(0);
-/// Bring-up step the driver was in when it timed out (`0` = no timeout).
-static I2C_FAULT_STEP: AtomicU32 = AtomicU32::new(0);
-/// `CR4` as it stood when the bus last failed (`BUSWAIT` is bit 10).
-static I2C_LAST_CR4: AtomicU32 = AtomicU32::new(0);
 /// Failed `intc::register` calls. The INTC is not reset by a jump into this
 /// image, so a `SEL` entry left mapped by the bootloader makes routing fail;
 /// this must stay 0 now that startup clears the table first.
 static IRQ_REG_FAILURES: AtomicU32 = AtomicU32::new(0);
-/// Latches the bus off after the first failure (`kws_x1_core::latch`).
-static BUS_LATCH: Latch = Latch::new();
 
 /// PB12 / EIRQ12: acknowledge/latch/wake only. No I2C or PHY service in ISR.
 #[cortex_m_rt::interrupt]
@@ -333,105 +309,6 @@ unsafe fn init_backlight(compare: u16) -> (embassy_hc32::pwm::TimerA4Pwm, Altern
         let pin = AlternatePin::new(Port::H, 2, 4, AlternateMode::DigitalOutput);
         pwm.start(compare).unwrap();
         (pwm, pin)
-    }
-}
-
-const INA_CONFIG: [(u8, u16); 3] = [(0, 0x4727), (6, 0x0400), (5, 0x0800)];
-const SENSOR_CONFIG: [(u8, u8); 5] = [
-    (0x20, 0x52),
-    (0x23, 0x08),
-    (0x22, 0x40),
-    (0x32, 0x28),
-    (0x30, 0xc1),
-];
-
-/// Whether the shared bus is latched off after a failure.
-fn bus_failed() -> bool {
-    BUS_LATCH.is_failed()
-}
-
-/// Record a bus failure: count its kind, keep `SR` for the test page, latch off.
-fn note_bus_failure(bus: &mut embassy_hc32::i2c::I2c3, error: embassy_hc32::i2c::Error) {
-    match error {
-        embassy_hc32::i2c::Error::Timeout(step) => {
-            I2C_TIMEOUTS.fetch_add(1, Ordering::Relaxed);
-            I2C_FAULT_STEP.store(step, Ordering::Relaxed);
-        }
-        _ => {
-            I2C_ERRORS.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-    I2C_LAST_SR.store(bus.status(), Ordering::Relaxed);
-    I2C_LAST_CR1.store(bus.control(), Ordering::Relaxed);
-    I2C_LAST_CR4.store(bus.control4(), Ordering::Relaxed);
-    BUS_LATCH.fail();
-}
-
-/// Read one big-endian INA226 register through the async I2C3 master.
-///
-/// `tilt_task` shares the bus, so the lock is what keeps a single owner at a
-/// time. The first failure latches the bus off: a wedged transfer must not be
-/// retried for ever, and the screen stays alive either way.
-async fn read_meter(reg: u8) -> Option<u16> {
-    if bus_failed() {
-        return None;
-    }
-    let mut guard = I2C3.lock().await;
-    if bus_failed() {
-        return None;
-    }
-    let bus = guard.as_mut()?;
-    match bus.read_register(INA226_ADDR, reg).await {
-        Ok(value) => {
-            ASYNC_READS.fetch_add(1, Ordering::Relaxed);
-            Some(value)
-        }
-        Err(error) => {
-            note_bus_failure(bus, error);
-            None
-        }
-    }
-}
-
-/// Write one big-endian INA226 register (startup configuration).
-async fn write_meter(reg: u8, value: u16) -> bool {
-    if bus_failed() {
-        return false;
-    }
-    let mut guard = I2C3.lock().await;
-    if bus_failed() {
-        return false;
-    }
-    let Some(bus) = guard.as_mut() else {
-        return false;
-    };
-    match bus.write_register(INA226_ADDR, reg, value).await {
-        Ok(()) => true,
-        Err(error) => {
-            note_bus_failure(bus, error);
-            false
-        }
-    }
-}
-
-/// Write one LIS3DH register; the tilt sensor sits on the same bus.
-async fn write_sensor(reg: u8, value: u8) -> bool {
-    if bus_failed() {
-        return false;
-    }
-    let mut guard = I2C3.lock().await;
-    if bus_failed() {
-        return false;
-    }
-    let Some(bus) = guard.as_mut() else {
-        return false;
-    };
-    match bus.write_register8(LIS3DH_ADDR, reg, value).await {
-        Ok(()) => true,
-        Err(error) => {
-            note_bus_failure(bus, error);
-            false
-        }
     }
 }
 
