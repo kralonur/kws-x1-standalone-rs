@@ -834,7 +834,8 @@ fn paint_lines(framebuffer: &mut crate::render::Frame, rows: [[u8; 24]; 8], glyp
                             for dx in 0..2 {
                                 let x = 12 + char_index * 8 + column * 2 + dx;
                                 let y = 6 + line_index * 16 + row * 2 + dy;
-                                framebuffer[y * 240 + x] = 0;
+                                framebuffer[y * usize::from(firmware_core::panel::WIDTH) + x] =
+                                    crate::render::BLACK;
                             }
                         }
                     }

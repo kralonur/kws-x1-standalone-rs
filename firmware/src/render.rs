@@ -7,8 +7,19 @@ use crate::{BUTTON_GAP_MAX_MS, FRAME_MS, ina226};
 
 /// One full RGB565 frame in memory order.
 pub type Frame = [u16; firmware_core::panel::PIXELS];
+/// Panel size in pixels, as frame indices.
+const WIDTH: usize = firmware_core::panel::WIDTH as usize;
+const HEIGHT: usize = firmware_core::panel::HEIGHT as usize;
 
-const CYAN: u16 = 0xff07;
+/// Frame pixels are stored byte-swapped: `panel::flush` sends each halfword
+/// low byte first and the panel takes the high byte of an RGB565 pixel first.
+pub const fn color(rgb565: u16) -> u16 {
+    rgb565.swap_bytes()
+}
+pub const BLACK: u16 = color(0x0000);
+pub const WHITE: u16 = color(0xffff);
+pub const BLUE: u16 = color(0x001f);
+const CYAN: u16 = color(0x07ff);
 
 // 3 columns x 5 rows bitmap font (same glyphs as the earlier application).
 pub fn glyph(c: u8) -> u16 {
@@ -78,9 +89,9 @@ unsafe fn text(framebuffer: *mut u16, mut x: usize, y: usize, bytes: &[u8]) {
                         for dx in 0..3 {
                             let px = x + column * 3 + dx;
                             let py = y + row * 3 + dy;
-                            if px < 240 && py < 135 {
+                            if px < WIDTH && py < HEIGHT {
                                 unsafe {
-                                    framebuffer.add(py * 240 + px).write_volatile(0);
+                                    framebuffer.add(py * WIDTH + px).write_volatile(BLACK);
                                 }
                             }
                         }
