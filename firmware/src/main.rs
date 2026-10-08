@@ -250,10 +250,25 @@ static TILT_FLIPS: AtomicU32 = AtomicU32::new(0);
 /// this must stay 0 now that startup clears the table first.
 static IRQ_REG_FAILURES: AtomicU32 = AtomicU32::new(0);
 
+/// External interrupt channels: PB12 carries the PD controller's alert, PB13
+/// the tilt sensor's INT1. Channel n is also interrupt event n (RM Table 10-2).
+const PD_EIRQ: u8 = 12;
+const TILT_EIRQ: u8 = 13;
+/// Software interrupt channel (and event) used for the dispatch self-test.
+const SWI_CHANNEL: u8 = 8;
+/// NVIC lines; each must match its `INTnnn` handler below.
+const PD_LINE: embassy_hc32::intc::Line = line(4);
+const TILT_LINE: embassy_hc32::intc::Line = line(13);
+const SWI_LINE: embassy_hc32::intc::Line = line(8);
+/// NVIC priorities (lower is more urgent). Both stay below SysTick (0), so
+/// timing never starves; bus and tilt wakes rank ahead of the PD alert and self-test.
+const BUS_PRIORITY: u8 = 8;
+const PD_PRIORITY: u8 = 9;
+
 /// PB12 / EIRQ12: acknowledge/latch/wake only. No I2C or PHY service in ISR.
 #[cortex_m_rt::interrupt]
 fn INT004() {
-    if embassy_hc32::exti::on_interrupt(12) {
+    if embassy_hc32::exti::on_interrupt(PD_EIRQ) {
         PD_IRQ_COUNT.fetch_add(1, Ordering::Relaxed);
     }
 }
@@ -262,7 +277,7 @@ fn INT004() {
 /// `tilt_task`; the counter is the same evidence shown on the INTC page.
 #[cortex_m_rt::interrupt]
 fn INT013() {
-    if embassy_hc32::exti::on_interrupt(13) {
+    if embassy_hc32::exti::on_interrupt(TILT_EIRQ) {
         EIRQ_COUNT.fetch_add(1, Ordering::Relaxed);
     }
 }
@@ -270,7 +285,7 @@ fn INT013() {
 /// Software interrupt channel 8 (self-test that `SEL`/`IER`/NVIC dispatch work).
 #[cortex_m_rt::interrupt]
 fn INT008() {
-    embassy_hc32::intc::software_interrupt_clear(8);
+    embassy_hc32::intc::software_interrupt_clear(SWI_CHANNEL);
     SWI_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -381,7 +396,9 @@ async fn tilt_task(input: InputPin) {
     };
     // Errata 2.4.2: the peripheral side is already enabled by
     // `ExtiInput::new`, so claiming the line here clears pending before NVIC.
-    if unsafe { embassy_hc32::intc::register(13, const { line(13) }, 8) }.is_err() {
+    if unsafe { embassy_hc32::intc::register(u16::from(TILT_EIRQ), TILT_LINE, BUS_PRIORITY) }
+        .is_err()
+    {
         IRQ_REG_FAILURES.fetch_add(1, Ordering::Relaxed);
     }
     // One physical tilt makes the LIS3DH emit a burst of short pulses, and the
@@ -407,7 +424,7 @@ async fn tilt_task(input: InputPin) {
 
         // Suppress the rest of the burst, then discard anything it latched.
         Timer::after_millis(REFRACTORY_MS).await;
-        while embassy_hc32::exti::take_edge(13) {}
+        while embassy_hc32::exti::take_edge(TILT_EIRQ) {}
     }
 }
 
@@ -743,7 +760,7 @@ async fn main(spawner: Spawner) {
             InputPin::new_pull_up(Port::B, 12),
             embassy_hc32::intc::EirqTrigger::Falling,
         );
-        if embassy_hc32::intc::register(12, const { line(4) }, 9).is_err() {
+        if embassy_hc32::intc::register(u16::from(PD_EIRQ), PD_LINE, PD_PRIORITY).is_err() {
             IRQ_REG_FAILURES.fetch_add(1, Ordering::Relaxed);
         }
 
@@ -785,7 +802,7 @@ async fn main(spawner: Spawner) {
             (431, line(113)),
         ];
         for (event, line) in I2C3_EVENTS {
-            if embassy_hc32::intc::register(event, line, 8).is_err() {
+            if embassy_hc32::intc::register(event, line, BUS_PRIORITY).is_err() {
                 // Never ignore this: an unrouted line means a wake that never
                 // arrives, which is a hang, not an error code.
                 IRQ_REG_FAILURES.fetch_add(1, Ordering::Relaxed);
@@ -804,13 +821,12 @@ async fn main(spawner: Spawner) {
         }
 
         // Route a software interrupt to INT008.
-        // Priorities 8/9 keep them below SysTick (0), so timing never starves.
-        if embassy_hc32::intc::register(8, const { line(8) }, 9).is_err() {
+        if embassy_hc32::intc::register(u16::from(SWI_CHANNEL), SWI_LINE, PD_PRIORITY).is_err() {
             IRQ_REG_FAILURES.fetch_add(1, Ordering::Relaxed);
         }
         // One software interrupt at startup: if SWI ch8 reads 1 on the test
         // page, `SEL`/`IER`/NVIC dispatch and the vector table all work.
-        embassy_hc32::intc::software_interrupt_trigger(8);
+        embassy_hc32::intc::software_interrupt_trigger(SWI_CHANNEL);
 
         // Configure the INA226 and the LIS3DH over the async master.
         for (reg, value) in ina226::INIT {
