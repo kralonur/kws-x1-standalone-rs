@@ -230,6 +230,26 @@ enum RequestStage {
     TransitionSink,
 }
 
+/// Caller policy for one session, fixed when the session is created.
+pub struct Config<'a, L: Limits> {
+    /// A long-lived session that stays in Ready after the first contract; only
+    /// it may use Soft Reset, Hard Reset and Ready-state messages.
+    pub persistent: bool,
+    pub selection: Option<&'a pd_protocol::pd_spr::Selection<L>>,
+    pub control: Option<Control<'a>>,
+    /// Optional caller UI notification when a fresh identity inspection begins.
+    /// It grants no transport permission; absence means no UI to invalidate.
+    pub identity_started: Option<&'a dyn Fn()>,
+    pub publish: Option<&'a dyn Fn(pd::Observation)>,
+    /// `pd-boot-diagnostic`: record session steps in `observation.boot_step`
+    /// and publish each new step at once (`docs/SAFETY.md`).
+    pub trace_steps: bool,
+    /// `cable-log`: record only the cable breadcrumbs (`cable_mark`).
+    pub trace_cable: bool,
+    pub stop_requested: Option<fn() -> bool>,
+    pub svids: Option<&'a dyn pd_protocol::pd_svids::Store>,
+}
+
 pub struct Session<'a, B: I2c, D, C, P: Platform> {
     bus: &'a mut B,
     delay: &'a mut D,
@@ -292,21 +312,8 @@ pub struct Session<'a, B: I2c, D, C, P: Platform> {
     t_accept: Option<u64>,
     error: Option<Error<B::Error>>,
     pub observation: pd::Observation,
-    pub persistent: bool,
-    pub selection: Option<&'a pd_protocol::pd_spr::Selection<P::Limits>>,
-    pub control: Option<Control<'a>>,
-    /// Optional caller UI notification when a fresh identity inspection begins.
-    /// It grants no transport permission; absence means no UI to invalidate.
-    pub identity_started: Option<&'a dyn Fn()>,
-    pub publish: Option<&'a dyn Fn(pd::Observation)>,
-    /// `pd-boot-diagnostic`: record session steps in `observation.boot_step`
-    /// and publish each new step at once (`docs/SAFETY.md`).
-    pub trace_steps: bool,
-    /// `cable-log`: record only the cable breadcrumbs (`cable_mark`).
-    pub trace_cable: bool,
+    config: Config<'a, P::Limits>,
     steps_t0: Option<u64>,
-    pub stop_requested: Option<fn() -> bool>,
-    pub svids: Option<&'a dyn pd_protocol::pd_svids::Store>,
     last_publish_ms: u64,
     last_poll_ms: Option<u64>,
     /// `pd-boot-diagnostic`: end of the last cable inspection, until Ready
@@ -316,10 +323,14 @@ pub struct Session<'a, B: I2c, D, C, P: Platform> {
     stop_since_ms: Option<u64>,
 }
 impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> {
-    pub fn new(bus: &'a mut B, delay: &'a mut D, clock: &'a C) -> Self {
+    pub fn new(
+        bus: &'a mut B,
+        delay: &'a mut D,
+        clock: &'a C,
+        config: Config<'a, P::Limits>,
+        observation: pd::Observation,
+    ) -> Self {
         P::set_rx_idle(false);
-        let mut observation = pd::Observation::new();
-        observation.spr = Some(pd::SprObservation::pending());
         Self {
             bus,
             delay,
@@ -366,20 +377,12 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             t_accept: None,
             error: None,
             observation,
-            persistent: false,
-            selection: None,
-            control: None,
-            identity_started: None,
-            publish: None,
-            trace_steps: false,
-            trace_cable: false,
+            config,
             steps_t0: None,
             last_publish_ms: 0,
             last_poll_ms: None,
             cable_done_ms: None,
             rp_probing: false,
-            stop_requested: None,
-            svids: None,
             stop_since_ms: None,
         }
     }
@@ -414,8 +417,8 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         self.hard_reset_received
     }
     fn trace(&mut self) -> &mut pd::SprObservation {
-        // `start` installs a pending trace, but a caller may replace the public
-        // `observation` before it; a fresh pending trace fails every gate closed.
+        // `start` installs a pending trace, but the caller's observation may lack
+        // one before it; a fresh pending trace fails every gate closed.
         self.observation
             .spr
             .get_or_insert_with(pd::SprObservation::pending)
@@ -475,10 +478,10 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             spr: Some(pd::SprObservation::pending()),
             ..pd::Observation::new()
         };
-        if self.selection.is_some() {
+        if self.config.selection.is_some() {
             self.trace().target_mv = 5000;
         }
-        if let Some(svids) = self.svids {
+        if let Some(svids) = self.config.svids {
             svids.clear();
         }
         for (index, expected) in P::BASELINE.into_iter().enumerate() {
@@ -550,13 +553,13 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         Ok(())
     }
     async fn poll(&mut self) -> Result<Option<pd_service::Packet>, Error<B::Error>> {
-        if let Some(selection) = self.selection {
+        if let Some(selection) = self.config.selection {
             selection.set_now_ms(self.clock.now_ms());
             if selection.pps_expired() {
                 return Err(Error::PpsDeadline);
             }
-            if let Some(control) = self.control {
-                control(&mut self.observation, self.svids);
+            if let Some(control) = self.config.control {
+                control(&mut self.observation, self.config.svids);
             }
             self.trace().selected_mv = Some(selection.candidate_mv());
             self.trace().selected_ma = Some(selection.candidate_ma());
@@ -573,7 +576,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             self.trace().pps_status = selection.pps_status();
             self.trace().partner = selection.partner_info();
         }
-        if self.trace_steps
+        if self.config.trace_steps
             && self.observation.rp_probe.is_none()
             && !self.rp_probing
             && self.trace().contract_seen
@@ -581,17 +584,17 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             && !self.reset_in_progress()
             && self.cable_phase == CablePhase::Idle
             && self.queue.iter().all(Option::is_none)
-            && self.selection.is_none_or(|s| !s.request_in_flight())
+            && self.config.selection.is_none_or(|s| !s.request_in_flight())
         {
             self.probe_rp().await?;
         }
-        let live = self.persistent && self.trace().contract_seen;
+        let live = self.config.persistent && self.trace().contract_seen;
         if !live && (self.observation.rx_polls >= POLL_BUDGET || self.observation.rx_packets >= 32)
         {
             return Err(Error::Budget);
         }
         let now = self.clock.now_ms();
-        if self.trace_steps {
+        if self.config.trace_steps {
             if let Some(last) = self.last_poll_ms {
                 let gap = now.saturating_sub(last).min(255) as u8;
                 if gap > self.observation.poll_gap_ms {
@@ -609,7 +612,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         }
         if now.saturating_sub(self.last_publish_ms) >= 100 {
             self.last_publish_ms = now;
-            if let Some(publish) = self.publish {
+            if let Some(publish) = self.config.publish {
                 let mut observation = self.observation;
                 observation.restore_unverified = self.unverified;
                 publish(observation);
@@ -734,11 +737,14 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         let Some(capabilities) = self.observation.capabilities else {
             return false;
         };
-        let target = self.selection.map(|selection| pd_protocol::pd_spr::Target {
-            mv: selection.target_mv(),
-            ma: selection.target_ma(),
-            pps_object: selection.target_pps_object(),
-        });
+        let target = self
+            .config
+            .selection
+            .map(|selection| pd_protocol::pd_spr::Target {
+                mv: selection.target_mv(),
+                ma: selection.target_ma(),
+                pps_object: selection.target_pps_object(),
+            });
         pd_protocol::pd_spr::review_rdo::<P::Limits>(&capabilities, rdo, target)
     }
     async fn send(&mut self, bytes: &[u8]) -> Result<(), Error<B::Error>> {
@@ -807,11 +813,11 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         let status_reply = sop == Sop::Partner
             && self.tx_revision == 2
             && bytes.len() == 14
-            && self.persistent
+            && self.config.persistent
             && self.trace().contract_seen
             && self.request.is_none()
             && self.cable_phase == CablePhase::Idle
-            && self.selection.is_none_or(|s| !s.request_in_flight())
+            && self.config.selection.is_none_or(|s| !s.request_in_flight())
             && header & 0xf1ff == 0xb082
             && bytes[2..4] == [7, 0x80]
             && bytes[11..] == [0, 0, 0]
@@ -885,6 +891,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                         && match command {
                             1 | 2 => vdm >> 16 == 0xff00,
                             3 => self
+                                .config
                                 .svids
                                 .is_some_and(|store| store.contains((vdm >> 16) as u16)),
                             _ => false,
@@ -899,12 +906,12 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             && bytes.len() == 2
             && header & 0xf1ff == pd_protocol::pd_spr::GET_PPS_STATUS_HEADER
             && self.tx_revision == 2
-            && self.persistent
+            && self.config.persistent
             && self.trace().contract_seen
             && !self.caps_reply
             && !self.reset_in_progress()
             && self.cable_phase == CablePhase::Idle
-            && self.selection.is_some_and(|s| {
+            && self.config.selection.is_some_and(|s| {
                 s.target_pps_object() != 0
                     && !s.request_in_flight()
                     && s.established_target()
@@ -927,13 +934,14 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             || self.pps_status_until.is_some_and(|until| now < until);
         let query_ready = sop == Sop::Partner
             && self.tx_revision == 2
-            && self.persistent
+            && self.config.persistent
             && self.trace().contract_seen
             && !self.caps_reply
             && !self.reset_in_progress()
             && self.cable_phase == CablePhase::Idle
             && !answer_window_open
             && self
+                .config
                 .selection
                 .is_some_and(|s| !s.request_in_flight() && s.established_target().is_some());
         let query = query_ready
@@ -942,7 +950,10 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         let sink_alert = query_ready
             && bytes.len() == 6
             && header & 0xf1ff == 0x1086
-            && self.selection.is_some_and(|s| s.armed_sink_alert() == rdo)
+            && self
+                .config
+                .selection
+                .is_some_and(|s| s.armed_sink_alert() == rdo)
             && rdo
                 .is_some_and(|ado| ado != 0 && ado & !pd_protocol::pd_spr::SINK_ALERT_EVENTS == 0)
             && <P::Limits as pd_protocol::pd_spr::Limits>::status()
@@ -955,7 +966,10 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             || cable_identity
             || pps_status_query
             || query.is_some()
-            || (is_request && self.persistent && self.trace().contract_seen && !self.caps_reply);
+            || (is_request
+                && self.config.persistent
+                && self.trace().contract_seen
+                && !self.caps_reply);
         if !is_request
             && !unsupported_reply
             && !is_sink_caps
@@ -1001,7 +1015,12 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         {
             return Err(Error::Request);
         }
-        if is_request && self.selection.is_some_and(|s| s.target_pps_object() != 0) && revision != 2
+        if is_request
+            && self
+                .config
+                .selection
+                .is_some_and(|s| s.target_pps_object() != 0)
+            && revision != 2
         {
             return Err(Error::Request);
         }
@@ -1018,13 +1037,18 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             self.trace().elapsed_psrdy_ms = None;
             self.t_ack = None;
             self.t_accept = None;
-            self.trace().pps = self.selection.is_some_and(|s| s.target_pps_object() != 0);
+            self.trace().pps = self
+                .config
+                .selection
+                .is_some_and(|s| s.target_pps_object() != 0);
             self.trace().target_mv = self
+                .config
                 .selection
                 .map_or(P::Limits::TARGET_MV as u16, |selection| {
                     selection.target_mv()
                 });
             self.trace().target_ma = self
+                .config
                 .selection
                 .map_or(P::Limits::REQUEST_MA as u16, |selection| {
                     selection.target_ma()
@@ -1046,7 +1070,10 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                 return Err(Error::Peer);
             }
             if is_request
-                && self.selection.is_some_and(|s| s.target_pps_object() != 0)
+                && self
+                    .config
+                    .selection
+                    .is_some_and(|s| s.target_pps_object() != 0)
                 && header & 0x7000 != 0
                 && header & 0x1f == 1
                 && (header >> 6) & 3 != 2
@@ -1146,7 +1173,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                 }
                 // Section 7.1.1: a failed Soft_Reset or reset Accept needs Hard
                 // Reset; a partner Message alongside the failure is uncertain.
-                if !self.persistent {
+                if !self.config.persistent {
                     return Err(Error::HardResetNeeded);
                 }
                 if reset_accept || soft_reset {
@@ -1212,7 +1239,11 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                 if is_request {
                     self.requested_object = rdo.map(|rdo| (rdo >> 28) as u8);
                     self.trace().request_ma = rdo.map_or(0, |rdo| {
-                        if self.selection.is_some_and(|s| s.target_pps_object() != 0) {
+                        if self
+                            .config
+                            .selection
+                            .is_some_and(|s| s.target_pps_object() != 0)
+                        {
                             (rdo & 0x7f) as u16 * 50
                         } else {
                             ((rdo >> 10) & 0x3ff) as u16 * 10
@@ -1238,7 +1269,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                 }
                 if is_request {
                     self.request = Some(RequestStage::AwaitReply);
-                    if let Some(selection) = self.selection {
+                    if let Some(selection) = self.config.selection {
                         selection.note_request_sent(t_ack);
                     }
                 }
@@ -1302,7 +1333,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
     /// a persistent session after the first Request fixed the revision. While
     /// recovering it means the Soft Reset did not correct the error.
     fn protocol_error(&mut self) -> Result<(), Error<B::Error>> {
-        if !self.persistent || self.trace().peer_revision.is_none() {
+        if !self.config.persistent || self.trace().peer_revision.is_none() {
             return Err(Error::Peer);
         }
         if self.recovering
@@ -1333,7 +1364,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
     /// Record a session step (only with `trace_steps`); a new furthest step is
     /// published at once so it is on screen before a possible VBUS loss.
     fn step(&mut self, step: u8) {
-        if !self.trace_steps || step <= self.observation.boot_step {
+        if !self.config.trace_steps || step <= self.observation.boot_step {
             return;
         }
         self.observation.boot_step = step;
@@ -1341,7 +1372,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             .steps_t0
             .map_or(0, |t0| self.clock.now_ms().saturating_sub(t0));
         self.observation.boot_step_ms = since.min(9999) as u16;
-        if let Some(publish) = self.publish {
+        if let Some(publish) = self.config.publish {
             let mut observation = self.observation;
             observation.restore_unverified = self.unverified;
             publish(observation);
@@ -1350,11 +1381,13 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
     /// Cable breadcrumb (`cable_step`), published at once so the flash log
     /// holds the last one reached even if the tester stops right after it.
     fn cable_mark(&mut self, step: u8) {
-        if !(self.trace_steps || self.trace_cable) || step <= self.observation.cable_step {
+        if !(self.config.trace_steps || self.config.trace_cable)
+            || step <= self.observation.cable_step
+        {
             return;
         }
         self.observation.cable_step = step;
-        if let Some(publish) = self.publish {
+        if let Some(publish) = self.config.publish {
             let mut observation = self.observation;
             observation.restore_unverified = self.unverified;
             publish(observation);
@@ -1510,7 +1543,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                     // PE_SNK_Soft_Reset from any state (section 9.2.5.2.2):
                     // MessageID 0 (section 7.7), no pending TX, cable work or
                     // queued traffic. Startup Accept does not lock revision.
-                    if !self.persistent
+                    if !self.config.persistent
                         || !matches!(revision, 1 | 2)
                         || self.pending_tx.is_some()
                         || matches!(
@@ -1653,10 +1686,10 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                         }
                         _ => return Err(Error::Peer),
                     };
-                } else if self.persistent
+                } else if self.config.persistent
                     && self.trace().contract_seen
                     && self.reset != Some(ResetStep::AcceptPartner)
-                    && self.selection.is_none_or(|s| !s.request_in_flight())
+                    && self.config.selection.is_none_or(|s| !s.request_in_flight())
                 {
                     use pd_protocol::pd_spr::{ReadyResponse, ready_response};
                     let extended = (header & 0x8000 != 0 && length >= 4)
@@ -1737,7 +1770,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                 if header & 0x701f == 6 {
                     self.step(9);
                     self.trace().psrdy_seen = true;
-                    if self.persistent {
+                    if self.config.persistent {
                         self.trace().contract_seen = true;
                     }
                     let t_psrdy = self.clock.now_ms();
@@ -1748,12 +1781,16 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                 }
                 return Ok(length);
             }
-            if self.persistent
+            if self.config.persistent
                 && self.trace().contract_seen
                 && !self.reset_in_progress()
-                && self.selection.is_none_or(|s| !s.request_in_flight())
+                && self.config.selection.is_none_or(|s| !s.request_in_flight())
             {
-                if self.stop_requested.is_some_and(|requested| requested()) {
+                if self
+                    .config
+                    .stop_requested
+                    .is_some_and(|requested| requested())
+                {
                     let now = self.clock.now_ms();
                     let since = *self.stop_since_ms.get_or_insert(now);
                     if now.saturating_sub(since) >= 1000 {
@@ -1763,7 +1800,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                     self.stop_since_ms = None;
                 }
             }
-            if let Some(selection) = self.selection {
+            if let Some(selection) = self.config.selection {
                 // Only this idle point is safe for the upstream Ready select to
                 // cancel receive: no transaction/FIFO read/TX is in flight.
                 self.stopped = false;
@@ -1834,7 +1871,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             || !self.trace().contract_seen
             || self.trace().target_mv != 5000
             || self.trace().pps
-            || !self.selection.is_some_and(|s| {
+            || !self.config.selection.is_some_and(|s| {
                 s.cable_active() && s.target_mv() == 5000 && s.target_pps_object() == 0
             })
             || self.trace().peer_revision != Some(3)
@@ -1871,11 +1908,11 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         {
             return Err(Error::Request);
         }
-        let requested_mode = self.selection.and_then(|s| s.cable_mode());
+        let requested_mode = self.config.selection.and_then(|s| s.cable_mode());
         let previous_report = self.trace().cable_report;
         pd_discovery::begin(self, requested_mode, previous_report)?;
         if requested_mode.is_none()
-            && let Some(notify) = self.identity_started
+            && let Some(notify) = self.config.identity_started
         {
             notify();
         }
@@ -1909,7 +1946,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             Err(Error::Deferred) => {
                 self.receiver.allow_cable_extended(false);
                 self.trace().cable_modes = pd_protocol::pd_cable_modes::Discovery::EMPTY;
-                if let Some(store) = self.svids {
+                if let Some(store) = self.config.svids {
                     store.clear();
                 }
                 CableReport {
@@ -1930,7 +1967,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         report.last_rx_id = last_id;
         self.trace().cable_report = Some(report);
         self.cable_mark(28);
-        if self.trace_steps || self.trace_cable {
+        if self.config.trace_steps || self.config.trace_cable {
             self.cable_done_ms = Some(self.clock.now_ms());
         }
         Ok(report)
@@ -1945,9 +1982,10 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         P::set_rx_idle(false);
         self.stopped = true;
         self.finished = true;
-        let established = self.persistent
+        let established = self.config.persistent
             && self.trace().contract_seen
             && self
+                .config
                 .selection
                 .is_some_and(|s| !s.request_in_flight() && s.established_target().is_some());
         if !self.request_is_reviewed(contract.request.0)
@@ -2031,7 +2069,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             self.reset,
             Some(ResetStep::AcceptPartner | ResetStep::WaitCapsAfterReset)
         );
-        if !self.persistent
+        if !self.config.persistent
             || (self.trace().peer_revision.is_none() && !startup_reset)
             || self.pending_tx.is_some()
             || self.cable_phase != CablePhase::Idle
@@ -2044,7 +2082,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         }
         self.trace().hard_resets_sent = self.trace().hard_resets_sent.saturating_add(1);
         // Only seen if the tester stays powered through the VBUS drop.
-        if let Some(publish) = self.publish {
+        if let Some(publish) = self.config.publish {
             let mut observation = self.observation;
             observation.restore_unverified = self.unverified;
             publish(observation);
@@ -2278,7 +2316,7 @@ impl<B: GatedBus, D: Waiter, C: Clock, P: Platform> pd_discovery::Transport
         &mut self.trace().cable_modes
     }
     fn store(&self) -> Option<&dyn pd_protocol::pd_svids::Store> {
-        self.svids
+        self.config.svids
     }
     fn receive_id(&self) -> u8 {
         self.cable_rx_id

@@ -181,18 +181,21 @@ pub async fn run(observation: &mut pd::Observation, report: pd_cc::Report) {
         let identity_started = || selection.set_mode_cursor(None);
         let board_observation = *observation;
         let publish = |phy| crate::store_observation(board_observation.with_phy(phy));
-        let mut phy = pd_spr_phy::Session::new(&mut bus, &mut delay, &clock);
-        phy.observation = observation.phy;
-        phy.observation.phase = pd::Phase::Negotiating;
-        phy.persistent = true;
-        phy.selection = Some(&selection);
-        phy.control = Some(&control);
-        phy.identity_started = Some(&identity_started);
-        phy.publish = Some(&publish);
-        phy.trace_steps = cfg!(feature = "pd-boot-diagnostic");
-        phy.trace_cable = cfg!(feature = "cable-log");
-        phy.stop_requested = Some(stop_requested);
-        phy.svids = Some(&crate::CABLE_SVID_STORE);
+        let config = pd_spr_phy::Config {
+            persistent: true,
+            selection: Some(&selection),
+            control: Some(&control),
+            identity_started: Some(&identity_started),
+            publish: Some(&publish),
+            trace_steps: cfg!(feature = "pd-boot-diagnostic"),
+            trace_cable: cfg!(feature = "cable-log"),
+            stop_requested: Some(stop_requested),
+            svids: Some(&crate::CABLE_SVID_STORE),
+        };
+        let mut phy_observation = observation.phy;
+        phy_observation.phase = pd::Phase::Negotiating;
+        let mut phy =
+            pd_spr_phy::Session::new(&mut bus, &mut delay, &clock, config, phy_observation);
         if let Err(failure) = phy.start(report.after, report.status).await {
             error = Some(failure);
         } else {

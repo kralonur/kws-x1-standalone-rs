@@ -2,7 +2,7 @@
 //! All wire authorization remains in the shared PHY and portable policy gates.
 use core::sync::atomic::{AtomicBool, Ordering};
 use embedded_hal_async::i2c::I2c;
-pub use fusb302_pd::phy::{Clock, Error, GatedBus, Waiter};
+pub use fusb302_pd::phy::{Clock, Config, Error, GatedBus, Waiter};
 
 pub struct X1Platform;
 static RX_IDLE: AtomicBool = AtomicBool::new(false);
