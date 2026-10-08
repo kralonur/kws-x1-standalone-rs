@@ -684,7 +684,7 @@ async fn main(spawner: Spawner) {
 
         // INTC validation (vendor-documented sequence, RM 10.4.2 + Errata
         // Rev 1.41 2.4.1/2.4.2):
-        //   1. Err消费 2.4.1: a pin position may only have one port's INTE set,
+        //   1. Errata 2.4.1: a pin position may only have one port's INTE set,
         //      and the lowest port number wins, so clear channel 13 elsewhere.
         //   2. Enable the peripheral side (PCR.INTE + EIRQCR) first.
         //   3. Then claim the line, clear pending and enable NVIC (register()).
