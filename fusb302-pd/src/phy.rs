@@ -203,6 +203,23 @@ use pd_protocol::pd_discovery::{self, Phase as CablePhase};
 
 pub type Control<'a> = &'a dyn Fn(&mut pd::Observation, Option<&dyn pd_protocol::pd_svids::Store>);
 
+/// The Soft Reset or post-reset step in progress (sections 6.8.1, 7.7). While
+/// one is set it gates every transmission and the accepted received Messages.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ResetStep {
+    /// A Protocol Error was seen: the next transmission is our Soft_Reset.
+    SendSoftReset,
+    /// Our Soft_Reset was acknowledged: only Accept (or the partner's Soft_Reset).
+    AwaitAccept,
+    /// The partner's Soft_Reset was received: the next transmission is Accept.
+    AcceptPartner,
+    /// A Soft Reset completed: only fresh Source_Capabilities.
+    WaitCapsAfterReset,
+    /// After the BIST carrier (PE_SNK_Transition_to_default without Hard Reset):
+    /// only fresh Source_Capabilities; anything else fails closed.
+    WaitCapsAfterCarrier,
+}
+
 pub struct Session<'a, B: I2c, D, C, P: Platform> {
     bus: &'a mut B,
     delay: &'a mut D,
@@ -215,8 +232,7 @@ pub struct Session<'a, B: I2c, D, C, P: Platform> {
     receiver: pd_service::Receiver,
     queue: [Option<pd_service::Packet>; 2],
     pending_tx: Option<PendingTx>,
-    partner_reset_pending: bool,
-    partner_wait_caps: bool,
+    reset: Option<ResetStep>,
     protocol_started: bool,
     unsupported_reply: Option<u16>,
     // Object Position of the last acknowledged Request, and of the contract it
@@ -228,9 +244,6 @@ pub struct Session<'a, B: I2c, D, C, P: Platform> {
     bist_test_data: bool,
     // A BIST Carrier Mode classified in Ready at vSafe5V: one carrier allowed.
     bist_carrier_armed: bool,
-    // After the carrier (PE_SNK_Transition_to_default without Hard Reset):
-    // only fresh Source_Capabilities; anything else fails closed.
-    carrier_wait_caps: bool,
     revision_reply: bool,
     sink_caps_reply: bool,
     skedb_reply: bool,
@@ -248,12 +261,9 @@ pub struct Session<'a, B: I2c, D, C, P: Platform> {
     request_reply: bool,
     // Accept received: power transitions until PS_RDY (PE_SNK_Transition_Sink).
     power_transition: bool,
-    // A Protocol Error was seen: the next transmission is our Soft_Reset; the
-    // time of the error bounds tProtErrSoftReset/tSoftReset (Table 6.68).
-    soft_reset_armed: bool,
+    // Time of the Protocol Error that armed our Soft_Reset: it bounds
+    // tProtErrSoftReset/tSoftReset (Table 6.68).
     protocol_error_at: Option<u64>,
-    // Our Soft_Reset was acknowledged: only Accept (or the partner's Soft_Reset).
-    await_reset_accept: bool,
     // From a completed Soft Reset until the renegotiated Request ends.
     recovering: bool,
     // A mandatory Hard Reset is due (`docs/SAFETY.md`); the time of
@@ -315,15 +325,13 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             receiver: pd_service::Receiver::for_spr_boundary(),
             queue: [None, None],
             pending_tx: None,
-            partner_reset_pending: false,
-            partner_wait_caps: false,
+            reset: None,
             protocol_started: false,
             unsupported_reply: None,
             requested_object: None,
             contract_object: None,
             bist_test_data: false,
             bist_carrier_armed: false,
-            carrier_wait_caps: false,
             revision_reply: false,
             sink_caps_reply: false,
             skedb_reply: false,
@@ -335,9 +343,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             tx_wait_flags: 0,
             request_reply: false,
             power_transition: false,
-            soft_reset_armed: false,
             protocol_error_at: None,
-            await_reset_accept: false,
             recovering: false,
             hard_reset_armed: false,
             hard_reset_error_at: None,
@@ -812,24 +818,19 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             && header & 0xf1ff == 0x100c | (u16::from(self.tx_revision) << 6)
             && rdo == Some(pd_protocol::pd_spr::REVISION_DATA_OBJECT);
         let reset_accept = sop == Sop::Partner
-            && self.partner_reset_pending
+            && self.reset == Some(ResetStep::AcceptPartner)
             && bytes.len() == 2
             && header == 3 | (u16::from(self.tx_revision) << 6);
         // PE_SNK_Send_Soft_Reset: Control, MessageID 0, Sink/UFP, negotiated
         // revision, once per Protocol Error; never through SinkTxOK (section 7.1.1).
         let soft_reset = sop == Sop::Partner
-            && self.soft_reset_armed
+            && self.reset == Some(ResetStep::SendSoftReset)
             && !self.recovering
             && bytes.len() == 2
             && header == 13 | (u16::from(self.tx_revision) << 6);
         // While a reset step is due it is the only permitted transmission, and
         // nothing is sent while capabilities are awaited after a reset.
-        if (self.soft_reset_armed && !soft_reset)
-            || (self.partner_reset_pending && !reset_accept)
-            || self.await_reset_accept
-            || self.partner_wait_caps
-            || self.carrier_wait_caps
-        {
+        if self.reset.is_some() && !(soft_reset || reset_accept) {
             return Err(Error::Request);
         }
         let cable_optional = sop == Sop::Cable
@@ -1210,15 +1211,13 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                     });
                 }
                 if reset_accept {
-                    self.partner_reset_pending = false;
-                    self.partner_wait_caps = true;
+                    self.reset = Some(ResetStep::WaitCapsAfterReset);
                     self.recovering = true;
                     self.trace().soft_resets_accepted =
                         self.trace().soft_resets_accepted.saturating_add(1);
                 }
                 if soft_reset {
-                    self.soft_reset_armed = false;
-                    self.await_reset_accept = true;
+                    self.reset = Some(ResetStep::AwaitAccept);
                     self.recovering = true;
                     self.trace().soft_resets_sent = self.trace().soft_resets_sent.saturating_add(1);
                     if let Some(at) = self.protocol_error_at.take() {
@@ -1272,11 +1271,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
     }
     /// A Soft Reset step is due or capabilities are awaited after one.
     fn reset_in_progress(&self) -> bool {
-        self.soft_reset_armed
-            || self.await_reset_accept
-            || self.partner_reset_pending
-            || self.partner_wait_caps
-            || self.carrier_wait_caps
+        self.reset.is_some()
     }
     /// Abandon the AMS in progress for a Soft Reset (sections 7.1.1, 9.2.5.2).
     fn begin_reset(&mut self) {
@@ -1303,16 +1298,21 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             return Err(Error::Peer);
         }
         if self.recovering
-            || self.soft_reset_armed
-            || self.await_reset_accept
-            || self.partner_reset_pending
-            || self.partner_wait_caps
+            || matches!(
+                self.reset,
+                Some(
+                    ResetStep::SendSoftReset
+                        | ResetStep::AwaitAccept
+                        | ResetStep::AcceptPartner
+                        | ResetStep::WaitCapsAfterReset
+                )
+            )
         {
             self.arm_hard_reset();
             return Ok(());
         }
         self.begin_reset();
-        self.soft_reset_armed = true;
+        self.reset = Some(ResetStep::SendSoftReset);
         self.protocol_error_at = Some(self.clock.now_ms());
         Ok(())
     }
@@ -1505,8 +1505,10 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                     if !self.persistent
                         || !matches!(revision, 1 | 2)
                         || self.pending_tx.is_some()
-                        || self.partner_reset_pending
-                        || self.soft_reset_armed
+                        || matches!(
+                            self.reset,
+                            Some(ResetStep::AcceptPartner | ResetStep::SendSoftReset)
+                        )
                         || self.cable_phase != CablePhase::Idle
                         || header & 0x0e00 != 0
                         || (revision_known && !same_revision)
@@ -1518,13 +1520,10 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                         self.tx_revision = revision;
                     }
                     self.begin_reset();
-                    self.await_reset_accept = false;
-                    self.partner_wait_caps = false;
-                    self.carrier_wait_caps = false;
-                    self.partner_reset_pending = true;
+                    self.reset = Some(ResetStep::AcceptPartner);
                     return Ok(length);
                 }
-                if self.await_reset_accept {
+                if self.reset == Some(ResetStep::AwaitAccept) {
                     // Our Soft_Reset: Accept with MessageID 0. Another Message at
                     // this revision is a Protocol Error during the Soft Reset:
                     // Hard Reset (section 7.7). A malformed Accept fails closed.
@@ -1535,18 +1534,17 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                     if header & 0xf01f != 3 || header & 0x0e00 != 0 || !same_revision {
                         return Err(Error::Peer);
                     }
-                    self.await_reset_accept = false;
-                    self.partner_wait_caps = true;
+                    self.reset = Some(ResetStep::WaitCapsAfterReset);
                     return Ok(length);
                 }
-                if self.carrier_wait_caps {
+                if self.reset == Some(ResetStep::WaitCapsAfterCarrier) {
                     // PE_SNK_Wait_for_Capabilities after BIST Carrier Mode: only fresh
                     // Source_Capabilities. No Shall Hard Reset covers anything else.
                     if header & 0x801f != 1 || header & 0x7000 == 0 || !same_revision {
                         return Err(Error::Peer);
                     }
-                    self.carrier_wait_caps = false;
-                } else if self.partner_wait_caps {
+                    self.reset = None;
+                } else if self.reset == Some(ResetStep::WaitCapsAfterReset) {
                     // Section 7.7: only fresh Source_Capabilities; another Message
                     // at this revision means Hard Reset.
                     if header & 0x801f != 1 && same_revision {
@@ -1559,7 +1557,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                     {
                         return Err(Error::Peer);
                     }
-                    self.partner_wait_caps = false;
+                    self.reset = None;
                 } else if self
                     .pps_status_until
                     .take()
@@ -1647,7 +1645,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                     self.request_reply = false;
                 } else if self.persistent
                     && self.trace().contract_seen
-                    && !self.partner_reset_pending
+                    && self.reset != Some(ResetStep::AcceptPartner)
                     && self.selection.is_none_or(|s| !s.request_in_flight())
                 {
                     use pd_protocol::pd_spr::{ReadyResponse, ready_response};
@@ -2014,10 +2012,13 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         P::set_rx_idle(false);
         let now = self.clock.now_ms();
         let since = |at: Option<u64>, min: u64| at.is_some_and(|at| now.saturating_sub(at) >= min);
-        let timed_out = ((self.request_reply || self.await_reset_accept)
+        let timed_out = ((self.request_reply || self.reset == Some(ResetStep::AwaitAccept))
             && since(self.t_ack, SENDER_RESPONSE_MIN_MS))
             || (self.power_transition && since(self.t_accept, PS_TRANSITION_MIN_MS));
-        let startup_reset = self.partner_reset_pending || self.partner_wait_caps;
+        let startup_reset = matches!(
+            self.reset,
+            Some(ResetStep::AcceptPartner | ResetStep::WaitCapsAfterReset)
+        );
         if !self.persistent
             || (self.trace().peer_revision.is_none() && !startup_reset)
             || self.pending_tx.is_some()
@@ -2135,7 +2136,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         }
         self.begin_reset();
         self.recovering = false;
-        self.carrier_wait_caps = true;
+        self.reset = Some(ResetStep::WaitCapsAfterCarrier);
         Ok(())
     }
     pub async fn transition_to_default(&mut self) -> Result<(), Error<B::Error>> {
