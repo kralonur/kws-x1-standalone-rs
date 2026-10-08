@@ -7,9 +7,8 @@ pub fn paint_cable(
     observation: Observation,
     page: u32,
     svid: Option<u16>,
-    glyph: fn(u8) -> u16,
 ) {
-    paint_lines(framebuffer, cable_lines(observation, page, svid), glyph);
+    paint_lines(framebuffer, cable_lines(observation, page, svid));
 }
 
 /// Selected SVID's ascending-set index; no bitmap is copied into observations.

@@ -44,7 +44,7 @@ use hc32f460_pac::interrupt;
 use panel::Orientation;
 #[cfg(not(any(feature = "pd-boot-diagnostic", feature = "cable-log")))]
 use panic_halt as _;
-use render::{Counters, Frame, clear_screen, glyph, render_irq_test, render_measure, render_ports};
+use render::{Counters, Frame, clear_screen, render_irq_test, render_measure, render_ports};
 
 /// Return addresses the walk accepts: the application image after its initial
 /// stack pointer word, up to the end of the flash tool's application erase
@@ -548,15 +548,9 @@ unsafe fn render_pd(framebuffer: *mut u16, raw_vbus: u16, cable_detail: Option<u
         if let Some(page) = cable_detail {
             let svid = pd::cable_svid_index(observation, page)
                 .and_then(|index| firmware_core::pd_svids::Store::at(&CABLE_SVID_STORE, index));
-            pd::paint_cable(
-                &mut *(framebuffer as *mut Frame),
-                observation,
-                page,
-                svid,
-                glyph,
-            );
+            pd::paint_cable(&mut *(framebuffer as *mut Frame), observation, page, svid);
         } else {
-            pd::paint(&mut *(framebuffer as *mut Frame), observation, glyph);
+            pd::paint(&mut *(framebuffer as *mut Frame), observation);
         }
     }
 }
@@ -566,7 +560,7 @@ unsafe fn render_partner(framebuffer: *mut u16, page: u32) {
     let observation = latest_observation();
     unsafe {
         clear_screen(framebuffer);
-        pd::paint_partner(&mut *(framebuffer as *mut Frame), observation, page, glyph);
+        pd::paint_partner(&mut *(framebuffer as *mut Frame), observation, page);
     }
 }
 

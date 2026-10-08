@@ -259,11 +259,6 @@ fn status_rows(
 }
 
 /// Paint the charger page (`partner_lines`).
-pub fn paint_partner(
-    framebuffer: &mut crate::render::Frame,
-    observation: Observation,
-    page: u32,
-    glyph: fn(u8) -> u16,
-) {
-    paint_lines(framebuffer, partner_lines(observation, page), glyph);
+pub fn paint_partner(framebuffer: &mut crate::render::Frame, observation: Observation, page: u32) {
+    paint_lines(framebuffer, partner_lines(observation, page));
 }

@@ -808,40 +808,21 @@ fn decimal2(row: &mut [u8; 24], start: usize, milli: u16) {
     row[start + 4] = b'0' + ((milli / 10) % 10) as u8;
 }
 
-/// Paint compact 2x glyphs into the caller-owned, already-cleared meter frame.
-/// Eight rows fit the 135px panel; the original meter font remains unchanged.
-pub fn paint(
-    framebuffer: &mut crate::render::Frame,
-    observation: Observation,
-    glyph: fn(u8) -> u16,
-) {
-    paint_lines(framebuffer, lines(observation), glyph);
+/// Paint the PD rows into the caller-owned, already-cleared frame: eight
+/// 16 px rows fit the 135 px panel.
+pub fn paint(framebuffer: &mut crate::render::Frame, observation: Observation) {
+    paint_lines(framebuffer, lines(observation));
 }
 
-fn paint_lines(framebuffer: &mut crate::render::Frame, rows: [[u8; 24]; 8], glyph: fn(u8) -> u16) {
+fn paint_lines(framebuffer: &mut crate::render::Frame, rows: [[u8; 24]; 8]) {
     for (line_index, line) in rows.iter().enumerate() {
-        for (char_index, &c) in line.iter().enumerate() {
-            // Compact diagnostic captions need N; do not alter the meter font.
-            let bitmap = if c == b'N' {
-                0b101_101_111_111_101
-            } else {
-                glyph(c)
-            };
-            for row in 0..5 {
-                for column in 0..3 {
-                    if bitmap & (1 << (row * 3 + 2 - column)) != 0 {
-                        for dy in 0..2 {
-                            for dx in 0..2 {
-                                let x = 12 + char_index * 8 + column * 2 + dx;
-                                let y = 6 + line_index * 16 + row * 2 + dy;
-                                framebuffer[y * usize::from(firmware_core::panel::WIDTH) + x] =
-                                    crate::render::BLACK;
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        crate::render::draw_text(
+            framebuffer,
+            &crate::render::SMALL_FONT,
+            12,
+            6 + line_index * 16,
+            line,
+        );
     }
 }
 

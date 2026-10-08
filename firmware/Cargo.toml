@@ -28,6 +28,7 @@ embassy-executor = { workspace = true, features = ["platform-cortex-m", "executo
 embassy-hc32.workspace = true
 embassy-sync.workspace = true
 embassy-time = { workspace = true, features = ["tick-hz-1_000"] }
+embedded-graphics.workspace = true
 embedded-hal-async.workspace = true
 fusb302-pd.workspace = true
 hc32f460-pac = { workspace = true, features = ["rt"] }

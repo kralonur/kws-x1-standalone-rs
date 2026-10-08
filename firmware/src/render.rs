@@ -1,7 +1,14 @@
-//! Bitmap font and the meter, port and I2C fault pages, drawn straight into
-//! the frame.
+//! Text drawing (`embedded-graphics` fonts) and the meter, port and I2C fault
+//! pages, drawn straight into the frame.
 
 use core::sync::atomic::Ordering;
+
+use embedded_graphics::mono_font::ascii::{FONT_6X10, FONT_9X18_BOLD};
+use embedded_graphics::mono_font::{MonoFont, MonoTextStyle};
+use embedded_graphics::pixelcolor::Rgb565;
+use embedded_graphics::pixelcolor::raw::RawU16;
+use embedded_graphics::prelude::*;
+use embedded_graphics::text::{Baseline, Text};
 
 use crate::{BUTTON_GAP_MAX_MS, FRAME_MS, ina226};
 
@@ -16,59 +23,10 @@ const HEIGHT: usize = firmware_core::panel::HEIGHT as usize;
 pub const fn color(rgb565: u16) -> u16 {
     rgb565.swap_bytes()
 }
-pub const BLACK: u16 = color(0x0000);
 pub const WHITE: u16 = color(0xffff);
 pub const BLUE: u16 = color(0x001f);
 pub const RED: u16 = color(0xf800);
 const CYAN: u16 = color(0x07ff);
-
-// 3 columns x 5 rows bitmap font (same glyphs as the earlier application).
-pub fn glyph(c: u8) -> u16 {
-    match c {
-        b'0' => 0b111_101_101_101_111,
-        b'1' => 0b111_010_010_110_010,
-        b'2' => 0b111_100_111_001_111,
-        b'3' => 0b111_001_111_001_111,
-        b'4' => 0b001_001_111_101_101,
-        b'5' => 0b111_001_111_100_111,
-        b'6' => 0b111_101_111_100_111,
-        b'7' => 0b010_010_010_001_111,
-        b'8' => 0b111_101_111_101_111,
-        b'9' => 0b111_001_111_101_111,
-        b'A' => 0b101_101_111_101_010,
-        b'B' => 0b110_101_110_101_110,
-        b'C' => 0b111_100_100_100_111,
-        b'D' => 0b110_101_101_101_110,
-        b'E' => 0b111_100_110_100_111,
-        b'F' => 0b100_100_110_100_111,
-        b'G' => 0b111_101_101_100_111,
-        b'H' => 0b101_101_111_101_101,
-        b'I' => 0b111_010_010_010_111,
-        b'K' => 0b101_101_110_101_101,
-        b'L' => 0b111_100_100_100_100,
-        b'M' => 0b101_101_101_111_101,
-        b'O' => 0b111_101_101_101_111,
-        b'P' => 0b100_100_110_101_110,
-        b'Q' => 0b001_111_101_101_111,
-        b'R' => 0b101_101_110_101_110,
-        b'S' => 0b111_001_111_100_111,
-        b'T' => 0b010_010_010_010_111,
-        b'U' => 0b111_101_101_101_101,
-        b'V' => 0b010_101_101_101_101,
-        b'W' => 0b101_111_101_101_101,
-        b'X' => 0b101_101_010_101_101,
-        b'Y' => 0b010_010_010_101_101,
-        b'/' => 0b001_001_010_100_100,
-        b'_' => 0b000_000_000_000_111,
-        b'.' => 0b010_000_000_000_000,
-        b'-' => 0b000_000_111_000_000,
-        b':' => 0b000_010_000_010_000,
-        b'*' => 0b101_010_111_010_101,
-        b'[' => 0b111_100_100_100_111,
-        b']' => 0b111_001_001_001_111,
-        _ => 0,
-    }
-}
 
 #[inline(never)]
 pub unsafe fn clear_screen(framebuffer: *mut u16) {
@@ -79,29 +37,80 @@ pub unsafe fn clear_screen(framebuffer: *mut u16) {
     }
 }
 
-#[inline(never)]
-unsafe fn text(framebuffer: *mut u16, mut x: usize, y: usize, bytes: &[u8]) {
-    for &c in bytes {
-        let bitmap = glyph(c);
-        for row in 0..5 {
-            for column in 0..3 {
-                if bitmap & (1 << (row * 3 + 2 - column)) != 0 {
-                    for dy in 0..3 {
-                        for dx in 0..3 {
-                            let px = x + column * 3 + dx;
-                            let py = y + row * 3 + dy;
-                            if px < WIDTH && py < HEIGHT {
-                                unsafe {
-                                    framebuffer.add(py * WIDTH + px).write_volatile(BLACK);
-                                }
-                            }
-                        }
-                    }
-                }
+/// The frame as an `embedded-graphics` draw target. Colours are stored in
+/// [`color`]'s byte order; pixels outside the panel are dropped.
+struct Canvas<'a>(&'a mut Frame);
+
+impl OriginDimensions for Canvas<'_> {
+    fn size(&self) -> Size {
+        Size::new(WIDTH as u32, HEIGHT as u32)
+    }
+}
+
+impl DrawTarget for Canvas<'_> {
+    type Color = Rgb565;
+    type Error = core::convert::Infallible;
+
+    fn draw_iter<I>(&mut self, pixels: I) -> Result<(), Self::Error>
+    where
+        I: IntoIterator<Item = Pixel<Rgb565>>,
+    {
+        for Pixel(point, rgb) in pixels {
+            if let (Ok(x), Ok(y)) = (usize::try_from(point.x), usize::try_from(point.y))
+                && x < WIDTH
+                && y < HEIGHT
+            {
+                self.0[y * WIDTH + x] = color(RawU16::from(rgb).into_inner());
             }
         }
-        x += 12;
+        Ok(())
     }
+}
+
+/// Meter, port and validation pages: 9 x 18 px bold glyphs on a 12 px pitch.
+const LARGE_FONT: MonoFont = MonoFont {
+    character_spacing: 3,
+    ..FONT_9X18_BOLD
+};
+/// PD pages: 6 x 10 px glyphs on an 8 px pitch, 24 characters per row.
+pub const SMALL_FONT: MonoFont = MonoFont {
+    character_spacing: 2,
+    ..FONT_6X10
+};
+/// Characters drawn per `Text`; longer lines continue in further chunks.
+const TEXT_CHUNK: usize = 24;
+
+/// Draw `bytes` in black with its top-left corner at (`x`, `y`). Bytes that
+/// are not printable ASCII (such as unused `0` cells) are drawn as spaces.
+pub fn draw_text(frame: &mut Frame, font: &MonoFont, x: usize, y: usize, bytes: &[u8]) {
+    let style = MonoTextStyle::new(font, Rgb565::BLACK);
+    let mut canvas = Canvas(frame);
+    let mut origin = Point::new(x as i32, y as i32);
+    for chunk in bytes.chunks(TEXT_CHUNK) {
+        let mut printable = [b' '; TEXT_CHUNK];
+        for (cell, &byte) in printable.iter_mut().zip(chunk) {
+            if byte.is_ascii_graphic() {
+                *cell = byte;
+            }
+        }
+        let Ok(line) = core::str::from_utf8(&printable[..chunk.len()]) else {
+            return;
+        };
+        let Ok(next) = Text::with_baseline(line, origin, style, Baseline::Top).draw(&mut canvas);
+        origin = next;
+    }
+}
+
+#[inline(never)]
+unsafe fn text(framebuffer: *mut u16, x: usize, y: usize, bytes: &[u8]) {
+    // SAFETY: `framebuffer` is the whole frame and the renderer is its sole owner.
+    draw_text(
+        unsafe { &mut *(framebuffer as *mut Frame) },
+        &LARGE_FONT,
+        x,
+        y,
+        bytes,
+    );
 }
 
 #[inline(always)]
