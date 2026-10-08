@@ -234,7 +234,7 @@ pub async fn run(observation: &mut pd::Observation, report: pd_cc::Report) {
                         pd_spr::Error::Transmit(_) => 38,
                         pd_spr::Error::Declined(_) => 39,
                         pd_spr::Error::RecoveryBlocked => {
-                            if !phy.observation.spr.unwrap().tx_written
+                            if !phy.observation.spr.is_some_and(|spr| spr.tx_written)
                                 && phy.observation.rx_packets == 0
                             {
                                 phy.observation.phase = pd::Phase::NoCapabilities;
@@ -316,7 +316,10 @@ fn failure_report(
         Error::Bus {
             address, register, ..
         } => {
-            observation.spr.as_mut().unwrap().failed_address = address;
+            observation
+                .spr
+                .get_or_insert_with(pd::SprObservation::pending)
+                .failed_address = address;
             observation.failed_register = register;
             BUS_LATCH.fail();
         }

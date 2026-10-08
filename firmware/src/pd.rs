@@ -215,8 +215,8 @@ pub fn lines(observation: Observation) -> [[u8; 24]; 8] {
     if observation.phase == Phase::Passive {
         return passive_lines(observation);
     }
-    if observation.spr.is_some() {
-        return spr_lines(observation);
+    if let Some(spr) = observation.spr {
+        return spr_lines(observation, spr);
     }
     if observation.selected_cc.is_some() || observation.rx_error != 0 {
         return rx_lines(observation);
@@ -392,10 +392,13 @@ fn sniff_caps_lines(sniff: SniffObservation) -> [[u8; 24]; 8] {
 
 fn rx_lines(observation: Observation) -> [[u8; 24]; 8] {
     let mut rows = [[b' '; 24]; 8];
-    if observation.phase == Phase::Captured {
-        let capabilities = observation.capabilities.expect("captured advertisements");
+    if let (Phase::Captured, Some(capabilities), Some(cc)) = (
+        observation.phase,
+        observation.capabilities,
+        observation.selected_cc,
+    ) {
         put(&mut rows[0], b"PD CAPS C- N- ROK TX OFF");
-        rows[0][9] = b'0' + observation.selected_cc.unwrap();
+        rows[0][9] = b'0' + cc;
         rows[0][12] = b'0' + capabilities.count;
         for (i, object) in capabilities.objects[..capabilities.count as usize]
             .iter()
@@ -464,8 +467,7 @@ fn rx_lines(observation: Observation) -> [[u8; 24]; 8] {
     phase_line(&mut rows[7], observation);
     rows
 }
-fn spr_lines(observation: Observation) -> [[u8; 24]; 8] {
-    let spr = observation.spr.unwrap();
+fn spr_lines(observation: Observation, spr: SprObservation) -> [[u8; 24]; 8] {
     let mut rows = [[b' '; 24]; 8];
     put(
         &mut rows[0],
@@ -844,10 +846,12 @@ pub fn control_cable_selection(
         selection.set_mode_cursor(Some(index));
     } else if selection.request_cable_mode(svid) {
         selection.set_mode_cursor(Some(index));
-        observation.spr.as_mut().unwrap().cable_modes.mode = kws_x1_core::pd_cable_modes::Modes {
-            svid,
-            ..Default::default()
-        };
+        if let Some(spr) = observation.spr.as_mut() {
+            spr.cable_modes.mode = kws_x1_core::pd_cable_modes::Modes {
+                svid,
+                ..Default::default()
+            };
+        }
     }
 }
 

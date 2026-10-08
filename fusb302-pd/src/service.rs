@@ -30,9 +30,12 @@ impl Packet {
     pub fn bytes(&self) -> &[u8] {
         &self.bytes[..self.length]
     }
+    /// Invariant: a `Packet` is only built after its bytes decoded. Admitting
+    /// extended frames on every address cannot reject them again: the flags
+    /// only gate frames whose Extended bit was already admitted.
     pub fn frame(&self) -> pd_rx::Frame<'_> {
         pd_rx::decode_with(self.bytes(), true, true)
-            .expect("validated packet")
+            .expect("packet bytes were decoded before the packet was built")
             .0
     }
 }
@@ -187,21 +190,23 @@ impl Receiver {
                 length: 0,
             };
             self.read(bus, FIFOS, &mut packet.bytes[..3]).await?;
-            let prefix: &[u8; 3] = packet.bytes[..3].try_into().unwrap();
+            let [b0, b1, b2, ..] = packet.bytes;
+            let prefix = [b0, b1, b2];
             let extended = prefix[2] & 0x80 != 0
                 && (self.cable_extended && matches!(prefix[0] >> 5, 5 | 6)
                     || self.partner_extended && prefix[0] >> 5 == 7);
             let body_start = if extended {
                 self.read(bus, FIFOS, &mut packet.bytes[3..5]).await?;
+                let [_, _, _, b3, b4, ..] = packet.bytes;
                 packet.length = pd_rx::fifo_extended_frame_len(
-                    packet.bytes[..5].try_into().unwrap(),
+                    &[b0, b1, b2, b3, b4],
                     self.cable_extended,
                     self.partner_extended,
                 )
                 .map_err(Error::Frame)?;
                 5
             } else {
-                packet.length = pd_rx::fifo_frame_len(prefix).map_err(Error::Frame)?;
+                packet.length = pd_rx::fifo_frame_len(&prefix).map_err(Error::Frame)?;
                 3
             };
             self.read(bus, FIFOS, &mut packet.bytes[body_start..packet.length])

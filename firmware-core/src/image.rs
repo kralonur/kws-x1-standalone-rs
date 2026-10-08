@@ -100,11 +100,10 @@ pub fn verify_payload(payload: &[u8]) -> Result<(), ImageError> {
     if payload.len() < PAYLOAD_LEN {
         return Err(ImageError::WrongBufferLength { len: payload.len() });
     }
-    let stored = u32::from_be_bytes(
-        payload[CHECKSUM_OFFSET..CHECKSUM_OFFSET + 4]
-            .try_into()
-            .expect("four bytes"),
-    );
+    let Some(&stored) = payload[CHECKSUM_OFFSET..].first_chunk() else {
+        return Err(ImageError::WrongBufferLength { len: payload.len() });
+    };
+    let stored = u32::from_be_bytes(stored);
     let computed = additive_checksum(&payload[..CHECKSUM_OFFSET]);
     if stored != computed {
         return Err(ImageError::BadChecksum { stored, computed });
