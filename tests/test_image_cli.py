@@ -12,11 +12,13 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-# Established content/trailer layout, 64-byte alignment and graphics boundary.
+# Established content/trailer layout, 64-byte alignment, the application limit
+# below the checksum and a byte past the synthetic application.
 CHECKSUM = 0x3340C
 MARKER = 0x33410
 PAYLOAD_BYTES = 0x33440
-GRAPHICS = 0x24000
+APP_LIMIT = 0x33400
+TRAILING = 0x24000
 # PAC vector layout and the firmware's permitted custom interrupt lines.
 CUSTOM_IRQS = (4, 8, 13, 86, 87, 88, 110, 111, 112, 113)
 
@@ -90,7 +92,7 @@ class ImageCli(unittest.TestCase):
         good = self.app.read_bytes()
         wrong_irq = bytearray(good)
         struct.pack_into("<I", wrong_irq, (16 + CUSTOM_IRQS[0]) * 4, 0x10301)
-        for app in [good[:639], good + bytes(GRAPHICS + 1 - len(good)), wrong_irq]:
+        for app in [good[:639], good + bytes(APP_LIMIT + 1 - len(good)), wrong_irq]:
             with self.subTest(length=len(app)):
                 self.app.write_bytes(app)
                 self.assertNotEqual(self.package().returncode, 0)
@@ -114,10 +116,10 @@ class ImageCli(unittest.TestCase):
         self.assertNotEqual(self.package().returncode, 0)
         self.assertEqual(self.output.read_bytes(), b"keep this file")
 
-    def test_audit_rejects_graphics_change_even_with_valid_checksum_and_hash(self):
+    def test_audit_rejects_trailing_change_even_with_valid_checksum_and_hash(self):
         self.assertEqual(self.package().returncode, 0)
         payload = bytearray(self.output.read_bytes()[2:])
-        payload[GRAPHICS] ^= 1
+        payload[TRAILING] ^= 1
         self.output.write_bytes(container(payload))
         result = self.audit()
         self.assertNotEqual(result.returncode, 0)

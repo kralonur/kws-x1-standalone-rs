@@ -1,11 +1,13 @@
 MEMORY
 {
-  /* Executable application space ends at the preserved graphics bank.
-   * The container extends to 0x43420, but packaging must retain everything
-   * after this region and only update the checksum at 0x4340c.
+  /* Executable application space ends below the container checksum at
+   * 0x4340c; the original firmware's graphics bank from 0x34000 is unused and
+   * may be overwritten. The container and its erase envelope still end at
+   * 0x43420 and 0x44000; packaging retains every byte after the application
+   * and only updates the checksum.
    * Bootloader below 0x10000 and settings at [0x72000, 0x80000) are untouched.
    */
-  FLASH : ORIGIN = 0x00010000, LENGTH = 0x24000
+  FLASH : ORIGIN = 0x00010000, LENGTH = 0x33400
   /* SRAMH (32 KiB) upper half + SRAM1 (64 KiB). The origin leaves the original
    * firmware's clock bookkeeping words at 0x1FFF82A4/0x1FFF8C54 outside this image's
    * .bss, and the length stops 256 bytes short of SRAM1's exclusive end so the

@@ -13,8 +13,10 @@ PAYLOAD_LEN = 0x33420
 CHECKSUM_OFFSET = 0x3340C
 MARKER_OFFSET = 0x33410
 CONTAINER_PREFIX = b"\x00\x0a"
-# Executable bytes stop before the installed graphics bank at 0x34000.
-APP_LIMIT = 0x24000
+# Executable bytes stop on a 64-byte chunk below the checksum at CHECKSUM_OFFSET;
+# the original graphics bank (payload 0x24000, flash 0x34000) is unused and may
+# be overwritten.
+APP_LIMIT = 0x33400
 # Container trailer marker from the existing image format.
 MARKER = 0x80
 # cortex-m-rt emits 16 exceptions plus the PAC's 144 interrupt entries.
@@ -85,7 +87,7 @@ def verify_container(data):
 
 def check_application(app):
     if not VECTOR_COUNT * 4 <= len(app) <= APP_LIMIT:
-        raise ImageError("Application is truncated or overlaps the graphics bank")
+        raise ImageError("Application is truncated or overlaps the container checksum")
     vectors = struct.unpack_from(f"<{VECTOR_COUNT}I", app)
     if not SRAM1_START < vectors[0] < SRAM1_END:
         raise ImageError("Initial stack pointer is not strictly inside SRAM1")
@@ -131,7 +133,7 @@ def audit(candidate, baseline, app):
             or payload[CHECKSUM_OFFSET + 4:] != prior[CHECKSUM_OFFSET + 4:]):
         raise ImageError("Bytes outside the application/checksum changed")
     report.update(application_bytes=len(app), baseline_sha256=sha256(baseline),
-                  application_sha256=sha256(app), graphics_preserved=True)
+                  application_sha256=sha256(app), trailing_bytes_preserved=True)
     return report
 
 
