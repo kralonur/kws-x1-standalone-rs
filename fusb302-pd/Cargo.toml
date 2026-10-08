@@ -10,8 +10,6 @@ test = false
 bench = false
 
 [dependencies]
-device-driver.workspace = true
 embedded-hal-async.workspace = true
-fusb302b.workspace = true
 pd-protocol.workspace = true
 usbpd-traits.workspace = true
