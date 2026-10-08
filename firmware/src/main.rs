@@ -1669,7 +1669,13 @@ async fn main(spawner: Spawner) {
     }
     #[cfg(any(feature = "pd-boot-diagnostic", feature = "cable-log"))]
     flash_log::start();
-    let clocks = unsafe { clock_setup::init().expect("clock init") };
+    // A clock error leaves startup fail-stopped; dependent drivers stay inactive.
+    // SAFETY: SRAM timing is configured; startup owns clocks with IRQs/drivers inactive.
+    let Ok(clocks) = (unsafe { clock_setup::init() }) else {
+        loop {
+            cortex_m::asm::wfi();
+        }
+    };
     unsafe {
         embassy_hc32::init(clocks);
     }
