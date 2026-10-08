@@ -352,7 +352,7 @@ async fn tilt_task(input: InputPin) {
     let mut tilt = unsafe {
         embassy_hc32::exti::ExtiInput::from_input(input, embassy_hc32::intc::EirqTrigger::Rising)
     };
-    // Errata Rev 1.41 §2.4.2: the peripheral side is already enabled by
+    // Errata 2.4.2: the peripheral side is already enabled by
     // `ExtiInput::new`, so claiming the line here clears pending before NVIC.
     if unsafe { embassy_hc32::intc::register(13, const { line(13) }, 8) }.is_err() {
         IRQ_REG_FAILURES.fetch_add(1, Ordering::Relaxed);
@@ -709,7 +709,7 @@ async fn main(spawner: Spawner) {
         }
 
         // INTC validation (vendor-documented sequence, RM 10.4.2 + Errata
-        // Rev 1.41 2.4.1/2.4.2):
+        // 2.4.1/2.4.2):
         //   1. Errata 2.4.1: a pin position may only have one port's INTE set,
         //      and the lowest port number wins, so clear channel 13 elsewhere.
         //   2. Enable the peripheral side (PCR.INTE + EIRQCR) first.

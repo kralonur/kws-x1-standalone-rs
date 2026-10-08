@@ -123,7 +123,7 @@ pub fn sink_tx_allowed(status0: u8, status1: u8, rp_required: bool) -> bool {
 /// A refused sample that is only SinkTxNG: quiet line, empty RX FIFO and Rp
 /// 1.5 A.
 ///
-/// **NOT STANDARD — deliberate deviation from PD R3.2 section 7.2** ("the Sink
+/// **NOT STANDARD — deliberate deviation from USB PD section 7.2** ("the Sink
 /// Shall Not initiate an AMS" while Rp is SinkTxNG). This requires explicit
 /// caller policy; see `docs/SAFETY.md`.
 ///
@@ -1151,7 +1151,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         let token_len = PACKSYM | (bytes.len() as u8);
         let mut fifo = [0u8; 40];
         fifo[0] = register::FIFOS;
-        // SOP* sequences as Sync symbols (USB PD R3.2 §5.3.1.1.3, Table 5.3).
+        // SOP* sequences as Sync symbols (USB PD §5.3.1.1.3, Table 5.3).
         fifo[1..5].copy_from_slice(match sop {
             Sop::Cable => &[SOP1, SOP1, SOP3, SOP3],
             Sop::CableDoublePrime => &[SOP1, SOP3, SOP1, SOP3],

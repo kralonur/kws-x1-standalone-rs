@@ -5,12 +5,12 @@ use embassy_hc32::clocks::{self, Clocks, Config, Divider, Dividers, Error, Mpll}
 // Retained profile choice: divide nominal HRC by two before VCO multiplication.
 const PLL_INPUT_DIVIDER: u8 = 2;
 // Retained profile choice: HRC / 2 * 30 gives a 240/300 MHz VCO, within
-// RM Rev1.5 section 4.11.15's 240-480 MHz range.
+// RM 4.11.15's 240-480 MHz range.
 const PLL_MULTIPLIER: u16 = 30;
 // Retained P/Q/R profile: divide VCO by two, preserving 120/150 MHz SYSCLK.
 const PLL_OUTPUT_DIVIDERS: [u8; 3] = [2; 3];
 // Preserve HCLK, EXCLK and the active peripheral rates. PCLK2 uses /4 rather
-// than /2: RM Rev1.5 Table 4-1 limits it to 60 MHz, so 150 MHz /2 is invalid.
+// than /2: RM Table 4-1 limits it to 60 MHz, so 150 MHz /2 is invalid.
 // /4 yields 30/37.5 MHz; PCLK3 (I2C) remains /4 and PCLK1 (SPI) remains /2.
 const BUS_DIVIDERS: Dividers = Dividers {
     hclk: Divider::Div1,
