@@ -114,6 +114,16 @@ unsafe fn stop_display_dma() -> bool {
     }
 }
 
+/// SPI_CR1: SPE | MSTR | TXMDS | SPIMDS, an enabled 3-wire master that only
+/// transmits (RM 27.12.2).
+const SPI_CR1: u32 = 1 << 6 | 1 << 3 | 1 << 1 | 1 << 0;
+/// SPI_CFG1: MIDI = 101b, 6 SCK + 2 PCLK between accesses; bit 4 is reserved
+/// and written as 1 (RM 27.12.3).
+const SPI_CFG1: u32 = 0b101 << 28 | 1 << 4;
+/// SPI_CFG2: MSSIE | MSSDLE | MIDIE use the CFG1 delays, DSIZE = 0100b (8-bit),
+/// MSB first, SS0, MBR = 000b (PCLK1 / 2), CPOL = CPHA = 1 (RM 27.12.5).
+const SPI_CFG2: u32 = 1 << 15 | 1 << 14 | 1 << 13 | 0b0100 << 8 | 1 << 1 | 1 << 0;
+
 /// # Safety
 /// Requires privileged initialized clock/PORT and running Embassy time driver.
 /// PB5/PB6/PB7/PA15, PH2 GPIO drive and SPI3 are configured. Backlight timer
@@ -137,9 +147,9 @@ pub async unsafe fn init(mut backlight_pin: AlternatePin) -> bool {
         let Ok(driver) = embassy_hc32::spi::Spi3::new(
             hc32f460_pac::Spi3::steal(),
             embassy_hc32::spi::Config {
-                cfg1: 0x5000_0010,
-                cfg2: 0xe403,
-                control: 0x4b,
+                cfg1: SPI_CFG1,
+                cfg2: SPI_CFG2,
+                control: SPI_CR1,
             },
         ) else {
             return false;
