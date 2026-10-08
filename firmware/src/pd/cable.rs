@@ -151,7 +151,9 @@ pub fn cable_lines(observation: Observation, page: u32, svid: Option<u16>) -> [[
                     match kws_x1_core::pd_cable::second_controller(&report) {
                         Some(false) => b"NO SOP2 ADVERTISED",
                         None => b"LAYOUT/PRESENCE UNKNOWN",
-                        Some(true) if report.revision != 2 => b"PD2 NO GET_STATUS",
+                        Some(true) if report.revision != fusb302_pd::header::REVISION_3 => {
+                            b"PD2 NO GET_STATUS"
+                        }
                         Some(true) if observation.phase == Phase::Failed => {
                             b"PD HALTED SEE PD PAGE"
                         }

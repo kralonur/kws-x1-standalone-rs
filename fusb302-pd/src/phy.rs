@@ -398,7 +398,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             softrst_frame_at: None,
             cable_phase: CablePhase::Idle,
             cable_rx_id: 0,
-            tx_revision: 2,
+            tx_revision: header::REVISION_3,
             t_send: None,
             t_ack: None,
             t_accept: None,
@@ -832,39 +832,51 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         // negotiated revision and exactly the objects for it (section 6.4.1.2).
         let is_sink_caps = sop == Sop::Partner
             && self.sink_caps_reply
-            && pd_protocol::pd_spr::sink_capabilities::<P::Limits>(self.tx_revision == 2)
-                .is_some_and(|(objects, count)| {
-                    bytes.len() == 2 + 4 * count
-                        && header & header::WITHOUT_ID
-                            == (count as u16) << 12 | u16::from(self.tx_revision) << 6 | 4
-                        && bytes[2..]
-                            .as_chunks::<4>()
-                            .0
-                            .iter()
-                            .zip(&objects[..count])
-                            .all(|(raw, object)| *raw == object.to_le_bytes())
-                });
+            && pd_protocol::pd_spr::sink_capabilities::<P::Limits>(
+                self.tx_revision == header::REVISION_3,
+            )
+            .is_some_and(|(objects, count)| {
+                bytes.len() == 2 + 4 * count
+                    && header & header::WITHOUT_ID
+                        == header::objects(count as u16)
+                            | header::revision(self.tx_revision)
+                            | header::data::SINK_CAPABILITIES
+                    && bytes[2..]
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .zip(&objects[..count])
+                        .all(|(raw, object)| *raw == object.to_le_bytes())
+            });
         // PD3 Sink_Capabilities_Extended: one Chunked Chunk 0 of the exact
         // 24-byte SKEDB padded with 00h to 7 Data Objects (Tables 6.48, 6.61).
         let skedb_reply = sop == Sop::Partner
             && self.skedb_reply
-            && self.tx_revision == 2
+            && self.tx_revision == header::REVISION_3
             && bytes.len() == 30
-            && header & header::WITHOUT_ID == 0xf08f
-            && bytes[2..4] == [0x18, 0x80]
+            && header & header::WITHOUT_ID
+                == header::EXTENDED
+                    | header::objects(7)
+                    | header::revision(header::REVISION_3)
+                    | header::extended::SINK_CAPABILITIES_EXTENDED
+            && bytes[2..4] == (header::extended::header::CHUNKED | 24).to_le_bytes()
             && pd_protocol::pd_spr::sink_capabilities_extended::<P::Limits>()
                 .is_some_and(|block| bytes[4..28] == block)
             && bytes[28..] == [0, 0];
         let status_reply = sop == Sop::Partner
-            && self.tx_revision == 2
+            && self.tx_revision == header::REVISION_3
             && bytes.len() == 14
             && self.config.persistent
             && self.trace().contract_seen
             && self.request.is_none()
             && self.cable_phase == CablePhase::Idle
             && self.config.selection.is_none_or(|s| !s.request_in_flight())
-            && header & header::WITHOUT_ID == 0xb082
-            && bytes[2..4] == [7, 0x80]
+            && header & header::WITHOUT_ID
+                == header::EXTENDED
+                    | header::objects(3)
+                    | header::revision(header::REVISION_3)
+                    | header::extended::STATUS
+            && bytes[2..4] == (header::extended::header::CHUNKED | 7).to_le_bytes()
             && bytes[11..] == [0, 0, 0]
             && self.status_reply.is_some_and(|block| {
                 bytes[4..11] == block && pd_protocol::pd_spr::sink_status_valid(block)
@@ -873,19 +885,20 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             bytes.len() == 2 && self.unsupported_reply == Some(header & header::WITHOUT_ID);
         let revision_reply = sop == Sop::Partner
             && self.revision_reply
-            && header & header::WITHOUT_ID == 0x100c | (u16::from(self.tx_revision) << 6)
+            && header & header::WITHOUT_ID
+                == header::objects(1) | header::revision(self.tx_revision) | header::data::REVISION
             && rdo == Some(pd_protocol::pd_spr::REVISION_DATA_OBJECT);
         let reset_accept = sop == Sop::Partner
             && self.reset == Some(ResetStep::AcceptPartner)
             && bytes.len() == 2
-            && header == 3 | (u16::from(self.tx_revision) << 6);
+            && header == header::control::ACCEPT | header::revision(self.tx_revision);
         // PE_SNK_Send_Soft_Reset: Control, MessageID 0, Sink/UFP, negotiated
         // revision, once per Protocol Error; never through SinkTxOK (section 7.1.1).
         let soft_reset = sop == Sop::Partner
             && self.reset == Some(ResetStep::SendSoftReset)
             && !self.recovering
             && bytes.len() == 2
-            && header == 13 | (u16::from(self.tx_revision) << 6);
+            && header == header::control::SOFT_RESET | header::revision(self.tx_revision);
         // While a reset step is due it is the only permitted transmission, and
         // nothing is sent while capabilities are awaited after a reset.
         if self.reset.is_some() && !(soft_reset || reset_accept) {
@@ -898,14 +911,16 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         }
         let cable_optional = sop == Sop::Cable
             && self.cable_phase == CablePhase::Identity
-            && (header >> 6) & 3 == 2
+            && header & header::SPEC_REVISION == header::revision(header::REVISION_3)
             && self.trace().cable_report.is_some_and(|r| {
-                r.status == usbpd_traits::CableStatus::Identity && r.revision == 2
+                r.status == usbpd_traits::CableStatus::Identity && r.revision == header::REVISION_3
             })
-            && (header & header::WITHOUT_ID_REVISION == 0x9006
+            && (header & header::WITHOUT_ID_REVISION
+                == header::EXTENDED | header::objects(1) | header::extended::GET_MANUFACTURER_INFO
                 && bytes.len() == 6
-                && bytes[2..] == [2, 0x80, 0, 0]
-                || header & header::WITHOUT_ID_REVISION == 0x0012
+                && bytes[2..4] == (header::extended::header::CHUNKED | 2).to_le_bytes()
+                && bytes[4..] == [0, 0]
+                || header & header::WITHOUT_ID_REVISION == header::control::GET_STATUS
                     && bytes.len() == 2
                     && self
                         .trace()
@@ -913,25 +928,36 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                         .is_some_and(|r| (r.objects[1] >> 27) & 7 == 4));
         let cable_second = sop == Sop::CableDoublePrime
             && self.trace().cable_report.is_some_and(|report| {
-                report.revision == 2
+                report.revision == header::REVISION_3
                     && pd_protocol::pd_cable::second_controller(&report) == Some(true)
             })
             && bytes.len() == 2
             && match self.cable_phase {
-                CablePhase::SecondReset => header == 0x008d,
-                CablePhase::SecondStatus => header == 0x0292,
+                CablePhase::SecondReset => {
+                    header == header::revision(header::REVISION_3) | header::control::SOFT_RESET
+                }
+                CablePhase::SecondStatus => {
+                    header
+                        == header::message_id(1)
+                            | header::revision(header::REVISION_3)
+                            | header::control::GET_STATUS
+                }
                 _ => false,
             };
         // SOP' Soft_Reset before Discover Identity: Control, MessageID 0, PD3
         // (pd_discovery::synchronize; sections 6.1.3.2, 7.1.1, 7.32.3).
-        let cable_reset =
-            sop == Sop::Cable && self.cable_phase == CablePhase::Reset && bytes == [0x8d, 0];
+        let cable_reset = sop == Sop::Cable
+            && self.cable_phase == CablePhase::Reset
+            && bytes
+                == (header::revision(header::REVISION_3) | header::control::SOFT_RESET)
+                    .to_le_bytes();
         let cable_identity = cable_reset
             || cable_second
             || cable_optional
             || (sop == Sop::Cable
                 && self.cable_phase == CablePhase::Identity
-                && header & header::WITHOUT_ID_REVISION == 0x100f
+                && header & header::WITHOUT_ID_REVISION
+                    == header::objects(1) | header::data::VENDOR_DEFINED
                 && rdo.is_some_and(|vdm| {
                     let command = vdm & 0x1f;
                     vdm & 0x87ff == 0x8000 | command
@@ -953,7 +979,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         let pps_status_query = sop == Sop::Partner
             && bytes.len() == 2
             && header & header::WITHOUT_ID == pd_protocol::pd_spr::GET_PPS_STATUS_HEADER
-            && self.tx_revision == 2
+            && self.tx_revision == header::REVISION_3
             && self.config.persistent
             && self.trace().contract_seen
             && !self.caps_reply
@@ -981,7 +1007,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         let answer_window_open = self.query_until.is_some_and(|(until, _)| now < until)
             || self.pps_status_until.is_some_and(|until| now < until);
         let query_ready = sop == Sop::Partner
-            && self.tx_revision == 2
+            && self.tx_revision == header::REVISION_3
             && self.config.persistent
             && self.trace().contract_seen
             && !self.caps_reply
@@ -997,7 +1023,8 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             .flatten();
         let sink_alert = query_ready
             && bytes.len() == 6
-            && header & header::WITHOUT_ID == 0x1086
+            && header & header::WITHOUT_ID
+                == header::objects(1) | header::revision(header::REVISION_3) | header::data::ALERT
             && self
                 .config
                 .selection
@@ -1036,19 +1063,19 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         let expected_type = if cable_identity {
             header & header::WITHOUT_ID_REVISION
         } else if is_request {
-            0x1002
+            header::objects(1) | header::data::REQUEST
         } else if reset_accept {
-            0x0003
+            header::control::ACCEPT
         } else if soft_reset {
-            0x000d
+            header::control::SOFT_RESET
         } else if unsupported_reply {
             header & header::WITHOUT_ID_REVISION
         } else if revision_reply {
-            0x100c
+            header::objects(1) | header::data::REVISION
         } else if skedb_reply {
-            0xf00f
+            header::EXTENDED | header::objects(7) | header::extended::SINK_CAPABILITIES_EXTENDED
         } else if pps_status_query {
-            0x0014
+            header::control::GET_PPS_STATUS
         } else {
             // Sink_Capabilities, or an information request (`query_request`), checked whole above.
             header & header::WITHOUT_ID_REVISION
@@ -1056,10 +1083,10 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         if header & header::WITHOUT_ID_REVISION != expected_type {
             return Err(Error::Request);
         }
-        let revision = (header >> 6) & 3;
+        let revision = ((header & header::SPEC_REVISION) >> 6) as u8;
         if sop == Sop::Partner
             && self.trace().peer_revision.is_some()
-            && revision as u8 != self.tx_revision
+            && revision != self.tx_revision
         {
             return Err(Error::Request);
         }
@@ -1068,7 +1095,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                 .config
                 .selection
                 .is_some_and(|s| s.target_pps_object() != 0)
-            && revision != 2
+            && revision != header::REVISION_3
         {
             return Err(Error::Request);
         }
@@ -1186,11 +1213,12 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         // No await since the write: nothing can have polled these yet.
         self.t_send = Some(t_send);
         if sop == Sop::Partner {
-            self.tx_revision = revision as u8;
+            self.tx_revision = revision;
             // Only the first Request locks SOP revision (section 6.1.3.1).
             // A startup reset Accept uses a temporary revision, not a contract.
             if is_request || self.trace().peer_revision.is_some() {
-                self.trace().peer_revision = Some(if revision == 2 { 3 } else { 2 });
+                self.trace().peer_revision =
+                    Some(if revision == header::REVISION_3 { 3 } else { 2 });
             }
             self.trace().request_id = Some(PendingTx::header_id(header) as u8);
         }
@@ -1486,7 +1514,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
     /// window ends in one quiet-line send (`stale_sink_tx_ng`, owner decision).
     async fn gated_send(&mut self, fifo: &[u8]) -> Result<u64, Error<B::Error>> {
         // AMS starts exist only under an Explicit Contract; PD3 is code 2.
-        let rp_required = self.tx_revision == 2;
+        let rp_required = self.tx_revision == header::REVISION_3;
         let began = self.clock.now_ms();
         // Every refusal so far was a quiet SinkTxNG (see `stale_sink_tx_ng`).
         let mut stale = rp_required;
@@ -1676,12 +1704,19 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                     // or Not_Supported. It is never answered. Another well-formed
                     // Message at this revision is a Protocol Error; a malformed
                     // PPS_Status fails closed.
-                    let pps_status = header & header::KIND_COUNT == 0xa00c
+                    let pps_status = header & header::KIND_COUNT
+                        == header::EXTENDED | header::objects(2) | header::extended::PPS_STATUS
                         && length == 10
-                        && u16::from_le_bytes([buffer[2], buffer[3]]) & 0xfdff == 0x8004;
-                    let not_supported = header & header::KIND_COUNT == 0x0010 && length == 2;
-                    if !(pps_status || not_supported) || revision != 2 {
-                        if header & header::KIND == 0x800c || !same_revision {
+                        && u16::from_le_bytes([buffer[2], buffer[3]])
+                            & !header::extended::header::RESERVED
+                            == header::extended::header::CHUNKED | 4;
+                    let not_supported = header & header::KIND_COUNT
+                        == header::control::NOT_SUPPORTED
+                        && length == 2;
+                    if !(pps_status || not_supported) || revision != header::REVISION_3 {
+                        if header & header::KIND == header::EXTENDED | header::extended::PPS_STATUS
+                            || !same_revision
+                        {
                             return Err(Error::Peer);
                         }
                         self.protocol_error()?;
@@ -1785,8 +1820,12 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                     match ready_response(self.tx_revision, header, extended) {
                         ReadyResponse::Unsupported | ReadyResponse::UnsupportedAfterChunk => {
                             self.unsupported_reply = Some(
-                                (u16::from(self.tx_revision) << 6)
-                                    | if self.tx_revision == 1 { 4 } else { 16 },
+                                header::revision(self.tx_revision)
+                                    | if self.tx_revision == header::REVISION_2 {
+                                        header::control::REJECT
+                                    } else {
+                                        header::control::NOT_SUPPORTED
+                                    },
                             );
                         }
                         // DR_Swap (section 7.12.1) and VCONN_Swap (section 7.13) get

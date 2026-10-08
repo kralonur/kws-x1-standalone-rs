@@ -6,10 +6,6 @@ use pd_protocol::pd_rx::Sop;
 const MESSAGE_ID_SHIFT: u32 = 9;
 // USB PD MessageID is a three-bit field, wrapping through values zero to seven.
 const MESSAGE_ID_MASK: u16 = 7;
-// USB PD control-message type encoding for GoodCRC.
-const GOODCRC_TYPE: u16 = 1;
-// USB PD control-message type encoding for Soft_Reset.
-const SOFT_RESET_TYPE: u16 = 13;
 
 pub(super) struct PendingTx {
     message_id: u16,
@@ -25,7 +21,7 @@ impl PendingTx {
         Self {
             message_id: Self::header_id(header),
             sop,
-            soft_reset: header & header::KIND_COUNT == SOFT_RESET_TYPE,
+            soft_reset: header & header::KIND_COUNT == header::control::SOFT_RESET,
             retry_failed: false,
             goodcrc_at: None,
         }
@@ -47,7 +43,7 @@ impl PendingTx {
         header: u16,
         now_ms: impl FnOnce() -> u64,
     ) -> bool {
-        if header & header::KIND_COUNT != GOODCRC_TYPE
+        if header & header::KIND_COUNT != header::control::GOOD_CRC
             || sop != self.sop
             || Self::header_id(header) != self.message_id
         {
@@ -74,8 +70,9 @@ mod tests {
         for sop in [Sop::Partner, Sop::Cable, Sop::CableDoublePrime] {
             for id in 0..=MESSAGE_ID_MASK {
                 let mut tx = PendingTx::new(sop, id << MESSAGE_ID_SHIFT);
-                let goodcrc = (id << MESSAGE_ID_SHIFT) | GOODCRC_TYPE;
-                let wrong_id = (((id + 1) & MESSAGE_ID_MASK) << MESSAGE_ID_SHIFT) | GOODCRC_TYPE;
+                let goodcrc = (id << MESSAGE_ID_SHIFT) | header::control::GOOD_CRC;
+                let wrong_id =
+                    (((id + 1) & MESSAGE_ID_MASK) << MESSAGE_ID_SHIFT) | header::control::GOOD_CRC;
                 assert!(!tx.acknowledge(sop, wrong_id, || panic!(
                     "unmatched ACK must not sample time"
                 )));
@@ -88,7 +85,7 @@ mod tests {
                 }
                 assert!(!tx.acknowledge(
                     sop,
-                    (id << MESSAGE_ID_SHIFT) | SOFT_RESET_TYPE,
+                    (id << MESSAGE_ID_SHIFT) | header::control::SOFT_RESET,
                     || panic!("non-GoodCRC must not sample time")
                 ));
                 assert_eq!(tx.acknowledged_at(), None);
@@ -102,16 +99,19 @@ mod tests {
     #[test]
     fn own_soft_reset_requires_control_encoding_and_message_id_zero() {
         for sop in [Sop::Partner, Sop::Cable, Sop::CableDoublePrime] {
-            assert!(PendingTx::new(sop, SOFT_RESET_TYPE).reset_with_zero_id());
+            assert!(PendingTx::new(sop, header::control::SOFT_RESET).reset_with_zero_id());
             for id in 1..=MESSAGE_ID_MASK {
                 assert!(
-                    !PendingTx::new(sop, (id << MESSAGE_ID_SHIFT) | SOFT_RESET_TYPE)
+                    !PendingTx::new(sop, (id << MESSAGE_ID_SHIFT) | header::control::SOFT_RESET)
                         .reset_with_zero_id()
                 );
             }
             // Data-object count one, then extended bit set: neither is a control reset.
             for non_control in [1 << 12, 1 << 15] {
-                assert!(!PendingTx::new(sop, non_control | SOFT_RESET_TYPE).reset_with_zero_id());
+                assert!(
+                    !PendingTx::new(sop, non_control | header::control::SOFT_RESET)
+                        .reset_with_zero_id()
+                );
             }
         }
     }
