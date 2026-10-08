@@ -1,4 +1,4 @@
-//! Async ST7735 transport over the exclusive SPI3 HAL owner. No transfer DMA.
+//! Async ST7789V transport over the exclusive SPI3 HAL owner. No transfer DMA.
 //! Panel commands, pin routing and wire order follow the owner-confirmed driver.
 //! Complete command/frame operations hold one mutex; D/C changes fence wire idle.
 use embassy_hc32::gpio::{AlternateMode, AlternatePin, Level, OutputPin, Port};
@@ -66,11 +66,13 @@ async fn sequence<F: core::future::Future<Output = bool>>(
         if !command(bus, cmd, data).await {
             return false;
         }
-        if cmd == 0x11 && !delay(120).await {
+        if cmd == panel::CMD_SLEEP_OUT && !delay(panel::SLEEP_OUT_MS).await {
             return false;
         }
     }
-    command(bus, 0x29, &[]).await && command(bus, 0x36, &[0x60]).await && bus.idle().await
+    command(bus, panel::CMD_DISPLAY_ON, &[]).await
+        && command(bus, panel::CMD_MEMORY_ACCESS_CONTROL, &[panel::MADCTL]).await
+        && bus.idle().await
 }
 async fn delay(ms: u32) -> bool {
     embassy_time::Timer::after_millis(u64::from(ms)).await;
@@ -156,6 +158,20 @@ pub async unsafe fn init(mut backlight_pin: AlternatePin) -> bool {
     }
 }
 
+/// Panel size in pixels, as frame buffer indices.
+const WIDTH: usize = panel::WIDTH as usize;
+const HEIGHT: usize = panel::HEIGHT as usize;
+
+/// CASET/RASET parameters: first and last address, big-endian (ST 9.1.20, 9.1.21).
+const fn span(start: u16, length: u16) -> [u8; 4] {
+    let [start_high, start_low] = start.to_be_bytes();
+    let [end_high, end_low] = (start + length - 1).to_be_bytes();
+    [start_high, start_low, end_high, end_low]
+}
+const COLUMNS: [u8; 4] = span(panel::X_OFFSET, panel::WIDTH);
+const ROWS: [u8; 4] = span(panel::Y_OFFSET, panel::HEIGHT);
+const ROWS_INVERTED: [u8; 4] = span(panel::Y_OFFSET_INVERTED, panel::HEIGHT);
+
 /// # Safety
 /// `frame` must point to 32400 readable RGB565 wire-swapped halfwords. Callback
 /// may sample inputs/update model but must not modify the frame during transfer.
@@ -165,24 +181,24 @@ async unsafe fn stream(
     mut sample: impl FnMut(),
     orientation: u8,
 ) -> bool {
-    let raset: [u8; 4] = if orientation == 0 {
-        [0, 53, 0, 187]
+    let raset = if orientation == 0 {
+        ROWS
     } else {
-        [0, 52, 0, 186]
+        ROWS_INVERTED
     };
-    if !command(bus, 0x2a, &[0, 40, 1, 23]).await
-        || !command(bus, 0x2b, &raset).await
-        || !command(bus, 0x2c, &[]).await
+    if !command(bus, panel::CMD_COLUMN_ADDRESS, &COLUMNS).await
+        || !command(bus, panel::CMD_ROW_ADDRESS, &raset).await
+        || !command(bus, panel::CMD_MEMORY_WRITE, &[]).await
         || !bus.idle().await
     {
         return false;
     }
     bus.dc(true);
-    let mut wire = [0u8; 480];
-    for row in 0..135 {
+    let mut wire = [0u8; WIDTH * 2];
+    for row in 0..HEIGHT {
         sample();
-        for column in 0..240 {
-            let pixel = unsafe { frame.add(row * 240 + column).read_volatile() };
+        for column in 0..WIDTH {
+            let pixel = unsafe { frame.add(row * WIDTH + column).read_volatile() };
             wire[2 * column..2 * column + 2].copy_from_slice(&pixel.to_le_bytes());
         }
         if !bus.bytes(&wire).await {
@@ -192,16 +208,20 @@ async unsafe fn stream(
     bus.idle().await
 }
 
-/// Change ST7735 memory access control (MADCTL) orientation:
-/// 0: normal landscape (0x60)
-/// 1: 180-degree inverted landscape (0xa0)
+/// Change ST7789V memory access control (MADCTL) orientation:
+/// 0: normal landscape ([`panel::MADCTL`])
+/// 1: 180-degree inverted landscape ([`panel::MADCTL_INVERTED`])
 pub async unsafe fn set_orientation(orientation: u8) -> bool {
     let mut owner = DISPLAY.lock().await;
     let Some(bus) = owner.as_mut() else {
         return false;
     };
-    let madctl = if orientation == 0 { 0x60 } else { 0xa0 };
-    command(bus, 0x36, &[madctl]).await && bus.idle().await
+    let madctl = if orientation == 0 {
+        panel::MADCTL
+    } else {
+        panel::MADCTL_INVERTED
+    };
+    command(bus, panel::CMD_MEMORY_ACCESS_CONTROL, &[madctl]).await && bus.idle().await
 }
 
 /// # Safety
