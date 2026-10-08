@@ -11,6 +11,7 @@
 
 use crate::pd;
 use core::cell::Cell;
+use core::sync::atomic::{AtomicU16, Ordering};
 
 const SECTOR: usize = 0x2000;
 const SECTORS: [usize; 6] = [0x7c000, 0x7a000, 0x78000, 0x76000, 0x74000, 0x72000];
@@ -44,6 +45,11 @@ static STATE: embassy_sync::blocking_mutex::Mutex<
     embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
     Cell<Option<State>>,
 > = embassy_sync::blocking_mutex::Mutex::new(Cell::new(None));
+
+/// Progress of the last published observation for a fatal record: furthest
+/// step in bits 0..8, cable queries in bits 8..16. An atomic, so the
+/// panic/fault handler never borrows shared state that may be mid-update.
+static PROGRESS: AtomicU16 = AtomicU16::new(0);
 
 pub static LAST: embassy_sync::blocking_mutex::Mutex<
     embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
@@ -302,15 +308,21 @@ pub fn save(observation: &pd::Observation) {
     });
 }
 
+/// Keep the progress `fatal` records from `observation`.
+pub fn note_progress(observation: &pd::Observation) {
+    let step = observation.boot_step.max(observation.cable_step);
+    PROGRESS.store(
+        u16::from_le_bytes([step, observation.cable_queries]),
+        Ordering::Relaxed,
+    );
+}
+
 /// Last entry of this boot: the furthest step so far, `code` (`PANIC` or
 /// `FAULT`) and five code addresses in words 2..6 (no time stamp).
 /// Called with interrupts off from the panic/HardFault handler; may use
 /// the one entry `save` keeps in reserve.
 pub fn fatal(code: u8, chain: [u32; 5]) {
-    let (step, queries) = crate::PD_OBSERVATION.lock(|cell| {
-        cell.try_borrow()
-            .map_or((0, 0), |o| (o.boot_step.max(o.cable_step), o.cable_queries))
-    });
+    let [step, queries] = PROGRESS.load(Ordering::Relaxed).to_le_bytes();
     STATE.lock(|cell| {
         let Some(state) = cell.get() else { return };
         if state.written > PER_BOOT || state.next + ENTRY_LEN > state.base + SECTOR {

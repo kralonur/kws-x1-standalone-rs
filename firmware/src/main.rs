@@ -172,10 +172,23 @@ impl firmware_core::pd_svids::Store for CableSvidStore {
 static FRAME_MS: AtomicU32 = AtomicU32::new(0);
 static BUTTON_GAP_MAX_MS: AtomicU32 = AtomicU32::new(0);
 static PD_IRQ_COUNT: AtomicU32 = AtomicU32::new(0);
-static PD_OBSERVATION: embassy_sync::blocking_mutex::Mutex<
-    embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
-    core::cell::RefCell<pd::Observation>,
-> = embassy_sync::blocking_mutex::Mutex::new(core::cell::RefCell::new(pd::Observation::new()));
+/// Latest PD observation: the PD task sends it, the renderer reads it.
+static PD_OBSERVATION: Watch<CriticalSectionRawMutex, pd::Observation, 1> =
+    Watch::new_with(pd::Observation::new());
+
+/// Send the PD observation to the renderer without a flash log entry.
+fn publish_observation(observation: pd::Observation) {
+    #[cfg(any(feature = "pd-boot-diagnostic", feature = "cable-log"))]
+    flash_log::note_progress(&observation);
+    PD_OBSERVATION.sender().send(observation);
+}
+
+/// The last published PD observation.
+fn latest_observation() -> pd::Observation {
+    PD_OBSERVATION
+        .try_get()
+        .unwrap_or_else(pd::Observation::new)
+}
 
 /// Store the PD observation for the renderer. `pd-boot-diagnostic` also keeps
 /// it in the boot record, so the next boot can show how far this one got.
@@ -188,7 +201,7 @@ fn store_observation(observation: pd::Observation) {
     if observation.cable_step != 0 {
         flash_log::save(&observation);
     }
-    PD_OBSERVATION.lock(|cell| *cell.borrow_mut() = observation);
+    publish_observation(observation);
 }
 
 #[cfg(any(feature = "pd-boot-diagnostic", feature = "cable-log"))]
@@ -506,7 +519,7 @@ async fn button_task(inputs: [InputPin; 4]) {
 }
 #[inline(never)]
 unsafe fn render_pd(framebuffer: *mut u16, raw_vbus: u16, cable_detail: Option<u32>) {
-    let mut observation = PD_OBSERVATION.lock(|cell| *cell.borrow());
+    let mut observation = latest_observation();
     #[cfg(feature = "pd-boot-diagnostic")]
     {
         observation.last_boot = flash_log::LAST.lock(|cell| cell.get());
@@ -550,7 +563,7 @@ unsafe fn render_pd(framebuffer: *mut u16, raw_vbus: u16, cable_detail: Option<u
 
 /// Charger info page (`pd::partner_lines`); `page` selects the sub-page.
 unsafe fn render_partner(framebuffer: *mut u16, page: u32) {
-    let observation = PD_OBSERVATION.lock(|cell| *cell.borrow());
+    let observation = latest_observation();
     unsafe {
         clear_screen(framebuffer);
         pd::paint_partner(&mut *(framebuffer as *mut Frame), observation, page, glyph);

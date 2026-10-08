@@ -8,7 +8,7 @@ use embassy_time::{Instant, Timer};
 
 use crate::bus::{BUS_LATCH, I2C3, bus_failed, note_bus_failure};
 use crate::{
-    PD_IRQ_COUNT, PD_OBSERVATION, pd, pd_cc, pd_service, pd_sniff, pd_trial, store_observation,
+    PD_IRQ_COUNT, pd, pd_cc, pd_service, pd_sniff, pd_trial, publish_observation, store_observation,
 };
 
 /// Slider-selected boot: one persistent fixed-target SPR session, or passive.
@@ -121,7 +121,7 @@ async fn passthrough(observation: &mut pd::Observation) -> Option<pd::Snapshot> 
 async fn sniff(observation: &mut pd::Observation, released: pd::Snapshot) {
     let mut view = pd::SniffObservation::new();
     observation.sniff = Some(view);
-    PD_OBSERVATION.lock(|cell| *cell.borrow_mut() = *observation);
+    publish_observation(*observation);
     let started = {
         let mut guard = I2C3.lock().await;
         if bus_failed() {
@@ -151,7 +151,7 @@ async fn sniff(observation: &mut pd::Observation, released: pd::Snapshot) {
         }
     };
     observation.sniff = Some(view);
-    PD_OBSERVATION.lock(|cell| *cell.borrow_mut() = *observation);
+    publish_observation(*observation);
     let Some(mut sniffer) = started else {
         return;
     };
@@ -194,11 +194,11 @@ async fn sniff(observation: &mut pd::Observation, released: pd::Snapshot) {
         }
         if changed {
             observation.sniff = Some(view);
-            PD_OBSERVATION.lock(|cell| *cell.borrow_mut() = *observation);
+            publish_observation(*observation);
         }
     }
     observation.sniff = Some(view);
-    PD_OBSERVATION.lock(|cell| *cell.borrow_mut() = *observation);
+    publish_observation(*observation);
 }
 
 /// Record why the sniffer stopped. Bus errors and configuration mismatches latch
