@@ -77,8 +77,8 @@ const PPS_MA_REPEAT: i16 = 250;
 
 /// The screen and what its Left, Right and OK act on. Each page carries only
 /// its own state, so e.g. a PPS edit outside the PPS page cannot exist.
-/// Left/Right cycle the pages in `PAGES`; Back on the overview opens the
-/// settings.
+/// Left/Right cycle the pages in `PAGES` that the PD mode can use; Back on
+/// the overview opens the settings.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Page {
     #[default]
@@ -183,6 +183,38 @@ impl Page {
         }
     }
 
+    /// Whether the page has anything to show: in passthrough the meter only
+    /// listens, so the selectors and the charger and cable pages, which need
+    /// a sink session, are left out.
+    pub fn available(self, passthrough: bool) -> bool {
+        !passthrough
+            || matches!(
+                self,
+                Self::Overview
+                    | Self::Settings(_)
+                    | Self::Detail {
+                        page: Detail::Pd | Detail::System,
+                        ..
+                    }
+            )
+    }
+
+    /// The available page `forward` (Right) or back from this one, wrapping.
+    fn next(self, forward: bool, passthrough: bool) -> Self {
+        let index = self.index().unwrap_or(0);
+        let count = PAGES.len();
+        (1..count)
+            .map(|offset| {
+                if forward {
+                    PAGES[(index + offset) % count]
+                } else {
+                    PAGES[(index + count - offset) % count]
+                }
+            })
+            .find(|page| page.available(passthrough))
+            .unwrap_or(Self::Overview)
+    }
+
     /// Index into `PAGES`; `None` for the settings page, which is outside
     /// the cycle.
     fn index(self) -> Option<usize> {
@@ -195,10 +227,15 @@ impl Page {
         }
     }
 
-    /// One-based position in the page cycle and the cycle length; `None` for
-    /// the settings page.
-    pub fn position(self) -> Option<(u8, u8)> {
-        Some((self.index()? as u8 + 1, PAGES.len() as u8))
+    /// One-based position among the available pages and their count;
+    /// `None` for the settings page.
+    pub fn position(self, passthrough: bool) -> Option<(u8, u8)> {
+        let index = self.index()?;
+        let shown = |page: &&Page| page.available(passthrough);
+        Some((
+            PAGES[..=index].iter().filter(shown).count() as u8,
+            PAGES.iter().filter(shown).count() as u8,
+        ))
     }
 
     /// Left/Right change a value or scroll here, rather than moving between
@@ -240,6 +277,8 @@ pub struct Input {
     /// Stable pressed mask; bit `n` is `PINS[n]`.
     pub pressed: u8,
     pub page: Page,
+    /// The PD controller only listens (passthrough mode, chosen at boot).
+    pub passthrough: bool,
     pub settings: Settings,
     /// Incremented by each peak reset request; the meter clears its peaks
     /// when this changes.
@@ -284,6 +323,15 @@ impl Navigation {
         self.selectable = selectable;
         if !selectable && matches!(self.input.page, Page::Fixed { .. } | Page::Pps(_)) {
             self.input.page = PAGES[self.input.page.index().unwrap_or(0)];
+        }
+    }
+
+    /// Whether the PD controller only listens; a page passthrough cannot
+    /// use closes to the overview.
+    pub fn set_passthrough(&mut self, passthrough: bool) {
+        self.input.passthrough = passthrough;
+        if !self.input.page.available(passthrough) {
+            self.input.page = Page::Overview;
         }
     }
 
@@ -415,10 +463,7 @@ impl Navigation {
                 let step = if repeat { PPS_MA_REPEAT } else { PPS_MA_STEP };
                 return Some(PdCommand::PpsCurrent(sign * step));
             }
-            page => {
-                let index = page.index().unwrap_or(0);
-                *page = cycle(&PAGES, index, forward);
-            }
+            page => *page = page.next(forward, input.passthrough),
         }
         None
     }

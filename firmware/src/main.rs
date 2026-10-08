@@ -526,6 +526,7 @@ async fn button_task(
         // Selecting needs a sink session that has received the charger's offer.
         let observation = latest_observation();
         navigation.set_selectable(observation.spr.is_some() && observation.capabilities.is_some());
+        navigation.set_passthrough(observation.pc13_high == Some(true));
         if let Some((_, view)) = DETAIL_VIEW.try_get() {
             navigation.set_list_end(view.end);
         }
@@ -725,7 +726,7 @@ async fn meter_task(mut backlight: embassy_hc32::pwm::TimerA4Pwm) {
             let frame = unsafe { &mut *(fb as *mut Frame) };
             let header = |title| ui::Header {
                 title,
-                position: page.position(),
+                position: page.position(input.passthrough),
             };
             match page {
                 Page::Overview => {
@@ -779,12 +780,19 @@ async fn meter_task(mut backlight: embassy_hc32::pwm::TimerA4Pwm) {
                     render::clear(frame);
                     let observation = detail_observation(last_raw_v);
                     let canvas = &mut Canvas(frame);
-                    let position = page.position();
+                    let title = match detail {
+                        Detail::Pd if input.passthrough => "PD SNIFF",
+                        Detail::Pd => "PD SESSION",
+                        Detail::Charger => "CHARGER",
+                        Detail::Cable => "CABLE",
+                        Detail::System => "SYSTEM",
+                    };
+                    let header = header(title);
                     let view = match detail {
                         Detail::Pd => ui::draw_detail(
                             canvas,
+                            &header,
                             detail,
-                            position,
                             core::iter::once(pd::lines(observation))
                                 .chain(pd::caps_lines(observation)),
                             top,
@@ -792,8 +800,8 @@ async fn meter_task(mut backlight: embassy_hc32::pwm::TimerA4Pwm) {
                         ),
                         Detail::Charger => ui::draw_detail(
                             canvas,
+                            &header,
                             detail,
-                            position,
                             (0..pd::partner_sections(observation))
                                 .map(|section| pd::partner_lines(observation, section)),
                             top,
@@ -801,8 +809,8 @@ async fn meter_task(mut backlight: embassy_hc32::pwm::TimerA4Pwm) {
                         ),
                         Detail::Cable => ui::draw_detail(
                             canvas,
+                            &header,
                             detail,
-                            position,
                             (0..pd::cable_sections(observation)).map(|section| {
                                 let svid =
                                     pd::cable_svid_index(observation, section).and_then(|index| {
@@ -828,8 +836,8 @@ async fn meter_task(mut backlight: embassy_hc32::pwm::TimerA4Pwm) {
                             };
                             ui::draw_detail(
                                 canvas,
+                                &header,
                                 detail,
-                                position,
                                 render::system_lines(counters, bus_failed()),
                                 top,
                                 scrolling,

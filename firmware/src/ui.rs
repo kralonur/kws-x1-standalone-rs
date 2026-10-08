@@ -603,8 +603,8 @@ const PROFILE_PITCH: i32 = 19;
 const PROFILE_ROWS: usize = 5;
 
 /// The fixed PD profile selector. While `editing`, the previewed profile is
-/// framed; the contract in force is marked ACTIVE. Without a sink session
-/// (passthrough) the page only shows the offer and the device's choice.
+/// framed; the contract in force is marked ACTIVE. Before the sink session
+/// has the charger's offer, the page only shows what is known.
 pub fn draw_fixed<D: DrawTarget<Color = Rgb565>>(
     target: &mut D,
     header: &Header<'_>,
@@ -702,8 +702,8 @@ pub fn draw_fixed<D: DrawTarget<Color = Rgb565>>(
     );
 }
 
-/// Hint on the selector pages without a sink session.
-const VIEW_ONLY: &str = "passthrough: view only    < > pages";
+/// Hint on the selector pages before the sink session has an offer.
+const VIEW_ONLY: &str = "waiting for the charger    < > pages";
 
 /// PPS value boxes.
 const PPS_VOLTS: Rectangle = Rectangle::new(Point::new(4, 52), Size::new(114, 44));
@@ -1014,23 +1014,23 @@ const LIST_BASELINE: i32 = 34;
 /// Scrollbar track along the right edge.
 const SCROLL_TRACK: Rectangle = Rectangle::new(Point::new(RIGHT + 1, 25), Size::new(3, 94));
 
-/// A detail page: the non-blank rows of `sections` from row `top`, with a
-/// scrollbar lit while `scrolling`.
+/// A detail page in `page`'s colour: the non-blank rows of `sections` from
+/// row `top`, with a scrollbar lit while `scrolling`.
 pub fn draw_detail<D: DrawTarget<Color = Rgb565>>(
     target: &mut D,
+    header: &Header<'_>,
     page: Detail,
-    position: Option<(u8, u8)>,
     sections: impl IntoIterator<Item = Lines>,
     top: u16,
     scrolling: bool,
 ) -> ListView {
-    let (title, accent) = match page {
-        Detail::Pd => ("PD SESSION", GREEN),
-        Detail::Charger => ("CHARGER", ORANGE),
-        Detail::Cable => ("CABLE", CYAN),
-        Detail::System => ("SYSTEM", YELLOW),
+    let accent = match page {
+        Detail::Pd => GREEN,
+        Detail::Charger => ORANGE,
+        Detail::Cable => CYAN,
+        Detail::System => YELLOW,
     };
-    draw_header(target, &Header { title, position }, accent);
+    draw_header(target, header, accent);
     let mut rows = 0u16;
     let mut view = ListView::default();
     for (section, lines) in sections.into_iter().enumerate() {
