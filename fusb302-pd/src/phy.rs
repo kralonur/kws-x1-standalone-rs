@@ -408,7 +408,11 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         self.hard_reset_received
     }
     fn trace(&mut self) -> &mut pd::SprObservation {
-        self.observation.spr.as_mut().unwrap()
+        // `start` installs a pending trace, but a caller may replace the public
+        // `observation` before it; a fresh pending trace fails every gate closed.
+        self.observation
+            .spr
+            .get_or_insert_with(pd::SprObservation::pending)
     }
     async fn read(
         &mut self,
@@ -763,7 +767,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         if self.hard_reset_armed || self.bist_test_data {
             return Err(Error::Request);
         }
-        let rdo = (bytes.len() == 6).then(|| u32::from_le_bytes(bytes[2..6].try_into().unwrap()));
+        let rdo = first_data_object(bytes).filter(|_| bytes.len() == 6);
         let is_request = rdo.is_some_and(|rdo| self.request_is_reviewed(rdo));
         // The TX FIFO image below holds at most one 30-byte message.
         if bytes.len() < 2 || bytes.len() > 30 {
@@ -866,10 +870,8 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             || cable_optional
             || (sop == Sop::Cable
                 && self.cable_phase == CablePhase::Identity
-                && bytes.len() == 6
                 && header & 0xf13f == 0x100f
-                && {
-                    let vdm = rdo.unwrap();
+                && rdo.is_some_and(|vdm| {
                     let command = vdm & 0x1f;
                     vdm & 0x87ff == 0x8000 | command
                         && matches!(vdm & 0x7800, 0 | 0x2000 | 0x2800)
@@ -880,7 +882,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                                 .is_some_and(|store| store.contains((vdm >> 16) as u16)),
                             _ => false,
                         }
-                });
+                }));
         if sop != Sop::Partner && !cable_identity {
             return Err(Error::Request);
         }
@@ -1047,7 +1049,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             self.enqueue(packet)?;
         }
         // Fresh Source_Capabilities may have changed the indexed object/range.
-        if is_request && !self.request_is_reviewed(rdo.unwrap()) {
+        if is_request && !rdo.is_some_and(|rdo| self.request_is_reviewed(rdo)) {
             return Err(Error::Request);
         }
         if self.receiver.status() & 0x0f != 8
@@ -1655,8 +1657,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                     // FUSB302 BIST_TMODE keeps sending GoodCRC and clears the RX
                     // FIFO; Hard Reset restores CONTROL3 (restore_baseline).
                     use pd_protocol::pd_spr::{BistRequest, bist_request};
-                    let bdo =
-                        (length >= 6).then(|| u32::from_le_bytes(buffer[2..6].try_into().unwrap()));
+                    let bdo = first_data_object(buffer).filter(|_| length >= 6);
                     match bdo
                         .map(|bdo| bist_request(header, bdo, self.contract_object.unwrap_or(0)))
                     {
@@ -2199,6 +2200,14 @@ impl pd_discovery::Packet for pd_service::Packet {
     fn frame(&self) -> pd_protocol::pd_rx::Frame<'_> {
         pd_service::Packet::frame(self)
     }
+}
+/// The first 32-bit Data Object, which follows the 16-bit Message Header
+/// (sections 6.2.1.1, 6.4), if the message is long enough to hold one.
+fn first_data_object(message: &[u8]) -> Option<u32> {
+    let &[_, _, a, b, c, d, ..] = message else {
+        return None;
+    };
+    Some(u32::from_le_bytes([a, b, c, d]))
 }
 /// `pd-boot-diagnostic` breadcrumbs for an acknowledged cable request (odd
 /// steps 11-25; its reply is the next even step). 10 = VCONN on, 27 = the
