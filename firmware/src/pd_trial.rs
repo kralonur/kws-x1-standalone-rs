@@ -135,7 +135,7 @@ fn input() -> firmware_core::buttons::Input {
 
 fn detail_page() -> Option<u32> {
     let input = input();
-    (input.page == 4).then_some(input.detail)
+    (input.page == firmware_core::buttons::Page::Cable).then_some(input.detail)
 }
 
 fn control(

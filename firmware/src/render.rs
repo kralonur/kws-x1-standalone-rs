@@ -1,5 +1,5 @@
-//! Text drawing (`embedded-graphics` fonts) and the meter, port and I2C fault
-//! pages, drawn straight into the frame.
+//! The frame as a draw target, text drawing (`embedded-graphics` fonts) and
+//! the port and I2C fault pages, drawn straight into the frame.
 
 use core::sync::atomic::Ordering;
 
@@ -10,7 +10,7 @@ use embedded_graphics::pixelcolor::raw::RawU16;
 use embedded_graphics::prelude::*;
 use embedded_graphics::text::{Baseline, Text};
 
-use crate::{BUTTON_GAP_MAX_MS, FRAME_MS, ina226};
+use crate::{BUTTON_GAP_MAX_MS, FRAME_MS};
 
 /// One full RGB565 frame in memory order.
 pub type Frame = [u16; firmware_core::panel::PIXELS];
@@ -23,23 +23,26 @@ const HEIGHT: usize = firmware_core::panel::HEIGHT as usize;
 pub const fn color(rgb565: u16) -> u16 {
     rgb565.swap_bytes()
 }
-pub const WHITE: u16 = color(0xffff);
-pub const BLUE: u16 = color(0x001f);
-pub const RED: u16 = color(0xf800);
-const CYAN: u16 = color(0x07ff);
+/// Page background, black like [`ui::BACKGROUND`], in frame byte order.
+const BACKGROUND: u16 = color(0x0000);
 
 #[inline(never)]
 pub unsafe fn clear_screen(framebuffer: *mut u16) {
     for offset in 0..firmware_core::panel::PIXELS {
         unsafe {
-            framebuffer.add(offset).write_volatile(CYAN);
+            framebuffer.add(offset).write_volatile(BACKGROUND);
         }
     }
 }
 
+/// Fill the whole frame with the page background.
+pub fn clear(frame: &mut Frame) {
+    frame.fill(BACKGROUND);
+}
+
 /// The frame as an `embedded-graphics` draw target. Colours are stored in
 /// [`color`]'s byte order; pixels outside the panel are dropped.
-struct Canvas<'a>(&'a mut Frame);
+pub struct Canvas<'a>(pub &'a mut Frame);
 
 impl OriginDimensions for Canvas<'_> {
     fn size(&self) -> Size {
@@ -80,10 +83,10 @@ pub const SMALL_FONT: MonoFont = MonoFont {
 /// Characters drawn per `Text`; longer lines continue in further chunks.
 const TEXT_CHUNK: usize = 24;
 
-/// Draw `bytes` in black with its top-left corner at (`x`, `y`). Bytes that
+/// Draw `bytes` in white with its top-left corner at (`x`, `y`). Bytes that
 /// are not printable ASCII (such as unused `0` cells) are drawn as spaces.
 pub fn draw_text(frame: &mut Frame, font: &MonoFont, x: usize, y: usize, bytes: &[u8]) {
-    let style = MonoTextStyle::new(font, Rgb565::BLACK);
+    let style = MonoTextStyle::new(font, Rgb565::WHITE);
     let mut canvas = Canvas(frame);
     let mut origin = Point::new(x as i32, y as i32);
     for chunk in bytes.chunks(TEXT_CHUNK) {
@@ -131,31 +134,6 @@ fn copy_6(dest: &mut [u8], offset: usize, src: &[u8; 6]) {
     dest[offset + 5] = src[5];
 }
 
-// Format fixed point decimal: value is integer, divisor is 1000 for 3 decimals or 100 for 2
-#[inline(never)]
-fn fmt_fixed_3(mut val: u32, buf: &mut [u8; 6]) {
-    for i in (3..6).rev() {
-        buf[i] = b'0' + (val % 10) as u8;
-        val /= 10;
-    }
-    buf[2] = b'.';
-    buf[1] = b'0' + (val % 10) as u8;
-    val /= 10;
-    buf[0] = b'0' + (val % 10) as u8;
-}
-
-fn fmt_time(total_secs: u32, line: &mut [u8; 14]) {
-    let hrs = (total_secs / 3600) % 100;
-    let mins = (total_secs / 60) % 60;
-    let secs = total_secs % 60;
-    line[6] = b'0' + (hrs / 10) as u8;
-    line[7] = b'0' + (hrs % 10) as u8;
-    line[9] = b'0' + (mins / 10) as u8;
-    line[10] = b'0' + (mins % 10) as u8;
-    line[12] = b'0' + (secs / 10) as u8;
-    line[13] = b'0' + (secs % 10) as u8;
-}
-
 #[inline(never)]
 fn hex_digits(value: u16) -> [u8; 4] {
     let mut result = [b'0'; 4];
@@ -168,56 +146,6 @@ fn hex_digits(value: u16) -> [u8; 4] {
         };
     }
     result
-}
-
-pub unsafe fn render_measure(
-    framebuffer: *mut u16,
-    raw_v: u16,
-    raw_i: u16,
-    total_secs: u32,
-    alive: u16,
-) {
-    unsafe {
-        clear_screen(framebuffer);
-        text(framebuffer, 12, 6, b"USB PD METER");
-
-        let v_mv = ina226::bus_millivolts(raw_v);
-        let mut line_v = *b"VBUS: 00.000 V";
-        let mut v_buf = [0u8; 6];
-        fmt_fixed_3(v_mv, &mut v_buf);
-        copy_6(&mut line_v, 6, &v_buf);
-        text(framebuffer, 12, 30, &line_v);
-
-        let i_raw = raw_i as i16;
-        // Preserve the existing sensor conversion, including its signed range.
-        #[allow(clippy::cast_abs_to_unsigned)]
-        let i_ma = (i_raw.abs() as u32) / ina226::COUNTS_PER_MA;
-        let mut line_i = *b"CURR:  00.000 A";
-        if i_raw < 0 {
-            line_i[6] = b'-';
-        }
-        let mut i_buf = [0u8; 6];
-        fmt_fixed_3(i_ma, &mut i_buf);
-        copy_6(&mut line_i, 7, &i_buf);
-        text(framebuffer, 12, 54, &line_i);
-
-        let mut line_p = *b"POWR: 00.000 W";
-        let mut p_buf = [0u8; 6];
-        fmt_fixed_3((v_mv * i_ma) / 1000, &mut p_buf);
-        copy_6(&mut line_p, 6, &p_buf);
-        text(framebuffer, 12, 78, &line_p);
-
-        let mut line_t = *b"TIME: 00:00:00";
-        fmt_time(total_secs, &mut line_t);
-        text(framebuffer, 12, 106, &line_t);
-
-        // 500 ms heartbeat square: proves meter_task and pulse_task both run.
-        for y in 6..18 {
-            for x in 222..234 {
-                framebuffer.add(y * WIDTH + x).write_volatile(alive);
-            }
-        }
-    }
 }
 
 #[inline(never)]

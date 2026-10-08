@@ -6,6 +6,9 @@ pub use cable::{cable_svid_index, control_cable_selection, paint_cable};
 pub use partner::paint_partner;
 
 use firmware_core::pd_cable::CableStatus;
+use firmware_core::pd_sniff::Supply;
+
+use crate::ui::Protocol;
 // Compatibility exports are used by different subsets of board host tests.
 #[allow(unused_imports)]
 pub use fusb302_pd::observation::{Phase, SprObservation};
@@ -145,6 +148,86 @@ impl SniffObservation {
             frame.data(),
             caps,
         ));
+    }
+}
+
+/// The charging protocol shown on the meter page. A Request the passthrough
+/// sniffer decoded wins, then this meter's own contract, then a capabilities
+/// offer, then the Type-C current advertisement on the attached CC.
+pub fn protocol(observation: &Observation) -> Protocol {
+    if let Some(sniff) = observation.sniff {
+        let request = sniff
+            .log
+            .entries()
+            .filter_map(|entry| entry.supply.map(|supply| (entry.header, supply)))
+            .last();
+        if let Some((header, supply)) = request {
+            return match supply {
+                Supply::Pps { mv, ma } => Protocol::Pps {
+                    mv: mv.min(u32::from(u16::MAX)) as u16,
+                    ma: ma.min(u32::from(u16::MAX)) as u16,
+                },
+                Supply::Fixed { mv, ma } => Protocol::Pd {
+                    revision: header_revision(header),
+                    mv: mv.min(u32::from(u16::MAX)) as u16,
+                    ma: ma.min(u32::from(u16::MAX)) as u16,
+                },
+                Supply::Raw => Protocol::PdOffer,
+            };
+        }
+        if sniff.caps_count > 0 {
+            return Protocol::PdOffer;
+        }
+        if let Some(rp) = sniff.rp {
+            return type_c(rp);
+        }
+    }
+    if let Some(spr) = observation.spr
+        && (spr.psrdy_seen || spr.contract_seen)
+    {
+        return if spr.pps {
+            Protocol::Pps {
+                mv: spr.target_mv,
+                ma: spr.target_ma,
+            }
+        } else {
+            Protocol::Pd {
+                revision: spr.peer_revision,
+                mv: spr.target_mv,
+                ma: spr.target_ma,
+            }
+        };
+    }
+    if observation.capabilities.is_some() {
+        return Protocol::PdOffer;
+    }
+    observation
+        .selected_cc
+        .zip(observation.cc_status)
+        .and_then(|(cc, status)| status.get(usize::from(cc).checked_sub(1)?).copied())
+        .and_then(firmware_core::pd_sniff::rp)
+        .map_or(Protocol::Unknown, type_c)
+}
+
+/// Major PD revision from a message header's Specification Revision field
+/// (USB PD Table 6.1): 01b is 2.0, 10b is 3.x.
+fn header_revision(header: u16) -> Option<u8> {
+    match ((header & fusb302_pd::header::SPEC_REVISION) >> 6) as u8 {
+        fusb302_pd::header::REVISION_2 => Some(2),
+        fusb302_pd::header::REVISION_3 => Some(3),
+        _ => None,
+    }
+}
+
+/// Type-C source current advertisement (USB Type-C default, 1.5 A, 3 A).
+fn type_c(rp: firmware_core::pd_sniff::Rp) -> Protocol {
+    use firmware_core::pd_sniff::Rp;
+    Protocol::TypeC {
+        ma: match rp {
+            Rp::Default => 0,
+            Rp::Current1A5 => 1500,
+            Rp::Current3A0 => 3000,
+        },
     }
 }
 

@@ -24,6 +24,7 @@ mod pd_trial;
 mod pd_service;
 mod pd_sniff;
 mod render;
+mod ui;
 
 use core::ptr::addr_of_mut;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -38,13 +39,15 @@ use bus::{
     ASYNC_READS, BUS_LATCH, I2C_ERRORS, I2C_FAULT_STEP, I2C_IRQ_COUNT, I2C_LAST_CR1, I2C_LAST_CR4,
     I2C_LAST_SR, I2C3, bus_failed, read_meter, write_meter, write_sensor,
 };
+use button_logic::Page;
 use embassy_time::{Instant, Timer};
+use embedded_graphics::pixelcolor::{Rgb565, RgbColor};
 use firmware_core::buttons as button_logic;
 use hc32f460_pac::interrupt;
 use panel::Orientation;
 #[cfg(not(any(feature = "pd-boot-diagnostic", feature = "cable-log")))]
 use panic_halt as _;
-use render::{Counters, Frame, clear_screen, render_irq_test, render_measure, render_ports};
+use render::{Canvas, Counters, Frame, clear_screen, render_irq_test, render_ports};
 
 /// Return addresses the walk accepts: the application image after its initial
 /// stack pointer word, up to the end of the flash tool's application erase
@@ -126,11 +129,11 @@ unsafe fn HardFault(frame: &cortex_m_rt::ExceptionFrame) -> ! {
     }
 }
 
-/// Heartbeat square colours, alternating with each pulse.
-const ALIVE_A: u16 = render::WHITE;
-const ALIVE_B: u16 = render::BLUE;
+/// Heartbeat dot colours, alternating with each pulse.
+const ALIVE_A: Rgb565 = Rgb565::WHITE;
+const ALIVE_B: Rgb565 = Rgb565::new(8, 16, 8);
 /// Heartbeat colour while the I2C3 latch is tripped.
-const FAULT: u16 = render::RED;
+const FAULT: Rgb565 = Rgb565::RED;
 
 /// 240 x 135 RGB565 frame, memory byte order expected by `panel::flush`.
 /// It lives alone in SRAM2 (`memory.x`): in SRAMH+SRAM1 it left the stack only
@@ -480,7 +483,7 @@ fn armed_position(orientation: Orientation) -> u8 {
 /// press and release both finish during a frame; only the renderer owns pixels.
 #[embassy_executor::task]
 async fn button_task(inputs: [InputPin; 4]) {
-    // `pd-boot-diagnostic`: open on the PD page (3) so the state before a
+    // `pd-boot-diagnostic`: open on the PD page so the state before a
     // source Hard Reset is on screen (docs/SAFETY.md).
     // `cable-log`: a panic/fault/hang record from the previous boot opens the
     // PD page, which shows it, so no navigation is needed after a freeze.
@@ -492,7 +495,7 @@ async fn button_task(inputs: [InputPin; 4]) {
     #[cfg(not(feature = "cable-log"))]
     let fatal = false;
     let mut navigation = if cfg!(feature = "pd-boot-diagnostic") || fatal {
-        button_logic::Navigation::at_page(3)
+        button_logic::Navigation::at_page(Page::Pd)
     } else {
         button_logic::Navigation::default()
     };
@@ -518,7 +521,7 @@ async fn button_task(inputs: [InputPin; 4]) {
     }
 }
 #[inline(never)]
-unsafe fn render_pd(framebuffer: *mut u16, raw_vbus: u16, cable_detail: Option<u32>) {
+unsafe fn render_pd(framebuffer: *mut u16, raw_vbus: Option<u16>, cable_detail: Option<u32>) {
     let mut observation = latest_observation();
     #[cfg(feature = "pd-boot-diagnostic")]
     {
@@ -536,11 +539,9 @@ unsafe fn render_pd(framebuffer: *mut u16, raw_vbus: u16, cable_detail: Option<u
             .filter(|last| last.record.is_some());
     }
     if let Some(spr) = observation.spr.as_mut() {
-        spr.vbus_live_mv = if raw_vbus != u16::MAX && !bus_failed() {
-            Some(ina226::bus_millivolts(raw_vbus).min(u16::MAX as u32) as u16)
-        } else {
-            None
-        };
+        spr.vbus_live_mv = raw_vbus
+            .filter(|_| !bus_failed())
+            .map(|raw| ina226::bus_millivolts(raw).min(u16::MAX as u32) as u16);
     }
     unsafe {
         clear_screen(framebuffer);
@@ -564,16 +565,40 @@ unsafe fn render_partner(framebuffer: *mut u16, page: u32) {
     }
 }
 
+/// Meter page values from the latest raw INA226 registers; `None` until both
+/// have been read and while the bus is latched.
+fn reading(raw_v: Option<u16>, raw_i: Option<u16>) -> Option<ui::Reading> {
+    let (raw_v, raw_i) = (raw_v?, raw_i?);
+    if bus_failed() {
+        return None;
+    }
+    // The current register is two's complement (INA Table 7-1).
+    Some(ui::Reading {
+        mv: ina226::bus_millivolts(raw_v),
+        ma: i32::from(raw_i as i16) / ina226::COUNTS_PER_MA as i32,
+    })
+}
+
+/// Backlight compare for a settings level, inside `1..BACKLIGHT_PERIOD`.
+fn backlight_compare(settings: firmware_core::settings::Settings) -> u16 {
+    (u32::from(BACKLIGHT_PERIOD) * u32::from(settings.brightness_percent()) / 100) as u16
+}
+
 #[embassy_executor::task]
-async fn meter_task() {
+async fn meter_task(mut backlight: embassy_hc32::pwm::TimerA4Pwm) {
     let fb = framebuffer();
     let mut input_updates = BUTTON_STATE.anon_receiver();
     let mut input = button_logic::Input::default();
     let mut dirty = true;
-    // Last raw readings, `u16::MAX` until the first read; a changed reading
+    // Last raw readings, `None` until the first read; a changed reading
     // redraws the meter page.
-    let mut last_raw_v: u16 = u16::MAX;
-    let mut last_raw_i: u16 = u16::MAX;
+    let mut last_raw_v: Option<u16> = None;
+    let mut last_raw_i: Option<u16> = None;
+    // Peaks follow the meter page's reads; a settings or meter page reset
+    // request clears them.
+    let mut peaks = ui::Peaks::default();
+    let mut peaks_reset = input.peaks_reset;
+    let mut brightness = input.settings.brightness;
     // Reads are paced by an absolute deadline, never by subtracting from an
     // `Instant` (embassy-time panics on underflow, e.g. `Instant::now() - 200ms`
     // right after boot). The first read is due one period late on purpose: the
@@ -583,7 +608,7 @@ async fn meter_task() {
     let mut orientation_updates = ORIENTATION.anon_receiver();
     let mut current_rotation = Orientation::Normal;
     let mut last_secs = u32::MAX;
-    let mut last_pulse: u16 = u16::MAX;
+    let mut last_pulse = None;
     let mut ports = [0u16; 6];
 
     loop {
@@ -600,6 +625,18 @@ async fn meter_task() {
             dirty = true;
         }
         let page = input.page;
+        if input.peaks_reset != peaks_reset {
+            peaks_reset = input.peaks_reset;
+            peaks = ui::Peaks::default();
+        }
+        if input.settings.brightness != brightness {
+            brightness = input.settings.brightness;
+            // The compare is inside the period by construction; on an error
+            // the previous level simply stays.
+            backlight
+                .set_compare(backlight_compare(input.settings))
+                .ok();
+        }
 
         // `tilt_task` owns the orientation (it flipped and reconfigured the
         // sensor); this task only follows it for flushing and redraws.
@@ -615,29 +652,33 @@ async fn meter_task() {
         }
 
         let mut changed = false;
-        if (page == 0 || page == 3) && now >= next_read {
+        if matches!(page, Page::Meter | Page::Pd) && now >= next_read {
             next_read = now + METER_READ_PERIOD;
             if let Some(v) = read_meter(ina226::BUS_VOLTAGE).await {
-                if v != last_raw_v {
-                    last_raw_v = v;
+                if Some(v) != last_raw_v {
+                    last_raw_v = Some(v);
                     changed = true;
                 }
-                if page == 3 {
+                if page == Page::Pd {
                     changed = true;
                 }
             }
-            if page == 0
+            if page == Page::Meter
                 && let Some(i) = read_meter(ina226::CURRENT).await
-                && i != last_raw_i
             {
-                last_raw_i = i;
-                changed = true;
+                if Some(i) != last_raw_i {
+                    last_raw_i = Some(i);
+                    changed = true;
+                }
+                if let Some(reading) = reading(last_raw_v, last_raw_i) {
+                    peaks.update(reading);
+                }
             }
         }
 
         let secs = now.as_secs() as u32;
         let pulses = PULSES.load(Ordering::Relaxed) & 1 != 0;
-        // A latched bus turns the heartbeat square red on the meter page.
+        // A latched bus turns the heartbeat dot red on the meter page.
         let pulse_now = if bus_failed() {
             FAULT
         } else if pulses {
@@ -649,52 +690,69 @@ async fn meter_task() {
             last_secs = secs;
             dirty = true;
         }
-        if pulse_now != last_pulse {
-            last_pulse = pulse_now;
+        if Some(pulse_now) != last_pulse {
+            last_pulse = Some(pulse_now);
             dirty = true;
         }
 
         if dirty || changed {
             dirty = false;
-            if page == 0 {
-                unsafe {
-                    render_measure(fb, last_raw_v, last_raw_i, secs, pulse_now);
-                }
-            } else if page == 2 {
-                let (stack_peak, stack_size) = stack_use();
-                unsafe {
-                    render_irq_test(
-                        fb,
-                        Counters {
-                            step: I2C_FAULT_STEP.load(Ordering::Relaxed),
-                            sr: I2C_LAST_SR.load(Ordering::Relaxed),
-                            cr1: I2C_LAST_CR1.load(Ordering::Relaxed),
-                            cr4: I2C_LAST_CR4.load(Ordering::Relaxed),
-                            stack_peak,
-                            stack_size,
-                            reg_failures: IRQ_REG_FAILURES.load(Ordering::Relaxed),
-                            errors: I2C_ERRORS.load(Ordering::Relaxed),
-                            reads: ASYNC_READS.load(Ordering::Relaxed),
+            // SAFETY: this task is the sole framebuffer owner.
+            let frame = unsafe { &mut *(fb as *mut Frame) };
+            match page {
+                Page::Meter => {
+                    render::clear(frame);
+                    ui::draw_meter(
+                        &mut Canvas(frame),
+                        &ui::Meter {
+                            reading: reading(last_raw_v, last_raw_i),
+                            peaks,
+                            protocol: pd::protocol(&latest_observation()),
+                            alive: pulse_now,
                         },
-                        bus_failed(),
                     );
                 }
-            } else if page == 3 || page == 4 {
-                let detail = (page == 4).then_some(input.detail);
-                unsafe {
-                    render_pd(fb, last_raw_v, detail);
+                Page::Settings => {
+                    render::clear(frame);
+                    ui::draw_settings(&mut Canvas(frame), input.settings, input.cursor);
                 }
-            } else if page == 5 {
-                unsafe {
+                Page::Irq => {
+                    let (stack_peak, stack_size) = stack_use();
+                    unsafe {
+                        render_irq_test(
+                            fb,
+                            Counters {
+                                step: I2C_FAULT_STEP.load(Ordering::Relaxed),
+                                sr: I2C_LAST_SR.load(Ordering::Relaxed),
+                                cr1: I2C_LAST_CR1.load(Ordering::Relaxed),
+                                cr4: I2C_LAST_CR4.load(Ordering::Relaxed),
+                                stack_peak,
+                                stack_size,
+                                reg_failures: IRQ_REG_FAILURES.load(Ordering::Relaxed),
+                                errors: I2C_ERRORS.load(Ordering::Relaxed),
+                                reads: ASYNC_READS.load(Ordering::Relaxed),
+                            },
+                            bus_failed(),
+                        );
+                    }
+                }
+                Page::Pd | Page::Cable => {
+                    let detail = (page == Page::Cable).then_some(input.detail);
+                    unsafe {
+                        render_pd(fb, last_raw_v, detail);
+                    }
+                }
+                Page::Charger => unsafe {
                     render_partner(fb, input.detail);
-                }
-            } else {
-                for (i, p) in ports.iter_mut().enumerate() {
-                    let port = [Port::A, Port::B, Port::C, Port::D, Port::E, Port::H];
-                    *p = gpio::read_port(port[i]);
-                }
-                unsafe {
-                    render_ports(fb, &ports);
+                },
+                Page::Ports => {
+                    for (i, p) in ports.iter_mut().enumerate() {
+                        let port = [Port::A, Port::B, Port::C, Port::D, Port::E, Port::H];
+                        *p = gpio::read_port(port[i]);
+                    }
+                    unsafe {
+                        render_ports(fb, &ports);
+                    }
                 }
             }
             let frame_start = Instant::now();
@@ -777,6 +835,7 @@ async fn main(spawner: Spawner) {
         cortex_m::interrupt::enable();
     }
 
+    let backlight_pwm;
     let button_inputs;
     let tilt_input;
     let pd_input;
@@ -820,7 +879,7 @@ async fn main(spawner: Spawner) {
             *I2C3.try_lock().expect("startup owns I2C3") = Some(bus);
         } else {
             // Keep running: the meter screen stays alive without measurements,
-            // but the latch makes the missing bus visible (red heartbeat square).
+            // but the latch makes the missing bus visible (red heartbeat dot).
             BUS_LATCH.fail();
         }
 
@@ -886,6 +945,7 @@ async fn main(spawner: Spawner) {
             }
         }
 
+        backlight_pwm = backlight.0;
         if !panel::init(backlight.1).await {
             // Backlight is already on, so a lit blank screen means the panel
             // sequence failed; a dark screen means we failed before this point.
@@ -901,6 +961,6 @@ async fn main(spawner: Spawner) {
     spawner.spawn(pulse_task().expect(ONE_SPAWN));
     spawner.spawn(tilt_task(tilt_input).expect(ONE_SPAWN));
     spawner.spawn(button_task(button_inputs).expect(ONE_SPAWN));
-    spawner.spawn(meter_task().expect(ONE_SPAWN));
+    spawner.spawn(meter_task(backlight_pwm).expect(ONE_SPAWN));
     spawner.spawn(pd_task::run(pd_input, pc13_input).expect(ONE_SPAWN));
 }

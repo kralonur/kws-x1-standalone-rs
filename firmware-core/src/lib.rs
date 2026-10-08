@@ -8,6 +8,7 @@ pub mod clock;
 pub mod image;
 pub mod latch;
 pub mod panel;
+pub mod settings;
 pub mod stack;
 // Compatibility paths for the firmware; implementations live in the shared
 // crate, plus the FUSB302 FIFO and STATUS0 adapters for `pd_rx`/`pd_sniff`.

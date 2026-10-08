@@ -117,7 +117,7 @@ impl Selection {
         let rising = buttons & !old;
         let falling = !buttons & old;
         let now = self.now_ms();
-        if input.page != 3
+        if input.page != crate::buttons::Page::Pd
             || buttons & 3 == 3
             || self.has_pending()
             || self.request_in_flight()

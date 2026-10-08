@@ -6,6 +6,8 @@
 //! rather than names.
 #![allow(dead_code)]
 
+use crate::settings::{Item, Settings};
+
 pub const COUNT: usize = 4;
 /// Pin identifiers, matching the original configuration.
 pub const PINS: [&str; COUNT] = ["PB2", "PB10", "PH0", "PC14"];
@@ -52,37 +54,83 @@ impl Debounced {
     }
 }
 
-/// Meter navigation owned by the input task, not the renderer. PH0 advances
-/// through six pages; PC14 returns to the meter page (and wins a simultaneous
-/// press). Publishing the latest snapshot avoids a render backlog losing taps.
-/// Meter, ports, IRQ test, PD, E-marker details, charger info.
-pub const PAGES: u8 = 6;
+/// Button roles, as bits of the stable pressed mask (bit `n` is `PINS[n]`).
+/// PB2 steps (sub-pages, settings cursor, PD preview), PB10 selects (settings
+/// item, peak reset, PD confirm), PH0 advances the page and PC14 returns home.
+pub const STEP: u8 = 1 << 0;
+pub const SELECT: u8 = 1 << 1;
+pub const NEXT_PAGE: u8 = 1 << 2;
+pub const HOME: u8 = 1 << 3;
+
+/// Screen pages, in [`NEXT_PAGE`] order. The two diagnostic pages are only
+/// in the cycle while [`Settings::debug_pages`] is on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Page {
+    #[default]
+    Meter,
+    /// PD session and the fixed/PPS option selection.
+    Pd,
+    /// What the charger said about itself, on sub-pages.
+    Charger,
+    /// Cable E-marker details, on sub-pages.
+    Cable,
+    Settings,
+    /// GPIO port levels and frame timing.
+    Ports,
+    /// Interrupt and I2C fault counters.
+    Irq,
+}
+
+impl Page {
+    fn next(self, debug_pages: bool) -> Self {
+        match self {
+            Self::Meter => Self::Pd,
+            Self::Pd => Self::Charger,
+            Self::Charger => Self::Cable,
+            Self::Cable => Self::Settings,
+            Self::Settings if debug_pages => Self::Ports,
+            Self::Ports => Self::Irq,
+            Self::Settings | Self::Irq => Self::Meter,
+        }
+    }
+
+    /// Pages whose sub-page [`STEP`] and [`SELECT`] move.
+    fn has_detail(self) -> bool {
+        matches!(self, Self::Charger | Self::Cable)
+    }
+}
 
 /// One coherent input state, published by the input task as a unit.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Input {
     /// Stable pressed mask; bit `n` is `PINS[n]`.
     pub pressed: u8,
-    /// Current page, `0..PAGES`.
-    pub page: u8,
-    /// Sub-page of the E-marker detail and charger info pages.
+    pub page: Page,
+    /// Sub-page of the charger and cable pages.
     pub detail: u32,
+    pub settings: Settings,
+    /// Highlighted settings row.
+    pub cursor: Item,
+    /// Incremented by each peak reset request; the meter clears its peaks
+    /// when this changes.
+    pub peaks_reset: u8,
 }
 
+/// Navigation and settings, owned by the input task rather than the renderer,
+/// so a render backlog never loses taps. [`HOME`] wins over a simultaneous
+/// [`NEXT_PAGE`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Navigation {
     debounce: Debounced,
-    page: u8,
-    detail: u32,
+    input: Input,
 }
 
 impl Navigation {
-    /// Start on `page` (taken modulo the pages), e.g. a diagnostic boot page.
-    pub fn at_page(page: u8) -> Self {
-        Self {
-            page: page % PAGES,
-            ..Self::default()
-        }
+    /// Start on `page`, e.g. a diagnostic boot page.
+    pub fn at_page(page: Page) -> Self {
+        let mut navigation = Self::default();
+        navigation.input.page = page;
+        navigation
     }
 
     /// Feed one sample and return the resulting input state.
@@ -90,28 +138,45 @@ impl Navigation {
         let before = self.debounce.stable();
         let after = self.debounce.update(raw_pressed, DEFAULT_THRESHOLD);
         let rising = after & !before;
-        if rising & 4 != 0 {
-            self.page = (self.page + 1) % PAGES;
-            self.detail = 0;
+        let input = &mut self.input;
+        input.pressed = after;
+        if rising & NEXT_PAGE != 0 {
+            input.page = input.page.next(input.settings.debug_pages);
+            input.detail = 0;
         }
-        if rising & 8 != 0 {
-            self.page = 0;
-            self.detail = 0;
+        if rising & HOME != 0 {
+            input.page = Page::Meter;
+            input.detail = 0;
         }
-        // E-marker detail (4) and charger info (5) pages step with PB2/PB10.
-        if self.page >= 4 {
-            if rising & 1 != 0 {
-                self.detail = self.detail.wrapping_add(1) & 0x00ff_ffff;
+        match input.page {
+            page if page.has_detail() => {
+                if rising & STEP != 0 {
+                    input.detail = input.detail.wrapping_add(1) & 0x00ff_ffff;
+                }
+                if rising & SELECT != 0 {
+                    input.detail = input.detail.saturating_sub(1);
+                }
             }
-            if rising & 2 != 0 {
-                self.detail = self.detail.saturating_sub(1);
+            Page::Settings => {
+                if rising & STEP != 0 {
+                    input.cursor = input.cursor.next();
+                }
+                if rising & SELECT != 0 {
+                    match input.cursor {
+                        Item::Brightness => input.settings.brighter(),
+                        Item::ResetPeaks => input.peaks_reset = input.peaks_reset.wrapping_add(1),
+                        Item::DebugPages => {
+                            input.settings.debug_pages = !input.settings.debug_pages;
+                        }
+                    }
+                }
             }
+            Page::Meter if rising & SELECT != 0 => {
+                input.peaks_reset = input.peaks_reset.wrapping_add(1);
+            }
+            _ => {}
         }
-        Input {
-            pressed: after,
-            page: self.page,
-            detail: self.detail,
-        }
+        *input
     }
 }
 

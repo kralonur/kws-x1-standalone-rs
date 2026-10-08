@@ -2,7 +2,7 @@
 
 use super::{Observation, decimal3, decimal4, hex, hex8, paint_lines, put};
 
-/// Charger page (page 5): what the Source said about itself in reply to the
+/// Charger page: what the Source said about itself in reply to the
 /// information requests (`pd_partner`), on three sub-pages (PB2/PB10). These
 /// are the Source's claims, not measurements.
 pub fn partner_lines(observation: Observation, page: u32) -> [[u8; 24]; 8] {
