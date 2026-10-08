@@ -618,25 +618,46 @@ async fn meter_task() {
     }
 }
 
+/// SRAM wait control, wait protection and check protection registers (RM 8.2).
+const SRAM_WTCR: *mut u16 = 0x4005_0800 as *mut u16;
+const SRAM_WTPR: *mut u16 = 0x4005_0804 as *mut u16;
+const SRAM_CKPR: *mut u16 = 0x4005_080c as *mut u16;
+/// WTPR/CKPR write key 0x3b in bits 7:1 (RM 8.2.2, 8.2.4).
+const SRAM_KEY: u16 = 0x3b << 1;
+/// Key plus WTPRC/CKPRC (bit 0) set: WTCR/CKCR writes enabled.
+const SRAM_UNLOCK: u16 = SRAM_KEY | 1;
+/// Key with WTPRC/CKPRC clear: WTCR/CKCR writes disabled.
+const SRAM_LOCK: u16 = SRAM_KEY;
+/// WTCR SRAM3_RWT and SRAM3_WWT = 001b: one wait (2-cycle) read and write
+/// (RM 8.2.1); SRAM1/2/3 need a wait above 100 MHz (RM Table 8-1).
+const SRAM3_ONE_WAIT: u16 = 1 << 12 | 1 << 8;
+/// CPACR CP10 and CP11 = 11b: full FPU access.
+const FPU_FULL_ACCESS: u32 = 0xf << 20;
+/// NVIC ICER masks covering the 144 external IRQs of the PAC vector table:
+/// four full banks, then the low 16 bits of the fifth.
+const IRQ_CLEAR_MASKS: [u32; 5] = [!0, !0, !0, !0, 0xffff];
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     unsafe {
-        // SRAM wait states for high frequency (matches stock 0x10298).
-        (0x40050804 as *mut u16).write_volatile(0x77);
-        (0x4005080c as *mut u16).write_volatile(0x77);
-        (0x40050800 as *mut u16).write_volatile(0x1100);
-        (0x40050804 as *mut u16).write_volatile(0x76);
-        (0x4005080c as *mut u16).write_volatile(0x76);
+        // SRAM wait states for high frequency: unlock WTCR and CKCR, set the
+        // SRAM3 waits, then lock both again.
+        SRAM_WTPR.write_volatile(SRAM_UNLOCK);
+        SRAM_CKPR.write_volatile(SRAM_UNLOCK);
+        SRAM_WTCR.write_volatile(SRAM3_ONE_WAIT);
+        SRAM_WTPR.write_volatile(SRAM_LOCK);
+        SRAM_CKPR.write_volatile(SRAM_LOCK);
 
         // Enable CP10/CP11 for the FPU (matches SystemInit).
-        let cpacr = 0xe000ed88 as *mut u32;
-        cpacr.write_volatile(cpacr.read_volatile() | (0xf << 20));
+        let scb = &*cortex_m::peripheral::SCB::PTR;
+        scb.cpacr.modify(|cpacr| cpacr | FPU_FULL_ACCESS);
 
         // Disable every external IRQ; this image uses none of them.
-        for (bank, &mask) in [!0u32, !0, !0, !0, 0xffff].iter().enumerate() {
-            ((0xe000e180usize + bank * 4) as *mut u32).write_volatile(mask);
+        let nvic = &*cortex_m::peripheral::NVIC::PTR;
+        for (icer, &mask) in nvic.icer.iter().zip(&IRQ_CLEAR_MASKS) {
+            icer.write(mask);
         }
-        (0xe000ed08 as *mut u32).write_volatile(0x10000);
+        scb.vtor.write(kws_x1_core::image::APP_BASE);
         core::arch::asm!("dsb", "isb", options(nostack, preserves_flags));
     }
 
