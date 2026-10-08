@@ -1,4 +1,4 @@
-//! The frame as a draw target, and the port and system detail lines.
+//! The frame as a draw target, and the system detail lines.
 
 use core::sync::atomic::Ordering;
 
@@ -80,26 +80,6 @@ fn put(row: &mut [u8; 24], text: &[u8]) {
     row[..text.len()].copy_from_slice(text);
 }
 
-/// Ports page: frame and input-poll timing in ms, then each GPIO port's
-/// input levels.
-pub fn ports_lines(ports: &[u16; 6]) -> Lines {
-    let mut rows = [[b' '; 24]; 8];
-    put(&mut rows[0], b"FRAME 000000 GAP 000000");
-    decimal(&mut rows[0], 6, 6, FRAME_MS.load(Ordering::Relaxed));
-    decimal(
-        &mut rows[0],
-        17,
-        6,
-        BUTTON_GAP_MAX_MS.load(Ordering::Relaxed),
-    );
-    for ((row, name), &levels) in rows[1..].iter_mut().zip(b"ABCDEH").zip(ports) {
-        put(row, b"PORT -: 0000");
-        row[5] = *name;
-        hex(row, 8, 4, levels.into());
-    }
-    rows
-}
-
 /// Counters shown on the system page.
 pub struct Counters {
     pub step: u32,
@@ -114,13 +94,14 @@ pub struct Counters {
     pub reads: u32,
 }
 
-/// System page: one value per row. `STEP` is the bring-up step whose wait
+/// System page, one value per row: the I2C bus section, then timing and
+/// memory. `STEP` is the bring-up step whose wait
 /// hung (`0` = no timeout), which names the failure without needing a
 /// debugger: 1 bus free, 2 start accepted, 3 tx buffer empty, 4 byte
 /// transferred, 5 stop completed, 6 repeated start, 7 buffer before the read
 /// address, 8 receive mode entered, 9 first byte received, 10 second byte
 /// received.
-pub fn irq_lines(counters: Counters, latched: bool) -> Lines {
+pub fn system_lines(counters: Counters, latched: bool) -> [Lines; 2] {
     let mut rows = [[b' '; 24]; 8];
     put(
         &mut rows[0],
@@ -137,16 +118,30 @@ pub fn irq_lines(counters: Counters, latched: bool) -> Lines {
     put(&mut rows[3], b"CR1: 00000 CR4: 00000");
     hex(&mut rows[3], 5, 5, counters.cr1);
     hex(&mut rows[3], 16, 5, counters.cr4);
+    put(&mut rows[4], b"REG FAILS: 000000");
+    decimal(&mut rows[4], 11, 6, counters.reg_failures);
+    put(&mut rows[5], b"ERRORS: 000000");
+    decimal(&mut rows[5], 8, 6, counters.errors);
+    put(&mut rows[6], b"READS: 000000");
+    decimal(&mut rows[6], 7, 6, counters.reads);
+
+    let mut timing = [[b' '; 24]; 8];
+    put(&mut timing[0], b"TIMING AND MEMORY");
+    // Last panel refresh, and the longest gap between two button polls
+    // since boot (normally `buttons::POLL_MS`), in ms.
+    put(&mut timing[1], b"FRAME: 000000 MS");
+    decimal(&mut timing[1], 7, 6, FRAME_MS.load(Ordering::Relaxed));
+    put(&mut timing[2], b"BUTTON GAP: 000000 MS");
+    decimal(
+        &mut timing[2],
+        12,
+        6,
+        BUTTON_GAP_MAX_MS.load(Ordering::Relaxed),
+    );
     // Peak stack bytes since boot / stack size: the margin left before an
     // overflow into `.bss` (see docs/SAFETY.md).
-    put(&mut rows[4], b"STACK: 000000/000000");
-    decimal(&mut rows[4], 7, 6, counters.stack_peak);
-    decimal(&mut rows[4], 14, 6, counters.stack_size);
-    put(&mut rows[5], b"REG FAILS: 000000");
-    decimal(&mut rows[5], 11, 6, counters.reg_failures);
-    put(&mut rows[6], b"ERRORS: 000000");
-    decimal(&mut rows[6], 8, 6, counters.errors);
-    put(&mut rows[7], b"READS: 000000");
-    decimal(&mut rows[7], 7, 6, counters.reads);
-    rows
+    put(&mut timing[3], b"STACK: 000000/000000");
+    decimal(&mut timing[3], 7, 6, counters.stack_peak);
+    decimal(&mut timing[3], 14, 6, counters.stack_size);
+    [rows, timing]
 }

@@ -619,7 +619,6 @@ async fn meter_task(mut backlight: embassy_hc32::pwm::TimerA4Pwm) {
     let mut sensed_rotation = Orientation::Normal;
     let mut last_secs = u32::MAX;
     let mut last_pulse = None;
-    let mut ports = [0u16; 6];
     let detail_sender = DETAIL_VIEW.sender();
 
     loop {
@@ -814,21 +813,7 @@ async fn meter_task(mut backlight: embassy_hc32::pwm::TimerA4Pwm) {
                             top,
                             scrolling,
                         ),
-                        Detail::Ports => {
-                            let names = [Port::A, Port::B, Port::C, Port::D, Port::E, Port::H];
-                            for (levels, port) in ports.iter_mut().zip(names) {
-                                *levels = gpio::read_port(port);
-                            }
-                            ui::draw_detail(
-                                canvas,
-                                detail,
-                                position,
-                                core::iter::once(render::ports_lines(&ports)),
-                                top,
-                                scrolling,
-                            )
-                        }
-                        Detail::Irq => {
+                        Detail::System => {
                             let (stack_peak, stack_size) = stack_use();
                             let counters = Counters {
                                 step: I2C_FAULT_STEP.load(Ordering::Relaxed),
@@ -845,7 +830,7 @@ async fn meter_task(mut backlight: embassy_hc32::pwm::TimerA4Pwm) {
                                 canvas,
                                 detail,
                                 position,
-                                core::iter::once(render::irq_lines(counters, bus_failed())),
+                                render::system_lines(counters, bus_failed()),
                                 top,
                                 scrolling,
                             )

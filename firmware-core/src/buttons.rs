@@ -146,22 +146,19 @@ pub enum Detail {
     Charger,
     /// Cable E-marker details.
     Cable,
-    /// GPIO port levels and frame timing.
-    Ports,
-    /// Interrupt and I2C fault counters.
-    Irq,
+    /// I2C fault counters, timing and stack use.
+    System,
 }
 
 /// The pages as Left/Right enter them.
-const PAGES: [Page; 8] = [
+const PAGES: [Page; 7] = [
     Page::Overview,
     Page::Fixed { choosing: false },
     Page::Pps(PpsFocus::Browse),
     Page::detail(Detail::Pd),
     Page::detail(Detail::Charger),
     Page::detail(Detail::Cable),
-    Page::detail(Detail::Ports),
-    Page::detail(Detail::Irq),
+    Page::detail(Detail::System),
 ];
 /// Index of the first detail page in `PAGES`.
 const FIRST_DETAIL: usize = 3;

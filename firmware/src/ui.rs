@@ -1028,8 +1028,7 @@ pub fn draw_detail<D: DrawTarget<Color = Rgb565>>(
         Detail::Pd => ("PD SESSION", GREEN),
         Detail::Charger => ("CHARGER", ORANGE),
         Detail::Cable => ("CABLE", CYAN),
-        Detail::Ports => ("PORTS", MAGENTA),
-        Detail::Irq => ("SYSTEM", YELLOW),
+        Detail::System => ("SYSTEM", YELLOW),
     };
     draw_header(target, &Header { title, position }, accent);
     let mut rows = 0u16;
