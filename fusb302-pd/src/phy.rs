@@ -254,7 +254,6 @@ pub struct Session<'a, B: I2c, D, C, P: Platform> {
     bus: &'a mut B,
     delay: &'a mut D,
     clock: &'a C,
-    started: bool,
     stopped: bool,
     finished: bool,
     unverified: bool,
@@ -323,7 +322,22 @@ pub struct Session<'a, B: I2c, D, C, P: Platform> {
     stop_since_ms: Option<u64>,
 }
 impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> {
-    pub fn new(
+    /// Create a session and run its checked startup. The session is returned
+    /// either way: after an error it is halted and still carries its evidence.
+    pub async fn start(
+        bus: &'a mut B,
+        delay: &'a mut D,
+        clock: &'a C,
+        config: Config<'a, P::Limits>,
+        observation: pd::Observation,
+        before: Snapshot,
+        cc: [u8; 2],
+    ) -> (Self, Result<(), Error<B::Error>>) {
+        let mut session = Self::new(bus, delay, clock, config, observation);
+        let result = session.begin(before, cc).await;
+        (session, result)
+    }
+    fn new(
         bus: &'a mut B,
         delay: &'a mut D,
         clock: &'a C,
@@ -335,7 +349,6 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             bus,
             delay,
             clock,
-            started: false,
             stopped: true,
             finished: false,
             unverified: false,
@@ -401,7 +414,6 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
     }
     pub fn stop(&mut self) {
         P::set_rx_idle(false);
-        self.started = true;
         self.stopped = true;
         self.finished = true;
     }
@@ -457,11 +469,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             .await
             .map_err(Error::Config)
     }
-    pub async fn start(&mut self, before: Snapshot, cc: [u8; 2]) -> Result<(), Error<B::Error>> {
-        if self.started {
-            return Err(Error::Stopped);
-        }
-        self.started = true;
+    async fn begin(&mut self, before: Snapshot, cc: [u8; 2]) -> Result<(), Error<B::Error>> {
         if self.observation.restore_unverified {
             self.unverified = true;
             return Err(Error::Stopped);

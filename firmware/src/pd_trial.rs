@@ -194,9 +194,17 @@ pub async fn run(observation: &mut pd::Observation, report: pd_cc::Report) {
         };
         let mut phy_observation = observation.phy;
         phy_observation.phase = pd::Phase::Negotiating;
-        let mut phy =
-            pd_spr_phy::Session::new(&mut bus, &mut delay, &clock, config, phy_observation);
-        if let Err(failure) = phy.start(report.after, report.status).await {
+        let (mut phy, started) = pd_spr_phy::Session::start(
+            &mut bus,
+            &mut delay,
+            &clock,
+            config,
+            phy_observation,
+            report.after,
+            report.status,
+        )
+        .await;
+        if let Err(failure) = started {
             error = Some(failure);
         } else {
             let trace = core::cell::RefCell::new(pd_spr::MaintainedTrace::default());
