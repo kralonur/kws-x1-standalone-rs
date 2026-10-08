@@ -120,6 +120,9 @@ pub struct SniffObservation {
     /// Header and decoded supply of the newest Request, kept beyond the
     /// rolling log: a PPS sink's other traffic soon scrolls it out.
     pub request: Option<(u16, Supply)>,
+    /// Object position of the last Request seen without captured
+    /// capabilities (`uncaptured_request`).
+    uncaptured_position: Option<u32>,
 }
 
 impl SniffObservation {
@@ -134,6 +137,7 @@ impl SniffObservation {
             flags: [0; 3],
             stop: None,
             request: None,
+            uncaptured_position: None,
         }
     }
     /// Log one CRC-checked SOP frame. Source_Capabilities replace the stored
@@ -148,15 +152,49 @@ impl SniffObservation {
             }
             // New capabilities start a new negotiation.
             self.request = None;
+            self.uncaptured_position = None;
         }
         let caps = &self.caps[..self.caps_count as usize];
         let entry = firmware_core::pd_sniff::Entry::classify(frame.header(), frame.data(), caps);
         if let Some(supply) = entry.supply {
+            let supply = match supply {
+                Supply::Raw if self.caps_count == 0 => self.uncaptured_request(entry.word),
+                supply => supply,
+            };
             self.request = Some((entry.header, supply));
         }
         self.log.push(entry);
     }
+
+    /// A Request seen before any Source_Capabilities: the meter booted from
+    /// the same VBUS after the negotiation, so this is a re-request. A sink
+    /// re-requests on its own only to keep a PPS contract alive (at least
+    /// every 10 s, USB PD tPPSRequest); a fixed sink only answers new
+    /// capabilities, which the sniffer would have captured. So a second such
+    /// Request for the same object is PPS and decodes as a PPS RDO.
+    fn uncaptured_request(&mut self, rdo: u32) -> Supply {
+        let position = rdo >> RDO_POSITION_SHIFT;
+        let repeated = self.uncaptured_position == Some(position);
+        self.uncaptured_position = Some(position);
+        if !repeated {
+            return Supply::Raw;
+        }
+        Supply::Pps {
+            mv: (rdo >> PPS_RDO_VOLTAGE_SHIFT & PPS_RDO_VOLTAGE_MASK) * PPS_RDO_VOLTAGE_UNIT_MV,
+            ma: (rdo & PPS_RDO_CURRENT_MASK) * PPS_RDO_CURRENT_UNIT_MA,
+        }
+    }
 }
+
+/// Request Data Object fields (USB PD Tables 6.19 and 6.21): object position
+/// in bits 31..28; a PPS RDO carries the output voltage in bits 20..9 in
+/// 20 mV units and the operating current in bits 6..0 in 50 mA units.
+const RDO_POSITION_SHIFT: u32 = 28;
+const PPS_RDO_VOLTAGE_SHIFT: u32 = 9;
+const PPS_RDO_VOLTAGE_MASK: u32 = 0xfff;
+const PPS_RDO_VOLTAGE_UNIT_MV: u32 = 20;
+const PPS_RDO_CURRENT_MASK: u32 = 0x7f;
+const PPS_RDO_CURRENT_UNIT_MA: u32 = 50;
 
 /// The charging protocol shown on the meter page. A Request the passthrough
 /// sniffer decoded wins, then this meter's own contract, then a capabilities
