@@ -1,4 +1,4 @@
-//! Receive-only passthrough sniffer (`docs/PD-SNIFFER.md`). Starts only from the
+//! Receive-only passthrough sniffer (`docs/SAFETY.md`). Starts only from the
 //! verified passive release (SWITCHES0=00, `pd_cc::Passive`).
 //!
 //! Write allowlist: POWER 07/09, SWITCHES0 04/08 (measure CC1/CC2; no Rd, Rp or
@@ -143,7 +143,7 @@ impl Sniffer {
         }
         self.cc_status = Some(cc);
         let selected = pd_sniff::orientation(cc).ok_or(Error::Orientation(cc))?;
-        // Receiver/references OFF while clocking the flush (attempt31 sequence).
+        // Keep receiver/references OFF while clocking the flush.
         self.write(bus, ConfigRegister::Power, 0x09).await?;
         self.write(bus, ConfigRegister::Control1Flush, 0x04).await?;
         let status = self.read(bus, 0x41).await?;

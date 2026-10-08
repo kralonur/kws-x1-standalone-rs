@@ -2,7 +2,7 @@ MEMORY
 {
   /* Application content region the bootloader owns for updates.
    * [0x10000, 0x4340c) content, then additive checksum and trailer added by
-   * tools/package_app.py. Bootloader below 0x10000 and stock settings at
+   * the image packager. Bootloader below 0x10000 and stock settings at
    * [0x72000, 0x80000) stay untouched.
    */
   FLASH : ORIGIN = 0x00010000, LENGTH = 0x3340C
@@ -15,7 +15,7 @@ MEMORY
   RAM : ORIGIN = 0x1FFF9000, LENGTH = 0x15F00
   /* SRAM2 (64 KiB) holds only the 64.8 KiB frame buffer, so .bss shrinks and
    * the stack at the top of RAM gets ~72 KiB instead of ~7.9 KiB (the deepest
-   * PD paths overflowed into the timer queue, docs/PD-CABLE-SYNC.md). SRAM1 and
+   * PD paths overflowed into the timer queue; see docs/SAFETY.md). SRAM1 and
    * SRAM2 share the SRAM12 wait-state field (SRAM_WTCR), so the timing is the
    * same as SRAM1. SRAM3 (ECC errata) stays unused.
    */

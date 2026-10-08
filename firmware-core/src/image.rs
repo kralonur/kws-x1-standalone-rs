@@ -16,7 +16,7 @@
 pub const PAYLOAD_LEN: usize = 0x33420;
 /// Stock length rounded up to a 64-byte chunk multiple, zero padded.
 /// This is a conservative tooling policy, not an acceptance guarantee or a proven
-/// universal bootloader requirement; see `docs/STARTUP-CONTRACT.md`.
+/// universal bootloader requirement; see `docs/SAFETY.md`.
 pub const EXTENDED_PAYLOAD_LEN: usize = PAYLOAD_LEN.div_ceil(64) * 64;
 /// Application base address in flash (`0x10000`), where the bootloader enters it.
 pub const APP_BASE: u32 = 0x10000;

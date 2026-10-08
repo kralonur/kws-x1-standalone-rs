@@ -4,7 +4,7 @@ use embedded_hal_async::i2c::{ErrorType, I2c, Operation};
 
 struct SharedBus;
 
-/// `pd-boot-diagnostic` (`docs/PD-BOOT-RESTART.md`): the longest I2C3 lock wait,
+/// `pd-boot-diagnostic` (`docs/SAFETY.md`): the longest I2C3 lock wait,
 /// I2C transfer and 1 ms delay overshoot in this session, ms. A receive-poll gap
 /// (`Observation::poll_gap_ms`) is made of these plus engine CPU time.
 pub static LOCK_WAIT_MAX: AtomicU32 = AtomicU32::new(0);
@@ -57,7 +57,7 @@ impl I2c for SharedBus {
         // Run the transfer to completion here (see `spin`). Awaiting it costs
         // one executor turn per byte: a 31-byte FIFO read took 14 ms on hardware
         // and the Request missed the Source's SenderResponseTimer (24-30 ms,
-        // section 6.6.2), which then Hard Reset (docs/PD-BOOT-RESTART.md). At
+        // section 6.6.2), which then Hard Reset. At
         // 400 kHz a transfer takes under 1 ms; its 50 ms timeout still bounds it.
         let result = spin(bus.transaction(address, operations));
         note_max(&TRANSFER_MAX, locked);
@@ -81,7 +81,7 @@ fn spin<F: core::future::Future>(future: F) -> F::Output {
     }
 }
 
-/// SinkTxOK gate (section 7.2, `docs/PD-SINK-TX.md`): one I2C3 lease and no
+/// SinkTxOK gate (section 7.2, `docs/SAFETY.md`): one I2C3 lease and no
 /// executor turn from the STATUS0 sample to the TXON byte. At 400 kHz the two
 /// reads and a FIFO write of at most 39 bytes take about 1.3 ms; tSinkDelay is
 /// 5 ms. Each HAL operation keeps its own 50 ms timeout as the hard ceiling.
@@ -236,7 +236,7 @@ pub async fn run(observation: &mut pd::Observation, report: pd_cc::Report) {
                 }
             }
             error = phy.take_error();
-            // PE_SNK_Transition_to_default (`docs/PD-HARD-RESET.md` B4) when the
+            // PE_SNK_Transition_to_default (`docs/SAFETY.md`) when the
             // PHY saw Hard Reset Signaling and, for ours, the wrapper sent it.
             if phy.hard_reset_received() || (phy.hard_reset_sent() && sent_hard_reset) {
                 phy.observation.phase = pd::Phase::Failed;

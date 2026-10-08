@@ -2,7 +2,7 @@
 #[allow(unused_imports)]
 pub use fusb302_pd::{config::Error, startup::Report};
 
-// Exact configuration observed in attempt28. Dynamic status bytes excluded.
+// Verified power-on configuration; dynamic status bytes are excluded.
 pub(crate) const EXPECTED: [u8; 11] = [0x91, 0x03, 0x20, 0x24, 0, 0x02, 0x06, 0x01, 0, 0, 0];
 /// Stock boot releases both controller Rd terminations (0x15ea0..0x15f16).
 pub(crate) const PASSIVE_SWITCHES0: u8 = 0x00;

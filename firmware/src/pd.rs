@@ -46,7 +46,7 @@ impl From<fusb302_pd::observation::Observation> for Observation {
     }
 }
 
-/// What the previous boot recorded last before it ended (`docs/PD-BOOT-RESTART.md`).
+/// What the previous boot recorded last before it ended (`docs/SAFETY.md`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BootRecord {
     pub step: u8,
@@ -550,7 +550,7 @@ fn spr_lines(observation: Observation) -> [[u8; 24]; 8] {
         hex(&mut rows[5], 18, observation.failed_register as u16);
     }
     // Section 7.2: the last AMS start was refused because Rp never showed
-    // SinkTxOK (owner decision 2026-10-06: stay strict, say so). Cleared by the
+    // Report SinkTxOK gating explicitly. Cleared by the
     // next gated send.
     if observation.rx_error == 0 && spr.sink_tx_cause == b'G' {
         rows[5] = [b' '; 24];

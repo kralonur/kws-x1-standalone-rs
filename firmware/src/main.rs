@@ -103,7 +103,7 @@ const FAULT: u16 = 0xf800;
 /// 240 x 135 RGB565 frame, memory byte order expected by `panel::flush`.
 /// It lives alone in SRAM2 (`memory.x`): in SRAMH+SRAM1 it left the stack only
 /// ~7.9 KiB, and the deepest PD paths overflowed into the timer queue just
-/// below it (HardFault at PC 0 in a timer wake, `docs/PD-CABLE-SYNC.md`).
+/// below it (HardFault at PC 0 in a timer wake, `docs/SAFETY.md`).
 /// Not zeroed by the runtime: `main` zeroes it before any task reads it.
 // SAFETY: memory.x reserves SRAM2 for this frame; startup initializes it before use.
 #[unsafe(link_section = ".sram2.framebuffer")]
@@ -158,9 +158,9 @@ fn store_observation(observation: pd::Observation) {
     PD_OBSERVATION.lock(|cell| *cell.borrow_mut() = observation);
 }
 
-/// `pd-boot-diagnostic` only (`docs/PD-BOOT-RESTART.md`). A restart loses the
+/// `pd-boot-diagnostic` only (`docs/SAFETY.md`). A restart loses the
 /// screen and RAM (RSTF0 = PORF), so PD progress is appended to flash and the
-/// next boot shows the previous boot's last entry. Owner-approved 2026-10-06 for
+/// next boot shows the previous boot's last entry. Restricted to
 /// the stock settings/statistics area, with these limits:
 /// - only a sector of `SECTORS` that is entirely blank, or already claimed by
 ///   this log; the last sector (0x7e000) is never used, it holds the FSWP
@@ -938,7 +938,7 @@ unsafe fn render_irq_test(framebuffer: *mut u16, counters: Counters, latched: bo
         text(framebuffer, 6, 52, &line);
 
         // Peak stack bytes since boot / stack size: the margin left before an
-        // overflow into `.bss` (the old freeze, docs/PD-CABLE-SYNC.md).
+        // overflow into `.bss` (see docs/SAFETY.md).
         let mut line = *b"STK 000000/000000";
         copy_6(&mut line, 4, &decimal6(counters.stack_peak));
         copy_6(&mut line, 11, &decimal6(counters.stack_size));
@@ -1118,7 +1118,7 @@ async fn tilt_task(input: InputPin) {
 #[embassy_executor::task]
 async fn button_task(inputs: [InputPin; 4]) {
     // `pd-boot-diagnostic`: open on the PD page (3) so the state before a
-    // source Hard Reset is on screen (docs/PD-BOOT-RESTART.md).
+    // source Hard Reset is on screen (docs/SAFETY.md).
     // `cable-log`: a panic/fault/hang record from the previous boot opens the
     // PD page, which shows it, so no navigation is needed after a freeze.
     #[cfg(feature = "cable-log")]
@@ -1155,10 +1155,10 @@ async fn button_task(inputs: [InputPin; 4]) {
 /// PC13 (stock slider sense, latched once at boot like stock `0x15ee2`) is read
 /// before any PHY access. Low (sink mode): the session starts at boot, inside
 /// the source's Source_Capabilities window (nCapsCount, PD R3.2 §8.3.3.2); a
-/// later start would need a sink Hard Reset, which this firmware never sends.
+/// later start must not use the optional SinkWaitCapTimer Hard Reset.
 /// High (passthrough): read-only snapshot plus one verified SWITCHES0 = 0x00
 /// write (FUSB302 Rd off, as stock), then the receive-only sniffer
-/// (`docs/PD-SNIFFER.md`): never GoodCRC, TX or reset signaling.
+/// (`docs/SAFETY.md`): never GoodCRC, TX or reset signaling.
 /// PHY interrupts remain globally masked. Errors halt without reset, retry or
 /// cleanup.
 #[embassy_executor::task]
@@ -1693,7 +1693,7 @@ async fn main(spawner: Spawner) {
         tilt_input = InputPin::new_pull_up(Port::B, 13);
         // Stock 0x15f8c: PC13 input + pull-up, no INTE. Read-only slider sense
         // (stock 0x206e0 shows "Switch To Sink Mode" while it reads high;
-        // owner-observed low with the slider ON, 2026-10-06).
+        // observed low with the slider ON).
         pc13_input = InputPin::new_pull_up(Port::C, 13);
 
         // The INTC is not reset by a jump into this image, so a bootloader or an

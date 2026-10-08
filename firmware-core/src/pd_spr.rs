@@ -23,7 +23,7 @@ pub const MAX_REQUEST_MV: u32 = 30_000;
 pub const MAX_PPS_MV: u32 = 21_000;
 pub const TARGET_MV: u32 = 9_000;
 pub const REQUEST_MA: u32 = 100;
-/// Board marking "4-30V 0-12A" (owner, 2026-10-07). Fixed Requests ask for the
+/// Board marking "4-30V 0-12A". Fixed Requests ask for the
 /// object's Maximum Current; PD objects never exceed 5 A, so 12 A never binds.
 pub const MAX_CURRENT_MA: u32 = 12_000;
 pub const PPS_REFRESH_MS: u64 = 4_000;

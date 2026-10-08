@@ -2,13 +2,13 @@
 //! Read-Clear registers are never written. No Rp/power-role swaps.
 //! Explicit PD3 fixed5V inspection uses caller-authorized VCONN routing and SOP' reads.
 //! SOP'' alone uses an authorized synchronization Soft_Reset, then Get_Status.
-//! SOP Soft Reset (`docs/PD-SOFT-RESET.md`): a partner Soft_Reset is accepted in
+//! SOP Soft Reset (`docs/SAFETY.md`): a partner Soft_Reset is accepted in
 //! any state; one Soft_Reset is sent after a Protocol Error or a Message without
-//! GoodCRC. Hard Reset (`docs/PD-HARD-RESET.md`): sent only in the mandatory
+//! GoodCRC. Hard Reset (`docs/SAFETY.md`): sent only in the mandatory
 //! cases, never for SinkWaitCapTimer; after one is sent or received the session
 //! ends and `transition_to_default` resets the PHY to its boot state, Rd
 //! unchanged. No VCONN_Swap or error recovery/retry.
-//! Sink-initiated AMS starts pass the SinkTxOK gate (`docs/PD-SINK-TX.md`), with
+//! Sink-initiated AMS starts pass the SinkTxOK gate (`docs/SAFETY.md`), with
 //! an explicit caller policy option for the nonstandard stale-SinkTxNG fallback
 //! (see `stale_sink_tx_ng`); no default opt-in is provided.
 //! Errors/cancellation halt without hardware cleanup; only normal completion restores.
@@ -114,10 +114,10 @@ pub fn sink_tx_allowed(status0: u8, status1: u8, rp_required: bool) -> bool {
 /// 1.5 A.
 ///
 /// **NOT STANDARD — deliberate deviation from PD R3.2 section 7.2** ("the Sink
-/// Shall Not initiate an AMS" while Rp is SinkTxNG). Owner decision 2026-10-06,
-/// `docs/PD-SINK-TX.md`.
+/// Shall Not initiate an AMS" while Rp is SinkTxNG). This requires explicit
+/// caller policy; see `docs/SAFETY.md`.
 ///
-/// Why: the owner's PD3 charger holds SinkTxNG for the whole 5 V/100 mA
+/// Why: a tested PD3 charger holds SinkTxNG for the whole 5 V/100 mA
 /// contract (measured BC_LVL 2 with Rd on one or both CCs, so not a board
 /// artefact), while it shows SinkTxOK to a phone. Obeying it strictly blocks
 /// every voltage change, which commercial testers do not do.
@@ -128,7 +128,7 @@ pub fn sink_tx_allowed(status0: u8, status1: u8, rp_required: bool) -> bool {
 /// the whole `SINK_TX_WAIT_MS` (100 ms) window is stale. The AMS start is then
 /// sent only if one more atomic sample still shows a quiet line and an empty RX
 /// FIFO. A collision anyway would show up as a missing GoodCRC, handled as a
-/// Protocol Error (Soft_Reset, `docs/PD-SOFT-RESET.md`).
+/// Protocol Error (Soft_Reset, `docs/SAFETY.md`).
 pub fn stale_sink_tx_ng(status0: u8, status1: u8) -> bool {
     use crate::pd_sniff::{Rp, quiet, rp};
     quiet(status0) && status1 & 0x20 != 0 && rp(status0) == Some(Rp::Current1A5)
@@ -255,7 +255,7 @@ pub struct Session<'a, B: I2c, D, C, P: Platform> {
     recovering: bool,
     // I_RETRYFAIL observed for the pending transmission.
     retry_failed: bool,
-    // A mandatory Hard Reset is due (`docs/PD-HARD-RESET.md` B1); the time of
+    // A mandatory Hard Reset is due (`docs/SAFETY.md`); the time of
     // the Protocol Error bounds tHardReset/tProtErrHardReset (Table 6.68).
     hard_reset_armed: bool,
     hard_reset_error_at: Option<u64>,
@@ -287,7 +287,7 @@ pub struct Session<'a, B: I2c, D, C, P: Platform> {
     pub identity_started: Option<&'a dyn Fn()>,
     pub publish: Option<&'a dyn Fn(pd::Observation)>,
     /// `pd-boot-diagnostic`: record session steps in `observation.boot_step`
-    /// and publish each new step at once (`docs/PD-BOOT-RESTART.md`).
+    /// and publish each new step at once (`docs/SAFETY.md`).
     pub trace_steps: bool,
     /// `cable-log`: record only the cable breadcrumbs (`cable_mark`).
     pub trace_cable: bool,
@@ -1161,8 +1161,8 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                 return Err(Error::NotAcknowledged);
             }
             // Section 6.7.1: the GoodCRC with our MessageID is the acknowledgement;
-            // the FUSB302's I_TXSENT is only its own hint. On hardware (140 W charger
-            // CD289, 2026-10-07) a Source that answers at once left I_TXSENT unset
+            // the FUSB302's I_TXSENT is only its own hint. On tested hardware,
+            // a Source that answers at once left I_TXSENT unset
             // for the whole window. At the window's end the matching GoodCRC frame,
             // no I_RETRYFAIL and an empty TX FIFO (nothing left to retry) also count.
             let window_over = self.clock.now_ms().saturating_sub(began) >= 15;
@@ -1323,7 +1323,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         self.protocol_error_at = Some(self.clock.now_ms());
         Ok(())
     }
-    /// A mandatory Hard Reset case (`docs/PD-HARD-RESET.md` B1) was detected:
+    /// A mandatory Hard Reset case (`docs/SAFETY.md`) was detected:
     /// it is the only permitted next step.
     fn arm_hard_reset(&mut self) {
         self.hard_reset_armed = true;
@@ -1360,7 +1360,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         }
     }
     /// `pd-boot-diagnostic` only, once, idle after the first contract
-    /// (`docs/PD-SINK-TX.md`): STATUS0 with Rd on both CCs, then with Rd on the
+    /// (`docs/SAFETY.md`): STATUS0 with Rd on both CCs, then with Rd on the
     /// active CC only, then the original SWITCHES0,
     /// each write read back. Rd on the active CC never changes.
     async fn probe_rp(&mut self) -> Result<(), Error<B::Error>> {
@@ -2013,7 +2013,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         Ok(after)
     }
     /// PE_SNK_Hard_Reset (section 9.2.4.8), only in a mandatory case
-    /// (`docs/PD-HARD-RESET.md` B1) re-checked here: one armed by a Protocol
+    /// (`docs/SAFETY.md`) re-checked here: one armed by a Protocol
     /// Error, or a response timer past its minimum (SenderResponseTimer after the
     /// GoodCRC of our Request or Soft_Reset, PSTransitionTimer after Accept).
     /// Never for SinkWaitCapTimer, never through the SinkTxOK gate (section 7.1.3).

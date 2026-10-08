@@ -89,7 +89,7 @@ impl Receiver {
             ..Self::at_clean_boundary()
         }
     }
-    /// Passthrough sniffer (`docs/PD-SNIFFER.md`): RX-only like
+    /// Passthrough sniffer (`docs/SAFETY.md`): RX-only like
     /// `at_clean_boundary`, with single partner Chunks framed for the log. Any
     /// sign that the PHY transmitted, retried, toggled, saw a TX collision or
     /// holds TX FIFO bytes halts it: the tester must never transmit.

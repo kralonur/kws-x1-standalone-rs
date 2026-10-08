@@ -93,13 +93,13 @@ pub struct SprObservation {
     pub tx_ack_goodcrc_only: bool,
     pub txsent_missing: u8,
     /// Soft_Resets sent after a Protocol Error and partner Soft_Resets
-    /// accepted (`docs/PD-SOFT-RESET.md`); not displayed.
+    /// accepted (`docs/SAFETY.md`); not displayed.
     pub soft_resets_sent: u8,
     pub soft_resets_accepted: u8,
     /// Longest Protocol Error to Soft_Reset TX write, in ms (tProtErrSoftReset
     /// and tSoftReset are 15 ms max, Table 6.68).
     pub soft_reset_ms: u8,
-    /// Hard Reset Signaling we sent (`docs/PD-HARD-RESET.md`), whether the
+    /// Hard Reset Signaling we sent (`docs/SAFETY.md`), whether the
     /// FUSB302 confirmed it (I_HARDSENT within tHardResetComplete), and the ms
     /// from the Protocol Error that armed it to the CONTROL3 write.
     pub hard_resets_sent: u8,
@@ -178,7 +178,7 @@ pub struct Observation {
     pub rx_flags: [u8; 3],
     pub rx_error: u8,
     pub spr: Option<SprObservation>,
-    /// `pd-boot-diagnostic` only (`docs/PD-BOOT-RESTART.md`): furthest session
+    /// `pd-boot-diagnostic` only (`docs/SAFETY.md`): furthest session
     /// step reached (0 = not traced) and ms since GoodCRC was enabled.
     pub boot_step: u8,
     pub boot_step_ms: u16,
@@ -190,7 +190,7 @@ pub struct Observation {
     /// `pd-boot-diagnostic` only: longest gap between two receive polls since
     /// GoodCRC was enabled, ms (capped at 255).
     pub poll_gap_ms: u8,
-    /// `pd-boot-diagnostic` only (`docs/PD-SINK-TX.md`): STATUS0 on the active CC
+    /// `pd-boot-diagnostic` only (`docs/SAFETY.md`): STATUS0 on the active CC
     /// once after the first contract, with Rd on both CCs, then with Rd on the
     /// active CC only; the original SWITCHES0 is restored.
     pub rp_probe: Option<[u8; 2]>,

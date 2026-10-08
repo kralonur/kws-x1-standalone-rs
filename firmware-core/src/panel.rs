@@ -1,8 +1,8 @@
 //! Panel geometry, initialization sequence, and pixel framing (pure logic).
 //!
 //! The command sequence, the 240x135 geometry, the window offsets, and the memory
-//! access control value are transcribed from the stock image (see
-//! `docs/M0-EVIDENCE.md`): the sequence is sent by `0x19e08`, the window setter
+//! access control value are transcribed from the stock image: the sequence is
+//! sent by `0x19e08`, the window setter
 //! `0x1a2ac` adds the offsets from `0x1fff8314+5`/`+6`, and `0x1a27c` selects the
 //! memory access control value. Stock's defaults in the decoded startup data are
 //! X offset 40, Y offset 53, and MADCTL `0x60`.
