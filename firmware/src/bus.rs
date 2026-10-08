@@ -5,6 +5,8 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use kws_x1_core::latch::Latch;
 
+use crate::ina226;
+
 // Board-owned shared bus: platform drivers never depend on X1 task ownership.
 pub static I2C3: embassy_sync::mutex::Mutex<
     embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
@@ -16,8 +18,7 @@ pub static I2C3: embassy_sync::mutex::Mutex<
 /// woken and any failure is in the transaction logic instead.
 pub static I2C_IRQ_COUNT: AtomicU32 = AtomicU32::new(0);
 
-/// The two chips on I2C3: the INA226 meter and the LIS3DH tilt sensor.
-pub const INA226_ADDR: u8 = 0x40;
+/// The LIS3DH tilt sensor shares I2C3 with the INA226 meter (`ina226`).
 pub const LIS3DH_ADDR: u8 = 0x18;
 
 /// Completed async I2C3 reads and failures, shown on the test page. Timeouts
@@ -36,7 +37,6 @@ pub static I2C_LAST_CR4: AtomicU32 = AtomicU32::new(0);
 /// Latches the bus off after the first failure (`kws_x1_core::latch`).
 pub static BUS_LATCH: Latch = Latch::new();
 
-pub const INA_CONFIG: [(u8, u16); 3] = [(0, 0x4727), (6, 0x0400), (5, 0x0800)];
 pub const SENSOR_CONFIG: [(u8, u8); 5] = [
     (0x20, 0x52),
     (0x23, 0x08),
@@ -81,7 +81,7 @@ pub async fn read_meter(reg: u8) -> Option<u16> {
         return None;
     }
     let bus = guard.as_mut()?;
-    match bus.read_register(INA226_ADDR, reg).await {
+    match bus.read_register(ina226::ADDRESS, reg).await {
         Ok(value) => {
             ASYNC_READS.fetch_add(1, Ordering::Relaxed);
             Some(value)
@@ -105,7 +105,7 @@ pub async fn write_meter(reg: u8, value: u16) -> bool {
     let Some(bus) = guard.as_mut() else {
         return false;
     };
-    match bus.write_register(INA226_ADDR, reg, value).await {
+    match bus.write_register(ina226::ADDRESS, reg, value).await {
         Ok(()) => true,
         Err(error) => {
             note_bus_failure(bus, error);

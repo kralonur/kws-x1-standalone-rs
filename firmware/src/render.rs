@@ -3,7 +3,7 @@
 
 use core::sync::atomic::Ordering;
 
-use crate::{BUTTON_GAP_MAX_MS, FRAME_MS};
+use crate::{BUTTON_GAP_MAX_MS, FRAME_MS, ina226};
 
 const CYAN: u16 = 0xff07;
 
@@ -157,7 +157,7 @@ pub unsafe fn render_measure(
         clear_screen(framebuffer);
         text(framebuffer, 12, 6, b"KOWSI X1 EMBASSY");
 
-        let v_mv = (raw_v as u32 * 5) / 4;
+        let v_mv = ina226::bus_millivolts(raw_v);
         let mut line_v = *b"VBUS: 00.000 V";
         let mut v_buf = [0u8; 6];
         fmt_fixed_3(v_mv, &mut v_buf);
@@ -167,7 +167,7 @@ pub unsafe fn render_measure(
         let i_raw = raw_i as i16;
         // Preserve the existing sensor conversion, including its signed range.
         #[allow(clippy::cast_abs_to_unsigned)]
-        let i_ma = (i_raw.abs() as u32) / 2;
+        let i_ma = (i_raw.abs() as u32) / ina226::COUNTS_PER_MA;
         let mut line_i = *b"CURR:  00.000 A";
         if i_raw < 0 {
             line_i[6] = b'-';

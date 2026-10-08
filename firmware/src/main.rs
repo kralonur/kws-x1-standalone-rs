@@ -11,6 +11,7 @@
 
 mod bus;
 mod clock_setup;
+mod ina226;
 #[path = "panel.rs"]
 mod panel;
 mod pd;
@@ -32,8 +33,7 @@ use embassy_hc32::gpio::{self, AlternateMode, AlternatePin, InputPin, Port};
 // PAC exposes the generated `Interrupt` enum through that path.
 use bus::{
     ASYNC_READS, BUS_LATCH, I2C_ERRORS, I2C_FAULT_STEP, I2C_IRQ_COUNT, I2C_LAST_CR1, I2C_LAST_CR4,
-    I2C_LAST_SR, I2C3, INA_CONFIG, SENSOR_CONFIG, bus_failed, read_meter, write_meter,
-    write_sensor,
+    I2C_LAST_SR, I2C3, SENSOR_CONFIG, bus_failed, read_meter, write_meter, write_sensor,
 };
 use embassy_time::{Instant, Timer};
 use hc32f460_pac::interrupt;
@@ -422,7 +422,7 @@ unsafe fn render_pd(framebuffer: *mut u16, raw_vbus: u16, cable_detail: Option<u
     }
     if let Some(spr) = observation.spr.as_mut() {
         spr.vbus_live_mv = if raw_vbus != u16::MAX && !bus_failed() {
-            Some((raw_vbus as u32 * 5 / 4).min(u16::MAX as u32) as u16)
+            Some(ina226::bus_millivolts(raw_vbus).min(u16::MAX as u32) as u16)
         } else {
             None
         };
@@ -509,7 +509,7 @@ async fn meter_task() {
         let mut changed = false;
         if (page == 0 || page == 3) && now >= next_read {
             next_read = now + embassy_time::Duration::from_millis(100);
-            if let Some(v) = read_meter(2).await {
+            if let Some(v) = read_meter(ina226::BUS_VOLTAGE).await {
                 if v != last_raw_v {
                     last_raw_v = v;
                     changed = true;
@@ -519,7 +519,7 @@ async fn meter_task() {
                 }
             }
             if page == 0
-                && let Some(i) = read_meter(4).await
+                && let Some(i) = read_meter(ina226::CURRENT).await
                 && i != last_raw_i
             {
                 last_raw_i = i;
@@ -742,7 +742,7 @@ async fn main(spawner: Spawner) {
         embassy_hc32::intc::software_interrupt_trigger(8);
 
         // Configure the INA226 and the LIS3DH over the async master.
-        for (reg, value) in INA_CONFIG {
+        for (reg, value) in ina226::INIT {
             if !write_meter(reg, value).await {
                 break;
             }
