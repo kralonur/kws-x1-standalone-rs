@@ -1,0 +1,17 @@
+[package]
+name = "fusb302-pd"
+version = "0.1.0"
+edition = "2024"
+description = "FUSB302 transport with checked startup, gated PD sessions and receive-only sniffing."
+publish = false
+
+[lib]
+test = false
+bench = false
+
+[dependencies]
+device-driver.workspace = true
+embedded-hal-async.workspace = true
+fusb302b.workspace = true
+pd-protocol.workspace = true
+usbpd-traits.workspace = true

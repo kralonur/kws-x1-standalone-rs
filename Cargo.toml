@@ -1,0 +1,29 @@
+[workspace]
+resolver = "3"
+members = ["firmware", "firmware-core", "fusb302-pd"]
+default-members = ["firmware-core", "fusb302-pd"]
+
+[workspace.dependencies]
+cortex-m = "0.7.7"
+cortex-m-rt = "0.7.5"
+device-driver = "2.1.1"
+embassy-executor = "0.10.0"
+embassy-hc32 = { git = "https://github.com/kralonur/hc32f460-embassy-rs", rev = "226e3c7f7a0f154cdd81821dfbb17a60dc0da12f" }
+embassy-sync = "0.6.2"
+embassy-time = "0.5.1"
+embedded-hal-async = "1.0.0"
+fusb302-pd = { path = "fusb302-pd" }
+fusb302b = { git = "https://github.com/okhsunrog/fusb302b", rev = "6a1075f6595da8b36b91e4ffbdaf2ab38c1ec8b8" }
+hc32f460-pac = { git = "https://github.com/kralonur/hc32f460-embassy-rs", rev = "226e3c7f7a0f154cdd81821dfbb17a60dc0da12f" }
+kws-x1-core = { path = "firmware-core" }
+panic-halt = "1.0.0"
+pd-protocol = { git = "https://github.com/kralonur/embedded-charging-protocols-rs", rev = "b9adb62c2baf8a357ff486eaa779ada8fcf686e4" }
+usbpd = { git = "https://github.com/kralonur/usbpd", rev = "326123330125a74cfc75bc58a6d81e34fba97f4b" }
+usbpd-traits = { git = "https://github.com/kralonur/usbpd", rev = "326123330125a74cfc75bc58a6d81e34fba97f4b" }
+
+# Size optimization keeps the application below the preserved graphics bank.
+# This is the source firmware's release profile, not a new hardware qualification.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1

@@ -1,0 +1,35 @@
+[package]
+name = "kws-x1-fw"
+version = "0.1.0"
+edition = "2024"
+description = "Async meter and USB PD firmware."
+publish = false
+
+[[bin]]
+name = "kws-x1-fw"
+path = "src/main.rs"
+test = false
+bench = false
+
+[features]
+i2c-rx-poll-diagnostic = ["embassy-hc32/i2c-rx-poll-diagnostic"]
+# Hold Rd without starting a sink session; no GoodCRC or transmit.
+pd-hold-diagnostic = []
+# Boot on the PD page and append progress to the bounded flash log.
+pd-boot-diagnostic = []
+# Log cable inspection and fatal records without changing normal boot.
+cable-log = []
+
+[dependencies]
+cortex-m = { workspace = true, features = ["critical-section-single-core"] }
+# The IRQ page measures stack use from cortex-m-rt's painted stack.
+cortex-m-rt = { workspace = true, features = ["paint-stack"] }
+embassy-executor = { workspace = true, features = ["platform-cortex-m", "executor-thread"] }
+embassy-hc32.workspace = true
+embassy-sync.workspace = true
+embassy-time = { workspace = true, features = ["tick-hz-1_000"] }
+embedded-hal-async.workspace = true
+fusb302-pd.workspace = true
+hc32f460-pac = { workspace = true, features = ["rt"] }
+kws-x1-core.workspace = true
+panic-halt.workspace = true

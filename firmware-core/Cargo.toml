@@ -1,0 +1,17 @@
+[package]
+name = "kws-x1-core"
+version = "0.1.0"
+edition = "2024"
+description = "Board policy, input handling and display geometry without hardware access."
+publish = false
+
+[lib]
+test = false
+bench = false
+
+[dependencies]
+embassy-hc32.workspace = true
+fusb302-pd.workspace = true
+pd-protocol.workspace = true
+usbpd.workspace = true
+usbpd-traits.workspace = true
