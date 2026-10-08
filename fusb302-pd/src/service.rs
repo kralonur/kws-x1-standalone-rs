@@ -4,7 +4,7 @@
 //! Sniffer mode is RX-only and also rejects retry/toggle/collision/TX-FIFO evidence.
 
 use crate::pd_rx;
-use crate::register::{FIFOS, INTERRUPTS, STATUS1};
+use crate::register::{FIFOS, INTERRUPTS, STATUS1, interrupt, interrupta, interruptb, status1};
 use crate::snapshot::ADDRESS;
 use embedded_hal_async::i2c::I2c;
 
@@ -143,39 +143,51 @@ impl Receiver {
             self.read(bus, register, &mut interrupts[i..i + 1]).await?;
             self.acknowledged[i] |= interrupts[i];
         }
-        if interrupts[0] & 1 != 0 {
+        if interrupts[0] & interrupta::I_HARDRST != 0 {
             return Err(Error::HardReset);
         }
-        if interrupts[0] & 0x80 != 0 {
+        if interrupts[0] & interrupta::I_OCP_TEMP != 0 {
             return Err(Error::PhyFault);
         }
-        if !self.active_spr && (interrupts[0] & 0x0c != 0 || interrupts[1] & 1 != 0) {
+        if !self.active_spr
+            && (interrupts[0] & (interrupta::I_HARDSENT | interrupta::I_TXSENT) != 0
+                || interrupts[1] & interruptb::I_GCRCSENT != 0)
+        {
             return Err(Error::UnexpectedTransmission);
         }
-        // INTERRUPTA TXSENT/HARDSENT/RETRYFAIL/SOFTFAIL/TOGDONE, INTERRUPT I_COLLISION.
-        if self.sniffer && (interrupts[0] & 0x7c != 0 || interrupts[2] & 2 != 0) {
+        if self.sniffer
+            && (interrupts[0] & interrupta::TX_OR_TOGGLE != 0
+                || interrupts[2] & interrupt::I_COLLISION != 0)
+        {
             return Err(Error::UnexpectedTransmission);
         }
         // SPR: HARDSENT/SOFTFAIL (no Hard Reset or automatic Soft Reset is ever
         // requested) and I_COLLISION are faults. I_SOFTRST (a Soft_Reset was
         // received) and I_RETRYFAIL (no GoodCRC after retries) are reported to
         // the owner through `take_acknowledged`, which must validate them.
-        if self.active_spr && (interrupts[0] & 0x28 != 0 || interrupts[2] & 2 != 0) {
+        if self.active_spr
+            && (interrupts[0] & (interrupta::I_SOFTFAIL | interrupta::I_HARDSENT) != 0
+                || interrupts[2] & interrupt::I_COLLISION != 0)
+        {
             return Err(Error::TransmissionFault);
         }
-        self.draining |= self.active_spr && (interrupts[0] & 4 != 0 || interrupts[1] & 1 != 0);
-        self.draining |= interrupts[2] & 0x10 != 0; // I_CRC_CHK: completion hint, not CRC proof.
+        self.draining |= self.active_spr
+            && (interrupts[0] & interrupta::I_TXSENT != 0
+                || interrupts[1] & interruptb::I_GCRCSENT != 0);
+        self.draining |= interrupts[2] & interrupt::I_CRC_CHK != 0; // completion hint, not CRC proof
         let mut status = [0];
         self.read(bus, STATUS1, &mut status).await?;
         self.status = status[0];
-        if status[0] & 3 != 0 || (self.active_spr && status[0] & 4 != 0) {
+        if status[0] & (status1::OVRTEMP | status1::OCP) != 0
+            || (self.active_spr && status[0] & status1::TX_FULL != 0)
+        {
             return Err(Error::PhyFault);
         }
         // STATUS1 TX_EMPTY set, TX_FULL clear: nothing was ever queued to send.
-        if self.sniffer && status[0] & 0x0c != 0x08 {
+        if self.sniffer && status[0] & (status1::TX_EMPTY | status1::TX_FULL) != status1::TX_EMPTY {
             return Err(Error::UnexpectedTransmission);
         }
-        if status[0] & 0x10 != 0 {
+        if status[0] & status1::RX_FULL != 0 {
             return Err(Error::RxFull);
         }
         let outcome = if status[0] & 0x20 != 0 {

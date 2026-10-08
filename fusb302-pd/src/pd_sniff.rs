@@ -3,11 +3,7 @@
 
 pub use pd_protocol::pd_sniff::*;
 
-/// FUSB302 STATUS0 (datasheet "Status0"): BC_LVL[1:0], COMP (CC above the MDAC
-/// level), ACTIVITY (BMC transitions; BC_LVL/COMP are not meaningful then).
-const BC_LVL: u8 = 0x03;
-const COMP: u8 = 0x20;
-const ACTIVITY: u8 = 0x40;
+use crate::register::status0::{ACTIVITY, BC_LVL, COMP};
 
 /// Rp level from one STATUS0 sample with the sniffing port's own Rd removed.
 /// BC_LVL thresholds 0.2/0.66/1.23 V separate the Type-C default/1.5 A/3 A vRd

@@ -12,9 +12,12 @@
 //! an explicit caller policy option for the nonstandard stale-SinkTxNG fallback
 //! (see `stale_sink_tx_ng`); no default opt-in is provided.
 //! Errors/cancellation halt without hardware cleanup; only normal completion restores.
+use crate::header;
+use crate::register::{
+    self, control0, control1, control3, interrupt, interrupta, interruptb, reset, status0, status1,
+};
 use crate::snapshot::{self, Snapshot};
 use crate::{config as pd_cc, observation as pd, service as pd_service};
-use crate::{header, register};
 use embedded_hal_async::{delay::DelayNs, i2c::I2c};
 use pd_cc::ConfigRegister;
 use pd_protocol::pd_rx::Sop;
@@ -111,7 +114,9 @@ pub trait GatedBus: I2c {
 /// PD2 has no Rp signalling (PD2 V1.3 section 2.6.3).
 pub fn sink_tx_allowed(status0: u8, status1: u8, rp_required: bool) -> bool {
     use crate::pd_sniff::{Rp, quiet, rp};
-    quiet(status0) && status1 & 0x20 != 0 && (!rp_required || rp(status0) == Some(Rp::Current3A0))
+    quiet(status0)
+        && status1 & status1::RX_EMPTY != 0
+        && (!rp_required || rp(status0) == Some(Rp::Current3A0))
 }
 
 /// A refused sample that is only SinkTxNG: quiet line, empty RX FIFO and Rp
@@ -135,7 +140,7 @@ pub fn sink_tx_allowed(status0: u8, status1: u8, rp_required: bool) -> bool {
 /// Protocol Error (Soft_Reset, `docs/SAFETY.md`).
 pub fn stale_sink_tx_ng(status0: u8, status1: u8) -> bool {
     use crate::pd_sniff::{Rp, quiet, rp};
-    quiet(status0) && status1 & 0x20 != 0 && rp(status0) == Some(Rp::Current1A5)
+    quiet(status0) && status1 & status1::RX_EMPTY != 0 && rp(status0) == Some(Rp::Current1A5)
 }
 
 pub trait Clock {
@@ -507,7 +512,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                 }));
             }
         }
-        if cc.iter().any(|status| status & 0x40 != 0) {
+        if cc.iter().any(|status| status & status0::ACTIVITY != 0) {
             return Err(Error::Orientation);
         }
         let selected = match (cc[0] & 3 != 0, cc[1] & 3 != 0) {
@@ -532,9 +537,10 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         }
         self.trace().vbus_pre_mv = Some(mv as u16);
         self.checked(ConfigRegister::Power, 9).await?;
-        self.checked(ConfigRegister::Control1Flush, 4).await?;
+        self.checked(ConfigRegister::Control1Flush, control1::RX_FLUSH)
+            .await?;
         let status = self.byte(register::STATUS1).await?;
-        if status & 0x3f != 0x28 {
+        if status & status1::FIFOS_AND_FAULTS != status1::IDLE {
             return Err(Error::Boundary { status });
         }
         let mut flags = [0; 3];
@@ -544,7 +550,10 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         self.observation.rx_flags = flags;
         // A stale CRC flag never authorizes FIFO draining. Any reset/TX fault
         // at the clean boundary is fatal rather than explained away.
-        if flags[0] & 0xbf != 0 || flags[1] & 1 != 0 || flags[2] & 2 != 0 {
+        if flags[0] & !interrupta::I_TOGDONE != 0
+            || flags[1] & interruptb::I_GCRCSENT != 0
+            || flags[2] & interrupt::I_COLLISION != 0
+        {
             return Err(Error::Rx(pd_service::Error::TransmissionFault));
         }
         self.checked(
@@ -646,14 +655,14 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             self.hard_reset_received = true;
         }
         let outcome = outcome.map_err(Error::Rx)?;
-        if flags[0] & 4 != 0 {
+        if flags[0] & interrupta::I_TXSENT != 0 {
             if self.pending_tx.is_none() {
                 return Err(Error::UnexpectedAck);
             }
             self.trace().tx_sent_irq = true;
         }
         // I_RETRYFAIL: only for the pending transmission, never with TXSENT.
-        if flags[0] & 0x10 != 0 {
+        if flags[0] & interrupta::I_RETRYFAIL != 0 {
             if self.trace().tx_sent_irq {
                 return Err(Error::Rx(pd_service::Error::TransmissionFault));
             }
@@ -667,7 +676,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         self.polls = self.polls.wrapping_add(1);
         // BIST_TMODE also clears a received Soft_Reset from the FIFO: in BIST
         // Test Data Mode it is not acted on (section 6.4.3.1).
-        if flags[0] & 2 != 0 && !self.bist_test_data {
+        if flags[0] & interrupta::I_SOFTRST != 0 && !self.bist_test_data {
             let own = self
                 .pending_tx
                 .as_ref()
@@ -1104,9 +1113,11 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         if is_request && !rdo.is_some_and(|rdo| self.request_is_reviewed(rdo)) {
             return Err(Error::Request);
         }
-        if self.receiver.status() & 0x0f != 8
+        if self.receiver.status()
+            & (status1::TX_EMPTY | status1::TX_FULL | status1::OVRTEMP | status1::OCP)
+            != status1::TX_EMPTY
             || ((self.cable_phase != CablePhase::Idle || reset_accept || soft_reset)
-                && (self.receiver.status() & 0x3f != 0x28
+                && (self.receiver.status() & status1::FIFOS_AND_FAULTS != status1::IDLE
                     || self.queue.iter().any(Option::is_some)))
         {
             return Err(Error::Boundary {
@@ -1213,8 +1224,9 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             let goodcrc_only = window_over
                 && self.trace().tx_goodcrc
                 && !self.trace().tx_sent_irq
-                && self.tx_wait_flags & 0x10 == 0
-                && self.receiver.status() & 0x0c == 0x08;
+                && self.tx_wait_flags & interrupta::I_RETRYFAIL == 0
+                && self.receiver.status() & (status1::TX_EMPTY | status1::TX_FULL)
+                    == status1::TX_EMPTY;
             if self.trace().tx_sent_irq && self.trace().tx_goodcrc || goodcrc_only {
                 self.trace().tx_ack_goodcrc_only = goodcrc_only;
                 if goodcrc_only {
@@ -1302,8 +1314,8 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         let lost_to_partner = ams_start
             && wait_packets > 0
             && !self.trace().tx_goodcrc
-            && self.tx_wait_flags & 0x14 == 0
-            && self.receiver.status() & 0x0c == 0x08;
+            && self.tx_wait_flags & (interrupta::I_TXSENT | interrupta::I_RETRYFAIL) == 0
+            && self.receiver.status() & (status1::TX_EMPTY | status1::TX_FULL) == status1::TX_EMPTY;
         self.trace().tx_timeout = Some(pd::TxTimeout {
             status1: self.receiver.status(),
             flags: self.tx_wait_flags,
@@ -1728,7 +1740,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                     {
                         Some(BistRequest::TestData) => {
                             let control3 = self.byte(register::CONTROL3).await?;
-                            self.checked(ConfigRegister::Control3, control3 | 0x20)
+                            self.checked(ConfigRegister::Control3, control3 | control3::BIST_TMODE)
                                 .await?;
                             self.bist_test_data = true;
                             return Ok(length);
@@ -1957,7 +1969,8 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         // Wait 50 ms for cable controller to power up and stabilize (tVCONNStable)
         let inspected = match self.vconn_settle().await {
             Ok(()) => {
-                self.checked(ConfigRegister::Control1, 1).await?;
+                self.checked(ConfigRegister::Control1, control1::ENSOP1)
+                    .await?;
                 pd_discovery::inspect(self, next_id, last_id, requested_mode, previous_report).await
             }
             Err(error) => Err(error),
@@ -2029,7 +2042,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         let raw_rdy = self.vbus_raw().await?;
         self.trace().vbus_rdy_mv = Some((P::voltage_mv(raw_rdy)) as u16);
         let status = self.byte(register::STATUS1).await?;
-        if status & 0x3f != 0x28 {
+        if status & status1::FIFOS_AND_FAULTS != status1::IDLE {
             return Err(Error::Boundary { status });
         }
         let after = self.restore_baseline().await?;
@@ -2116,7 +2129,10 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         self.hard_reset_sent = true; // before the await: it may have gone out
         self.register = Some(register::CONTROL3);
         self.bus
-            .write(snapshot::ADDRESS, &[register::CONTROL3, control3 | 0x40])
+            .write(
+                snapshot::ADDRESS,
+                &[register::CONTROL3, control3 | control3::SEND_HARD_RESET],
+            )
             .await
             .map_err(|source| Error::Bus {
                 address: snapshot::ADDRESS,
@@ -2129,10 +2145,10 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         loop {
             let flags = self.byte(register::INTERRUPTA).await?; // read-clear
             self.observation.rx_flags[0] |= flags;
-            if flags & 1 != 0 {
+            if flags & interrupta::I_HARDRST != 0 {
                 self.hard_reset_received = true; // the Source's crossed ours
             }
-            if flags & 8 != 0 {
+            if flags & interrupta::I_HARDSENT != 0 {
                 self.trace().hard_reset_confirmed = true;
                 return Ok(());
             }
@@ -2166,12 +2182,15 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             return Err(Error::Request);
         }
         let control1 = self.byte(register::CONTROL1).await?;
-        self.checked(ConfigRegister::Control1, control1 | 0x10)
+        self.checked(ConfigRegister::Control1, control1 | control1::BIST_MODE2)
             .await?;
         let control0 = self.byte(register::CONTROL0).await?;
         self.register = Some(register::CONTROL0);
         self.bus
-            .write(snapshot::ADDRESS, &[register::CONTROL0, control0 | 0x01]) // TX_START, self-clearing
+            .write(
+                snapshot::ADDRESS,
+                &[register::CONTROL0, control0 | control0::TX_START],
+            )
             .await
             .map_err(|source| Error::Bus {
                 address: snapshot::ADDRESS,
@@ -2179,12 +2198,12 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                 source,
             })?;
         self.delay.delay_ms(BIST_CARRIER_MS).await;
-        self.checked(ConfigRegister::Control1, control1 & !0x10)
+        self.checked(ConfigRegister::Control1, control1 & !control1::BIST_MODE2)
             .await?;
         self.trace().bist_carriers = self.trace().bist_carriers.saturating_add(1);
         self.register = Some(register::RESET);
         self.bus
-            .write(snapshot::ADDRESS, &[register::RESET, 0x02]) // RESET: PD_RESET only
+            .write(snapshot::ADDRESS, &[register::RESET, reset::PD_RESET])
             .await
             .map_err(|source| Error::Bus {
                 address: snapshot::ADDRESS,
@@ -2195,12 +2214,12 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         for (flag, register) in flags.iter_mut().zip(register::INTERRUPTS) {
             *flag = self.byte(register).await?;
         }
-        if flags[0] & 1 != 0 {
+        if flags[0] & interrupta::I_HARDRST != 0 {
             self.hard_reset_received = true;
             return Err(Error::Rx(pd_service::Error::HardReset));
         }
         // I_OCP_TEMP; TX completion flags from the carrier are not documented.
-        if flags[0] & 0x80 != 0 {
+        if flags[0] & interrupta::I_OCP_TEMP != 0 {
             return Err(Error::Rx(pd_service::Error::PhyFault));
         }
         self.receiver = pd_service::Receiver::for_spr_boundary();
@@ -2223,7 +2242,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         self.unverified = true;
         self.register = Some(register::RESET);
         self.bus
-            .write(snapshot::ADDRESS, &[register::RESET, 0x02]) // RESET: PD_RESET only
+            .write(snapshot::ADDRESS, &[register::RESET, reset::PD_RESET])
             .await
             .map_err(|source| Error::Bus {
                 address: snapshot::ADDRESS,
@@ -2252,7 +2271,10 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             flags[i] = self.byte(register).await?;
             self.observation.rx_flags[i] |= flags[i];
         }
-        if flags[0] & !0x49 != 0 || flags[1] & 1 != 0 || flags[2] & 2 != 0 {
+        if flags[0] & !(interrupta::I_TOGDONE | interrupta::I_HARDSENT | interrupta::I_HARDRST) != 0
+            || flags[1] & interruptb::I_GCRCSENT != 0
+            || flags[2] & interrupt::I_COLLISION != 0
+        {
             return Err(Error::Rx(pd_service::Error::TransmissionFault));
         }
         self.unverified = false;
@@ -2364,7 +2386,8 @@ impl<B: GatedBus, D: Waiter, C: Clock, P: Platform> pd_discovery::Transport
         self.cable_safe5().await
     }
     async fn select_second(&mut self) -> Result<(), Self::Error> {
-        self.checked(ConfigRegister::Control1, 2).await
+        self.checked(ConfigRegister::Control1, control1::ENSOP2)
+            .await
     }
 }
 impl<B: GatedBus, D: Waiter, C: Clock, P: Platform> Driver for Session<'_, B, D, C, P> {

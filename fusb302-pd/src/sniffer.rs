@@ -7,7 +7,7 @@
 //! and the FIFO are never written, so the tester never transmits or acknowledges
 //! (no GoodCRC). Errors/cancellation halt without retry or cleanup writes.
 use crate::pd_sniff;
-use crate::register::{self, STATUS0};
+use crate::register::{self, STATUS0, control1, interrupt, interrupta, interruptb, status1};
 use crate::{config as pd_cc, service as pd_service, snapshot as pd};
 use embedded_hal_async::{delay::DelayNs, i2c::I2c};
 use pd_cc::ConfigRegister;
@@ -171,23 +171,26 @@ impl Sniffer {
         // Keep receiver/references OFF while clocking the flush.
         evidence.write(bus, ConfigRegister::Power, 0x09).await?;
         evidence
-            .write(bus, ConfigRegister::Control1Flush, 0x04)
+            .write(bus, ConfigRegister::Control1Flush, control1::RX_FLUSH)
             .await?;
         let status = read(bus, register::STATUS1).await?;
-        if status & 0x3f != 0x28 {
+        if status & status1::FIFOS_AND_FAULTS != status1::IDLE {
             return Err(Error::Boundary { status });
         }
         for (i, register) in register::INTERRUPTS.into_iter().enumerate() {
             evidence.acknowledged[i] |= read(bus, register).await?;
         }
         let acknowledged = evidence.acknowledged;
-        if acknowledged[0] & 1 != 0 {
+        if acknowledged[0] & interrupta::I_HARDRST != 0 {
             return Err(Error::Rx(pd_service::Error::HardReset));
         }
-        if acknowledged[0] & 0x80 != 0 {
+        if acknowledged[0] & interrupta::I_OCP_TEMP != 0 {
             return Err(Error::Rx(pd_service::Error::PhyFault));
         }
-        if acknowledged[0] & 0x7c != 0 || acknowledged[1] & 1 != 0 || acknowledged[2] & 2 != 0 {
+        if acknowledged[0] & interrupta::TX_OR_TOGGLE != 0
+            || acknowledged[1] & interruptb::I_GCRCSENT != 0
+            || acknowledged[2] & interrupt::I_COLLISION != 0
+        {
             return Err(Error::Rx(pd_service::Error::UnexpectedTransmission));
         }
         evidence
