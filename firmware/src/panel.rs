@@ -197,6 +197,38 @@ const COLUMNS: [u8; 4] = span(panel::X_OFFSET, panel::WIDTH);
 const ROWS: [u8; 4] = span(panel::Y_OFFSET, panel::HEIGHT);
 const ROWS_INVERTED: [u8; 4] = span(panel::Y_OFFSET_INVERTED, panel::HEIGHT);
 
+/// Landscape orientation of the displayed frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Orientation {
+    /// Normal landscape ([`panel::MADCTL`], rows from [`panel::Y_OFFSET`]).
+    Normal,
+    /// 180-degree inverted landscape ([`panel::MADCTL_INVERTED`]).
+    Inverted,
+}
+
+impl Orientation {
+    pub fn flipped(self) -> Self {
+        match self {
+            Self::Normal => Self::Inverted,
+            Self::Inverted => Self::Normal,
+        }
+    }
+
+    fn madctl(self) -> u8 {
+        match self {
+            Self::Normal => panel::MADCTL,
+            Self::Inverted => panel::MADCTL_INVERTED,
+        }
+    }
+
+    fn rows(self) -> [u8; 4] {
+        match self {
+            Self::Normal => ROWS,
+            Self::Inverted => ROWS_INVERTED,
+        }
+    }
+}
+
 /// # Safety
 /// `frame` must point to [`panel::PIXELS`] readable RGB565 wire-swapped halfwords. Callback
 /// may sample inputs/update model but must not modify the frame during transfer.
@@ -204,15 +236,10 @@ async unsafe fn stream(
     bus: &mut impl Bus,
     frame: *const u16,
     mut sample: impl FnMut(),
-    orientation: u8,
+    orientation: Orientation,
 ) -> bool {
-    let raset = if orientation == 0 {
-        ROWS
-    } else {
-        ROWS_INVERTED
-    };
     if !command(bus, panel::CMD_COLUMN_ADDRESS, &COLUMNS).await
-        || !command(bus, panel::CMD_ROW_ADDRESS, &raset).await
+        || !command(bus, panel::CMD_ROW_ADDRESS, &orientation.rows()).await
         || !command(bus, panel::CMD_MEMORY_WRITE, &[]).await
         || !bus.idle().await
     {
@@ -233,25 +260,28 @@ async unsafe fn stream(
     bus.idle().await
 }
 
-/// Change ST7789V memory access control (MADCTL) orientation:
-/// 0: normal landscape ([`panel::MADCTL`])
-/// 1: 180-degree inverted landscape ([`panel::MADCTL_INVERTED`])
-pub async unsafe fn set_orientation(orientation: u8) -> bool {
+/// Change ST7789V memory access control (MADCTL) orientation.
+pub async unsafe fn set_orientation(orientation: Orientation) -> bool {
     let mut owner = DISPLAY.lock().await;
     let Some(bus) = owner.as_mut() else {
         return false;
     };
-    let madctl = if orientation == 0 {
-        panel::MADCTL
-    } else {
-        panel::MADCTL_INVERTED
-    };
-    command(bus, panel::CMD_MEMORY_ACCESS_CONTROL, &[madctl]).await && bus.idle().await
+    command(
+        bus,
+        panel::CMD_MEMORY_ACCESS_CONTROL,
+        &[orientation.madctl()],
+    )
+    .await
+        && bus.idle().await
 }
 
 /// # Safety
 /// Same initialized hardware/frame requirements as init/stream.
-pub async unsafe fn flush(frame: *const u16, sample: impl FnMut(), orientation: u8) -> bool {
+pub async unsafe fn flush(
+    frame: *const u16,
+    sample: impl FnMut(),
+    orientation: Orientation,
+) -> bool {
     let mut owner = DISPLAY.lock().await;
     let Some(bus) = owner.as_mut() else {
         return false;

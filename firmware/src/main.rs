@@ -30,6 +30,8 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use embassy_executor::Spawner;
 use embassy_hc32::gpio::{self, AlternateMode, AlternatePin, InputPin, Port};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::watch::Watch;
 // The `#[cortex_m_rt::interrupt]` expansion checks `interrupt::INT0xx`, and the
 // PAC exposes the generated `Interrupt` enum through that path.
 use bus::{
@@ -39,6 +41,7 @@ use bus::{
 use embassy_time::{Instant, Timer};
 use firmware_core::buttons as button_logic;
 use hc32f460_pac::interrupt;
+use panel::Orientation;
 #[cfg(not(any(feature = "pd-boot-diagnostic", feature = "cable-log")))]
 use panic_halt as _;
 use render::{Counters, Frame, clear_screen, glyph, render_irq_test, render_measure, render_ports};
@@ -241,8 +244,8 @@ mod stall {
 /// INTC validation counters, shown on the "IRQ TEST" page.
 static EIRQ_COUNT: AtomicU32 = AtomicU32::new(0);
 static SWI_COUNT: AtomicU32 = AtomicU32::new(0);
-/// Screen orientation owned by `tilt_task` (0 = MADCTL 0x60, 1 = 0xa0).
-static ROTATION: AtomicU32 = AtomicU32::new(0);
+/// Screen orientation: `tilt_task` sends it, `meter_task` applies it.
+static ORIENTATION: Watch<CriticalSectionRawMutex, Orientation, 1> = Watch::new();
 /// Completed 180-degree flips, shown next to the raw edge count.
 static TILT_FLIPS: AtomicU32 = AtomicU32::new(0);
 
@@ -401,7 +404,7 @@ async fn pulse_task() {
 }
 
 /// Async tilt handling: wait on the PB13 external interrupt, then hand the
-/// orientation change to `meter_task` through `TILT_REQUESTS`.
+/// orientation change to `meter_task` through `ORIENTATION`.
 #[embassy_executor::task]
 async fn tilt_task(input: InputPin) {
     let mut tilt = unsafe {
@@ -422,15 +425,16 @@ async fn tilt_task(input: InputPin) {
     // refractory lockout. Edges latched during the lockout are drained so the
     // next tilt starts clean.
     const REFRACTORY_MS: u64 = 1500;
+    let orientation_sender = ORIENTATION.sender();
+    let mut orientation = Orientation::Normal;
     loop {
         tilt.wait_for_edge().await;
 
-        let rotation = ROTATION.load(Ordering::Relaxed) ^ 1;
-        ROTATION.store(rotation, Ordering::Relaxed);
-        let cfg = if rotation == 1 {
-            lis3dh::POSITION_X_HIGH
-        } else {
-            lis3dh::POSITION_X_LOW
+        orientation = orientation.flipped();
+        orientation_sender.send(orientation);
+        let cfg = match orientation {
+            Orientation::Inverted => lis3dh::POSITION_X_HIGH,
+            Orientation::Normal => lis3dh::POSITION_X_LOW,
         };
         let _ = write_sensor(lis3dh::INT1_CFG, cfg).await;
         TILT_FLIPS.fetch_add(1, Ordering::Relaxed);
@@ -545,7 +549,8 @@ async fn meter_task() {
     // first frame must be drawn *before* any bus traffic, so a bus problem can
     // never leave the display uninitialized.
     let mut next_read = Instant::now() + METER_READ_PERIOD;
-    let mut current_rotation: u8 = 0;
+    let mut orientation_updates = ORIENTATION.anon_receiver();
+    let mut current_rotation = Orientation::Normal;
     let mut last_secs = u32::MAX;
     let mut last_pulse: u16 = u16::MAX;
     let mut ports = [0u16; 6];
@@ -568,8 +573,9 @@ async fn meter_task() {
 
         // `tilt_task` owns the orientation (it flipped and reconfigured the
         // sensor); this task only follows it for flushing and redraws.
-        let rotation_now = ROTATION.load(Ordering::Relaxed) as u8;
-        if rotation_now != current_rotation {
+        if let Some(rotation_now) = orientation_updates.try_changed()
+            && rotation_now != current_rotation
+        {
             // Only the display task changes MADCTL, before its matching RASET.
             unsafe {
                 panel::set_orientation(rotation_now).await;
