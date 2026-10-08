@@ -1257,31 +1257,42 @@ async fn passthrough(observation: &mut pd::Observation) -> Option<pd::Snapshot> 
 /// configuration check every second. Any error stops it for good, without
 /// cleanup writes; bus errors and configuration mismatches also latch the bus.
 async fn sniff(observation: &mut pd::Observation, released: pd::Snapshot) {
-    let mut sniffer = pd_sniff::Sniffer::once();
     let mut view = pd::SniffObservation::new();
     observation.sniff = Some(view);
     PD_OBSERVATION.lock(|cell| *cell.borrow_mut() = *observation);
-    {
+    let started = {
         let mut guard = I2C3.lock().await;
         if bus_failed() {
             view.stop = Some(pd::SniffStop::Halted);
+            None
         } else if let Some(bus) = guard.as_mut() {
             let mut delay = embassy_time::Delay;
             // Sole bus ownership through both nominal 10 ms CC settles.
-            let result = sniffer.start(bus, &mut delay, released).await;
-            view.cc_status = sniffer.cc_status();
-            view.cc = sniffer.selected();
-            view.flags = sniffer.flags();
-            if let Err(error) = result {
-                sniff_stop(&mut view, bus, error);
+            match pd_sniff::once().start(bus, &mut delay, released).await {
+                Ok(mut sniffer) => {
+                    view.cc_status = Some(sniffer.cc_status());
+                    view.cc = Some(sniffer.selected());
+                    view.flags = sniffer.flags();
+                    Some(sniffer)
+                }
+                Err(failure) => {
+                    view.cc_status = failure.cc_status;
+                    view.flags = failure.flags;
+                    observation.restore_unverified |= failure.unverified;
+                    sniff_stop(&mut view, bus, failure.error);
+                    None
+                }
             }
         } else {
             view.stop = Some(pd::SniffStop::Halted);
+            None
         }
-    }
-    observation.restore_unverified |= sniffer.unverified();
+    };
     observation.sniff = Some(view);
     PD_OBSERVATION.lock(|cell| *cell.borrow_mut() = *observation);
+    let Some(mut sniffer) = started else {
+        return;
+    };
     let mut next_check = Instant::now() + embassy_time::Duration::from_secs(1);
     while view.stop.is_none() {
         Timer::after_millis(1).await;
@@ -1324,7 +1335,6 @@ async fn sniff(observation: &mut pd::Observation, released: pd::Snapshot) {
             PD_OBSERVATION.lock(|cell| *cell.borrow_mut() = *observation);
         }
     }
-    observation.restore_unverified |= sniffer.unverified();
     observation.sniff = Some(view);
     PD_OBSERVATION.lock(|cell| *cell.borrow_mut() = *observation);
 }
