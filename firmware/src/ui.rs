@@ -1,55 +1,55 @@
-//! Graphical pages: the meter and settings screens, drawn with
+//! Graphical pages: the overview (meter) and settings screens, drawn with
 //! `embedded-graphics` primitives and `u8g2-fonts` text on any RGB565 target.
 //! The renderer gathers the values; nothing here touches hardware.
 
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
-use embedded_graphics::primitives::{
-    Circle, Line, PrimitiveStyle, Rectangle, RoundedRectangle, StyledDrawable, Triangle,
-};
-use firmware_core::settings::{BRIGHTNESS_PERCENT, Item, Settings};
+use embedded_graphics::primitives::{Circle, PrimitiveStyle, Rectangle, StyledDrawable};
+use firmware_core::settings::{Item, Settings};
 use u8g2_fonts::FontRenderer;
 use u8g2_fonts::fonts;
 use u8g2_fonts::types::{FontColor, HorizontalAlignment, VerticalPosition};
 
-/// Readings: Logisoso, 28 px digits (numerals and punctuation only).
-const DIGITS: FontRenderer =
-    FontRenderer::new::<fonts::u8g2_font_logisoso28_tn>().with_ignore_unknown_chars(true);
-/// Units, badges and settings rows: Helvetica Bold 14.
-const LABEL: FontRenderer =
-    FontRenderer::new::<fonts::u8g2_font_helvB14_tr>().with_ignore_unknown_chars(true);
-/// Peak row and notes: Helvetica Bold 10.
-const SMALL: FontRenderer =
-    FontRenderer::new::<fonts::u8g2_font_helvB10_tr>().with_ignore_unknown_chars(true);
+/// Voltage and current: Inconsolata Bold 19 px, numerals only.
+const READING: FontRenderer =
+    FontRenderer::new::<fonts::u8g2_font_inb19_mn>().with_ignore_unknown_chars(true);
+/// Power: Inconsolata Bold 27 px, numerals only.
+const POWER: FontRenderer =
+    FontRenderer::new::<fonts::u8g2_font_inb27_mn>().with_ignore_unknown_chars(true);
+/// Titles and units: t0 16 px bold.
+const BOLD: FontRenderer =
+    FontRenderer::new::<fonts::u8g2_font_t0_16b_mr>().with_ignore_unknown_chars(true);
+/// Settings rows: t0 14 px bold.
+const ROW: FontRenderer =
+    FontRenderer::new::<fonts::u8g2_font_t0_14b_mr>().with_ignore_unknown_chars(true);
+/// Status line, peaks and the page counter: ProFont 12 px.
+const PLAIN: FontRenderer =
+    FontRenderer::new::<fonts::u8g2_font_profont12_mr>().with_ignore_unknown_chars(true);
 
-pub const BACKGROUND: Rgb565 = Rgb565::BLACK;
-const TEXT: Rgb565 = Rgb565::WHITE;
-const VOLTS: Rgb565 = Rgb565::new(31, 56, 0);
-const AMPS: Rgb565 = Rgb565::new(6, 60, 10);
-const WATTS: Rgb565 = Rgb565::new(31, 34, 6);
-const MUTED: Rgb565 = Rgb565::new(15, 31, 15);
-const RULE: Rgb565 = Rgb565::new(7, 14, 7);
-const HIGHLIGHT: Rgb565 = Rgb565::new(5, 11, 5);
-/// Protocol badge colours.
-const PD3: Rgb565 = Rgb565::new(6, 56, 12);
-const PD2: Rgb565 = Rgb565::new(4, 48, 24);
-const PPS: Rgb565 = Rgb565::new(31, 20, 26);
-const TYPE_C: Rgb565 = Rgb565::new(28, 56, 28);
+const ACCENT: Rgb565 = Rgb565::new(11, 52, 28);
+const VALUE: Rgb565 = Rgb565::new(30, 61, 30);
+const POWER_COLOR: Rgb565 = Rgb565::new(20, 56, 15);
+const MUTED: Rgb565 = Rgb565::new(21, 43, 22);
+const RULE: Rgb565 = Rgb565::new(5, 14, 7);
 
-/// Meter layout, in pixels: digits end at `VALUE_RIGHT`, units start at
-/// `UNIT_LEFT`, and the protocol column starts right of `DIVIDER_X`.
-const VALUE_RIGHT: i32 = 136;
-const UNIT_LEFT: i32 = 142;
-const DIVIDER_X: i32 = 170;
-/// Baselines of the voltage, current and power rows.
-const ROW_BASELINES: [i32; 3] = [36, 73, 110];
-/// Top of the peak row and its rule.
-const PEAK_RULE_Y: i32 = 117;
-const PEAK_BASELINE: i32 = 131;
-/// Protocol column: left edge, width and centre.
-const SIDE_LEFT: i32 = 175;
-const SIDE_WIDTH: u32 = 62;
-const SIDE_CENTER: i32 = SIDE_LEFT + SIDE_WIDTH as i32 / 2;
+/// Screen width and the left/right text margins, in pixels.
+const WIDTH: u32 = 240;
+const LEFT: i32 = 8;
+const RIGHT: i32 = 232;
+/// Header: title baseline and the rule under it.
+const TITLE_BASELINE: i32 = 15;
+const HEADER_RULE_Y: i32 = 21;
+/// Overview: voltage/current baseline, the rule under them, the current
+/// column, the power baseline, the peak column and the status line.
+const READING_BASELINE: i32 = 49;
+const READING_RULE_Y: i32 = 59;
+const CURRENT_LEFT: i32 = 124;
+const POWER_BASELINE: i32 = 100;
+const PEAK_LEFT: i32 = 150;
+const PEAK_BASELINES: [i32; 3] = [79, 93, 107];
+const STATUS_BASELINE: i32 = 128;
+/// Gap between a number and its unit, in pixels.
+const UNIT_GAP: i32 = 4;
 
 /// One meter reading. `ma` is signed: negative when current flows back.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -100,26 +100,34 @@ pub enum Protocol {
     Pps { mv: u16, ma: u16 },
 }
 
-/// Everything the meter page shows. `reading` is `None` before the first
+/// Page header: title on the left, one-based page position on the right.
+pub struct Header<'a> {
+    pub title: &'a str,
+    pub position: (u8, u8),
+}
+
+/// Everything the overview page shows. `reading` is `None` before the first
 /// sample and while the bus is latched.
 pub struct Meter {
     pub reading: Option<Reading>,
     pub peaks: Peaks,
     pub protocol: Protocol,
+    /// Attached CC pin (1 or 2), when known.
+    pub cc: Option<u8>,
     /// Heartbeat dot colour (alternates every pulse, red on a bus fault).
     pub alive: Rgb565,
 }
 
 /// Small text buffer for formatted numbers and labels; writes past the end are dropped.
 struct Label {
-    bytes: [u8; 16],
+    bytes: [u8; 32],
     len: usize,
 }
 
 impl Label {
     fn new() -> Self {
         Self {
-            bytes: [0; 16],
+            bytes: [0; 32],
             len: 0,
         }
     }
@@ -134,7 +142,7 @@ impl Label {
         self
     }
 
-    /// `value / 10^places` with `places` decimals, e.g. `fixed(20012, 3)` is "20.012".
+    /// `value / 10^places` with `places` decimals, e.g. `fixed(2012, 2)` is "20.12".
     fn fixed(self, mut value: u32, places: u32) -> Self {
         let mut digits = [0u8; 12];
         let mut start = digits.len();
@@ -155,31 +163,38 @@ impl Label {
         self.push(&digits[start..])
     }
 
+    /// Two digits with a leading zero, e.g. "01".
+    fn two_digits(self, value: u8) -> Self {
+        self.push(&[b'0' + value / 10 % 10, b'0' + value % 10])
+    }
+
     fn as_str(&self) -> &str {
         core::str::from_utf8(&self.bytes[..self.len]).unwrap_or("")
     }
 }
 
+/// Draw `content` on `baseline` and return the x just past it.
 fn text<D: DrawTarget<Color = Rgb565>>(
     target: &mut D,
     font: &FontRenderer,
     content: &str,
     position: Point,
-    vertical: VerticalPosition,
     horizontal: HorizontalAlignment,
     color: Rgb565,
-) {
+) -> i32 {
     // Glyph lookups cannot fail (unknown characters are skipped) and drawing
     // into the frame is infallible.
     font.render_aligned(
         content,
         position,
-        vertical,
+        VerticalPosition::Baseline,
         horizontal,
         FontColor::Transparent(color),
         target,
     )
-    .ok();
+    .ok()
+    .flatten()
+    .map_or(position.x, |area| area.top_left.x + area.size.width as i32)
 }
 
 fn fill<D: DrawTarget<Color = Rgb565>>(
@@ -192,370 +207,264 @@ fn fill<D: DrawTarget<Color = Rgb565>>(
         .ok();
 }
 
-fn outline<D: DrawTarget<Color = Rgb565>>(
-    target: &mut D,
-    shape: impl StyledDrawable<PrimitiveStyle<Rgb565>, Color = Rgb565>,
-    color: Rgb565,
-    width: u32,
-) {
-    shape
-        .draw_styled(&PrimitiveStyle::with_stroke(color, width), target)
-        .ok();
+fn rule<D: DrawTarget<Color = Rgb565>>(target: &mut D, y: i32) {
+    fill(
+        target,
+        Rectangle::new(Point::new(LEFT - 2, y), Size::new(WIDTH - 12, 1)),
+        RULE,
+    );
 }
 
-/// Volts with three decimals, amps with three, watts with two (one from 100 W).
-fn volts(mv: u32) -> Label {
-    Label::new().fixed(mv, 3)
+/// A number followed by its unit in the accent colour.
+fn value_with_unit<D: DrawTarget<Color = Rgb565>>(
+    target: &mut D,
+    font: &FontRenderer,
+    value: &Label,
+    unit: &str,
+    position: Point,
+    color: Rgb565,
+) {
+    let end = text(
+        target,
+        font,
+        value.as_str(),
+        position,
+        HorizontalAlignment::Left,
+        color,
+    );
+    text(
+        target,
+        &BOLD,
+        unit,
+        Point::new(end + UNIT_GAP, position.y),
+        HorizontalAlignment::Left,
+        ACCENT,
+    );
 }
-fn amps(ma: i32) -> Label {
-    let sign: &[u8] = if ma < 0 { b"-" } else { b"" };
-    Label::new().push(sign).fixed(ma.unsigned_abs(), 3)
+
+pub fn draw_header<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'_>) {
+    text(
+        target,
+        &BOLD,
+        header.title,
+        Point::new(LEFT, TITLE_BASELINE),
+        HorizontalAlignment::Left,
+        ACCENT,
+    );
+    let (index, count) = header.position;
+    let counter = Label::new().two_digits(index).push(b"/").two_digits(count);
+    text(
+        target,
+        &PLAIN,
+        counter.as_str(),
+        Point::new(RIGHT, TITLE_BASELINE),
+        HorizontalAlignment::Right,
+        MUTED,
+    );
+    rule(target, HEADER_RULE_Y);
+}
+
+/// Two decimals; power drops to one from 100 W so it keeps five characters.
+fn hundredths(milli: u32) -> Label {
+    Label::new().fixed(milli / 10, 2)
 }
 fn watts(mw: u32) -> Label {
     if mw >= 100_000 {
         Label::new().fixed(mw / 100, 1)
     } else {
-        Label::new().fixed(mw / 10, 2)
+        hundredths(mw)
     }
 }
 
-/// The main page: volts, amps and watts on the left, the protocol on the
-/// right and the peaks along the bottom.
-pub fn draw_meter<D: DrawTarget<Color = Rgb565>>(target: &mut D, meter: &Meter) {
-    let rows: [(Label, &str, Rgb565); 3] = match meter.reading {
-        Some(reading) => [
-            (volts(reading.mv), "V", VOLTS),
-            (amps(reading.ma), "A", AMPS),
-            (watts(reading.mw()), "W", WATTS),
-        ],
-        None => [
-            (Label::new().push(b"--.---"), "V", MUTED),
-            (Label::new().push(b"-.---"), "A", MUTED),
-            (Label::new().push(b"--.--"), "W", MUTED),
-        ],
+/// The overview page: volts and amps side by side, watts below, peaks on
+/// the right of the watts and the protocol status line at the bottom.
+pub fn draw_meter<D: DrawTarget<Color = Rgb565>>(
+    target: &mut D,
+    header: &Header<'_>,
+    meter: &Meter,
+) {
+    draw_header(target, header);
+    let (volts, amps, power, color) = match meter.reading {
+        Some(reading) => {
+            let sign: &[u8] = if reading.ma < 0 { b"-" } else { b"" };
+            (
+                hundredths(reading.mv),
+                Label::new()
+                    .push(sign)
+                    .fixed(reading.ma.unsigned_abs() / 10, 2),
+                watts(reading.mw()),
+                VALUE,
+            )
+        }
+        None => (
+            Label::new().push(b"--.--"),
+            Label::new().push(b"-.--"),
+            Label::new().push(b"--.--"),
+            MUTED,
+        ),
     };
-    for ((value, unit, color), baseline) in rows.iter().zip(ROW_BASELINES) {
+    value_with_unit(
+        target,
+        &READING,
+        &volts,
+        "V",
+        Point::new(LEFT, READING_BASELINE),
+        color,
+    );
+    value_with_unit(
+        target,
+        &READING,
+        &amps,
+        "A",
+        Point::new(CURRENT_LEFT, READING_BASELINE),
+        color,
+    );
+    rule(target, READING_RULE_Y);
+    value_with_unit(
+        target,
+        &POWER,
+        &power,
+        "W",
+        Point::new(LEFT, POWER_BASELINE),
+        if meter.reading.is_some() {
+            POWER_COLOR
+        } else {
+            MUTED
+        },
+    );
+
+    text(
+        target,
+        &BOLD,
+        "MAX",
+        Point::new(PEAK_LEFT, PEAK_BASELINES[0]),
+        HorizontalAlignment::Left,
+        ACCENT,
+    );
+    let peaks = [
+        hundredths(meter.peaks.mv).push(b"V"),
+        hundredths(meter.peaks.ma).push(b"A"),
+        watts(meter.peaks.mw).push(b"W"),
+    ];
+    for (peak, baseline) in peaks.iter().zip(PEAK_BASELINES) {
         text(
             target,
-            &DIGITS,
-            value.as_str(),
-            Point::new(VALUE_RIGHT, baseline),
-            VerticalPosition::Baseline,
+            &PLAIN,
+            peak.as_str(),
+            Point::new(RIGHT, baseline),
             HorizontalAlignment::Right,
-            *color,
-        );
-        text(
-            target,
-            &LABEL,
-            unit,
-            Point::new(UNIT_LEFT, baseline),
-            VerticalPosition::Baseline,
-            HorizontalAlignment::Left,
-            *color,
+            MUTED,
         );
     }
 
-    outline(
+    text(
         target,
-        Line::new(
-            Point::new(DIVIDER_X, 6),
-            Point::new(DIVIDER_X, PEAK_RULE_Y - 6),
-        ),
-        RULE,
-        1,
+        &PLAIN,
+        status(meter.protocol, meter.cc).as_str(),
+        Point::new(LEFT, STATUS_BASELINE),
+        HorizontalAlignment::Left,
+        MUTED,
     );
-    draw_protocol(target, meter.protocol);
-    draw_peaks(target, meter.peaks);
     fill(
         target,
-        Circle::new(Point::new(229, PEAK_BASELINE - 9), 7),
+        Circle::with_center(Point::new(RIGHT - 3, STATUS_BASELINE - 4), 6),
         meter.alive,
     );
 }
 
-fn draw_peaks<D: DrawTarget<Color = Rgb565>>(target: &mut D, peaks: Peaks) {
-    fill(
-        target,
-        Rectangle::new(Point::new(0, PEAK_RULE_Y), Size::new(240, 1)),
-        RULE,
-    );
-    // Upward triangle: "maximum".
-    fill(
-        target,
-        Triangle::new(
-            Point::new(4, PEAK_BASELINE),
-            Point::new(14, PEAK_BASELINE),
-            Point::new(9, PEAK_BASELINE - 9),
-        ),
-        MUTED,
-    );
-    let columns = [
-        (Label::new().fixed(peaks.mv / 10, 2).push(b"V"), 22, VOLTS),
-        (Label::new().fixed(peaks.ma / 10, 2).push(b"A"), 92, AMPS),
-        (watts(peaks.mw).push(b"W"), 156, WATTS),
-    ];
-    for (value, x, color) in columns {
-        text(
-            target,
-            &SMALL,
-            value.as_str(),
-            Point::new(x, PEAK_BASELINE),
-            VerticalPosition::Baseline,
-            HorizontalAlignment::Left,
-            color,
-        );
-    }
-}
-
-fn draw_protocol<D: DrawTarget<Color = Rgb565>>(target: &mut D, protocol: Protocol) {
-    let (badge, color): (&str, Rgb565) = match protocol {
-        Protocol::Unknown => ("N/A", RULE),
-        Protocol::TypeC { ma: 0 } => ("USB", TYPE_C),
-        Protocol::TypeC { .. } => ("USB-C", TYPE_C),
-        Protocol::PdOffer | Protocol::Pd { revision: None, .. } => ("PD", PD3),
+/// "PD 3.0 | CC1 | 20V 3.00A": protocol, attached CC pin and contract.
+fn status(protocol: Protocol, cc: Option<u8>) -> Label {
+    let label = Label::new().push(match protocol {
+        Protocol::Unknown => b"NO SOURCE" as &[u8],
+        Protocol::TypeC { ma: 0 } => b"USB",
+        Protocol::TypeC { .. } => b"TYPE-C",
+        Protocol::PdOffer | Protocol::Pd { revision: None, .. } => b"PD",
         Protocol::Pd {
             revision: Some(3), ..
-        } => ("PD3.0", PD3),
-        Protocol::Pd { .. } => ("PD2.0", PD2),
-        Protocol::Pps { .. } => ("PPS", PPS),
+        } => b"PD 3.0",
+        Protocol::Pd { .. } => b"PD 2.0",
+        Protocol::Pps { .. } => b"PPS",
+    });
+    let label = match cc {
+        Some(cc) => label.push(b" | CC").push(&[b'0' + cc % 10]),
+        None => label,
     };
-    let badge_box = Rectangle::new(Point::new(SIDE_LEFT, 6), Size::new(SIDE_WIDTH, 24));
-    fill(
-        target,
-        RoundedRectangle::with_equal_corners(badge_box, Size::new(6, 6)),
-        color,
-    );
-    text(
-        target,
-        &LABEL,
-        badge,
-        badge_box.center(),
-        VerticalPosition::Center,
-        HorizontalAlignment::Center,
-        if protocol == Protocol::Unknown {
-            MUTED
-        } else {
-            BACKGROUND
-        },
-    );
-
-    let icon_top = 38;
     match protocol {
-        Protocol::Unknown => plug(target, icon_top, RULE),
-        Protocol::TypeC { .. } => plug(target, icon_top, color),
-        _ => bolt(target, icon_top, color),
-    }
-
-    let (first, second) = match protocol {
-        Protocol::Unknown => (Label::new().push(b"--"), Label::new().push(b"--")),
-        Protocol::TypeC { ma: 0 } => (Label::new().push(b"5V"), Label::new().push(b"DEFAULT")),
-        Protocol::TypeC { ma } => (
-            Label::new().push(b"5V"),
-            Label::new().fixed(u32::from(ma) / 100, 1).push(b"A"),
-        ),
-        Protocol::PdOffer => (Label::new().push(b"5V"), Label::new().push(b"NO REQ")),
-        Protocol::Pd { mv, ma, .. } => (
-            Label::new().fixed(u32::from(mv) / 1000, 0).push(b"V"),
-            Label::new().fixed(u32::from(ma) / 10, 2).push(b"A"),
-        ),
-        Protocol::Pps { mv, ma } => (
-            Label::new().fixed(u32::from(mv) / 10, 2).push(b"V"),
-            Label::new().fixed(u32::from(ma) / 10, 2).push(b"A"),
-        ),
-    };
-    for (line, baseline) in [(first, 90), (second, 108)] {
-        text(
-            target,
-            &LABEL,
-            line.as_str(),
-            Point::new(SIDE_CENTER, baseline),
-            VerticalPosition::Baseline,
-            HorizontalAlignment::Center,
-            TEXT,
-        );
+        Protocol::Unknown => label,
+        Protocol::TypeC { ma: 0 } => label.push(b" | 5V"),
+        Protocol::TypeC { ma } => label.push(b" | ").fixed(u32::from(ma) / 100, 1).push(b"A"),
+        Protocol::PdOffer => label.push(b" | OFFER"),
+        Protocol::Pd { mv, ma, .. } => label
+            .push(b" | ")
+            .fixed(u32::from(mv) / 1000, 0)
+            .push(b"V ")
+            .fixed(u32::from(ma) / 10, 2)
+            .push(b"A"),
+        Protocol::Pps { mv, ma } => label
+            .push(b" | ")
+            .fixed(u32::from(mv) / 10, 2)
+            .push(b"V ")
+            .fixed(u32::from(ma) / 10, 2)
+            .push(b"A"),
     }
 }
 
-/// Lightning bolt, 22 x 34 px, centred in the protocol column.
-fn bolt<D: DrawTarget<Color = Rgb565>>(target: &mut D, top: i32, color: Rgb565) {
-    let x = SIDE_CENTER;
-    fill(
-        target,
-        Triangle::new(
-            Point::new(x + 6, top),
-            Point::new(x - 10, top + 20),
-            Point::new(x + 3, top + 20),
-        ),
-        color,
-    );
-    fill(
-        target,
-        Triangle::new(
-            Point::new(x - 3, top + 14),
-            Point::new(x + 10, top + 14),
-            Point::new(x - 6, top + 34),
-        ),
-        color,
-    );
-}
+/// Settings rows: first baseline and pitch.
+const SETTINGS_BASELINE: i32 = 46;
+const SETTINGS_PITCH: i32 = 26;
 
-/// USB plug: two prongs, a body and a cable, centred in the protocol column.
-fn plug<D: DrawTarget<Color = Rgb565>>(target: &mut D, top: i32, color: Rgb565) {
-    let x = SIDE_CENTER;
-    for prong in [x - 7, x + 4] {
-        fill(
-            target,
-            Rectangle::new(Point::new(prong, top), Size::new(3, 8)),
-            color,
-        );
-    }
-    fill(
-        target,
-        RoundedRectangle::with_equal_corners(
-            Rectangle::new(Point::new(x - 11, top + 8), Size::new(22, 16)),
-            Size::new(4, 4),
-        ),
-        color,
-    );
-    fill(
-        target,
-        Rectangle::new(Point::new(x - 2, top + 24), Size::new(4, 10)),
-        color,
-    );
-}
-
-/// Settings rows: top of the first row, row pitch and height.
-const SETTINGS_TOP: i32 = 34;
-const SETTINGS_PITCH: i32 = 32;
-const SETTINGS_ROW_HEIGHT: u32 = 28;
-
-/// The settings page; `cursor` is highlighted.
+/// The settings page; the row under `cursor` is marked and brightened.
 pub fn draw_settings<D: DrawTarget<Color = Rgb565>>(
     target: &mut D,
+    header: &Header<'_>,
     settings: Settings,
     cursor: Item,
 ) {
-    gear(target, Point::new(16, 15), TEXT);
-    text(
-        target,
-        &LABEL,
-        "SETTINGS",
-        Point::new(32, 15),
-        VerticalPosition::Center,
-        HorizontalAlignment::Left,
-        TEXT,
-    );
-    fill(
-        target,
-        Rectangle::new(Point::new(0, 28), Size::new(240, 1)),
-        RULE,
-    );
-
+    draw_header(target, header);
     for (index, item) in Item::ALL.into_iter().enumerate() {
-        let top = SETTINGS_TOP + index as i32 * SETTINGS_PITCH;
-        let row = Rectangle::new(Point::new(4, top), Size::new(232, SETTINGS_ROW_HEIGHT));
+        let baseline = SETTINGS_BASELINE + index as i32 * SETTINGS_PITCH;
         let selected = item == cursor;
         if selected {
-            fill(
+            text(
                 target,
-                RoundedRectangle::with_equal_corners(row, Size::new(6, 6)),
-                HIGHLIGHT,
-            );
-            fill(
-                target,
-                Rectangle::new(
-                    Point::new(4, top + 4),
-                    Size::new(3, SETTINGS_ROW_HEIGHT - 8),
-                ),
-                VOLTS,
+                &ROW,
+                ">",
+                Point::new(LEFT, baseline),
+                HorizontalAlignment::Left,
+                ACCENT,
             );
         }
-        let middle = top + SETTINGS_ROW_HEIGHT as i32 / 2;
-        let name = match item {
-            Item::Brightness => "Brightness",
-            Item::ResetPeaks => "Reset max",
-            Item::DebugPages => "Debug pages",
+        let (name, value) = match item {
+            Item::Brightness => (
+                "BRIGHTNESS",
+                Label::new()
+                    .fixed(u32::from(settings.brightness_percent()), 0)
+                    .push(b"%"),
+            ),
+            Item::ResetPeaks => ("RESET MAX", Label::new().push(b"CLEAR")),
+            Item::DebugPages => (
+                "DEBUG PAGES",
+                Label::new().push(if settings.debug_pages { b"ON" } else { b"OFF" }),
+            ),
         };
         text(
             target,
-            &LABEL,
+            &ROW,
             name,
-            Point::new(14, middle),
-            VerticalPosition::Center,
+            Point::new(LEFT + 14, baseline),
             HorizontalAlignment::Left,
-            if selected { TEXT } else { MUTED },
+            if selected { VALUE } else { MUTED },
         );
-        match item {
-            Item::Brightness => brightness_bars(target, middle, settings.brightness),
-            Item::ResetPeaks => text(
-                target,
-                &SMALL,
-                "PRESS",
-                Point::new(228, middle),
-                VerticalPosition::Center,
-                HorizontalAlignment::Right,
-                MUTED,
-            ),
-            Item::DebugPages => toggle(target, middle, settings.debug_pages),
+        text(
+            target,
+            &ROW,
+            value.as_str(),
+            Point::new(RIGHT, baseline),
+            HorizontalAlignment::Right,
+            if selected { ACCENT } else { MUTED },
+        );
+        if index + 1 < Item::ALL.len() {
+            rule(target, baseline + SETTINGS_PITCH / 2 - 2);
         }
     }
-}
-
-/// One bar per level, rising left to right; lit up to the current level.
-fn brightness_bars<D: DrawTarget<Color = Rgb565>>(target: &mut D, middle: i32, level: u8) {
-    for index in 0..BRIGHTNESS_PERCENT.len() {
-        let height = 6 + 3 * index as u32;
-        let x = 168 + 12 * index as i32;
-        let color = if index <= usize::from(level) {
-            VOLTS
-        } else {
-            RULE
-        };
-        fill(
-            target,
-            Rectangle::new(
-                Point::new(x, middle + 9 - height as i32),
-                Size::new(8, height),
-            ),
-            color,
-        );
-    }
-}
-
-/// Pill switch: green with the knob right when on, grey with it left when off.
-fn toggle<D: DrawTarget<Color = Rgb565>>(target: &mut D, middle: i32, on: bool) {
-    let track = Rectangle::new(Point::new(192, middle - 9), Size::new(36, 18));
-    fill(
-        target,
-        RoundedRectangle::with_equal_corners(track, Size::new(9, 9)),
-        if on { PD3 } else { RULE },
-    );
-    let knob_x = if on { 212 } else { 194 };
-    fill(
-        target,
-        Circle::new(Point::new(knob_x, middle - 7), 14),
-        TEXT,
-    );
-}
-
-/// Eight-toothed gear, 16 px across, centred on `center`.
-fn gear<D: DrawTarget<Color = Rgb565>>(target: &mut D, center: Point, color: Rgb565) {
-    for (dx, dy) in [
-        (0, -7),
-        (5, -5),
-        (7, 0),
-        (5, 5),
-        (0, 7),
-        (-5, 5),
-        (-7, 0),
-        (-5, -5),
-    ] {
-        fill(
-            target,
-            Rectangle::with_center(center + Point::new(dx, dy), Size::new(4, 4)),
-            color,
-        );
-    }
-    fill(target, Circle::with_center(center, 12), color);
-    fill(target, Circle::with_center(center, 5), BACKGROUND);
 }

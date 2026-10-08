@@ -94,6 +94,22 @@ impl Page {
         }
     }
 
+    /// One-based position in the page cycle and the cycle length; the
+    /// position is 0 for a diagnostic page outside the cycle.
+    pub fn position(self, debug_pages: bool) -> (u8, u8) {
+        let (mut page, mut index, mut count) = (Self::Meter, 0, 0);
+        loop {
+            count += 1;
+            if page == self {
+                index = count;
+            }
+            page = page.next(debug_pages);
+            if page == Self::Meter {
+                return (index, count);
+            }
+        }
+    }
+
     /// Pages whose sub-page [`STEP`] and [`SELECT`] move.
     fn has_detail(self) -> bool {
         matches!(self, Self::Charger | Self::Cable)

@@ -23,7 +23,7 @@ const HEIGHT: usize = firmware_core::panel::HEIGHT as usize;
 pub const fn color(rgb565: u16) -> u16 {
     rgb565.swap_bytes()
 }
-/// Page background, black like [`ui::BACKGROUND`], in frame byte order.
+/// Page background (black), in frame byte order.
 const BACKGROUND: u16 = color(0x0000);
 
 #[inline(never)]

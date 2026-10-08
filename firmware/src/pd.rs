@@ -201,12 +201,19 @@ pub fn protocol(observation: &Observation) -> Protocol {
     if observation.capabilities.is_some() {
         return Protocol::PdOffer;
     }
-    observation
-        .selected_cc
+    attached_cc(observation)
         .zip(observation.cc_status)
         .and_then(|(cc, status)| status.get(usize::from(cc).checked_sub(1)?).copied())
         .and_then(firmware_core::pd_sniff::rp)
         .map_or(Protocol::Unknown, type_c)
+}
+
+/// Attached CC pin (1 or 2): the passthrough sniffer's, else this meter's.
+pub fn attached_cc(observation: &Observation) -> Option<u8> {
+    observation
+        .sniff
+        .and_then(|sniff| sniff.cc)
+        .or(observation.selected_cc)
 }
 
 /// Major PD revision from a message header's Specification Revision field

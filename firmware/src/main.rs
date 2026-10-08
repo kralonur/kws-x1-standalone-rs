@@ -579,6 +579,14 @@ fn reading(raw_v: Option<u16>, raw_i: Option<u16>) -> Option<ui::Reading> {
     })
 }
 
+/// Page header with the page's position in the current cycle.
+fn header(title: &str, input: button_logic::Input) -> ui::Header<'_> {
+    ui::Header {
+        title,
+        position: input.page.position(input.settings.debug_pages),
+    }
+}
+
 /// Backlight compare for a settings level, inside `1..BACKLIGHT_PERIOD`.
 fn backlight_compare(settings: firmware_core::settings::Settings) -> u16 {
     (u32::from(BACKLIGHT_PERIOD) * u32::from(settings.brightness_percent()) / 100) as u16
@@ -702,19 +710,27 @@ async fn meter_task(mut backlight: embassy_hc32::pwm::TimerA4Pwm) {
             match page {
                 Page::Meter => {
                     render::clear(frame);
+                    let observation = latest_observation();
                     ui::draw_meter(
                         &mut Canvas(frame),
+                        &header("OVERVIEW", input),
                         &ui::Meter {
                             reading: reading(last_raw_v, last_raw_i),
                             peaks,
-                            protocol: pd::protocol(&latest_observation()),
+                            protocol: pd::protocol(&observation),
+                            cc: pd::attached_cc(&observation),
                             alive: pulse_now,
                         },
                     );
                 }
                 Page::Settings => {
                     render::clear(frame);
-                    ui::draw_settings(&mut Canvas(frame), input.settings, input.cursor);
+                    ui::draw_settings(
+                        &mut Canvas(frame),
+                        &header("SETTINGS", input),
+                        input.settings,
+                        input.cursor,
+                    );
                 }
                 Page::Irq => {
                     let (stack_peak, stack_size) = stack_use();
