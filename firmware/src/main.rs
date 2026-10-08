@@ -424,24 +424,41 @@ async fn tilt_task(input: InputPin) {
     // actually ends the burst — and everything that follows is suppressed by a
     // refractory lockout. Edges latched during the lockout are drained so the
     // next tilt starts clean.
+    //
+    // INT1 is armed for the position opposite the displayed one, and in 6D
+    // position mode it stays high while the device is in that position (LIS
+    // Table 55). So a high level means "flip" even without a new edge: a turn
+    // back during the lockout, or a device started upside down, otherwise
+    // leaves the screen wrong until the next full flip.
     const REFRACTORY_MS: u64 = 1500;
     let orientation_sender = ORIENTATION.sender();
     let mut orientation = Orientation::Normal;
     loop {
-        tilt.wait_for_edge().await;
+        if !tilt.is_high() {
+            tilt.wait_for_edge().await;
+        }
 
-        orientation = orientation.flipped();
-        orientation_sender.send(orientation);
-        let cfg = match orientation {
-            Orientation::Inverted => lis3dh::POSITION_X_HIGH,
-            Orientation::Normal => lis3dh::POSITION_X_LOW,
-        };
-        let _ = write_sensor(lis3dh::INT1_CFG, cfg).await;
-        TILT_FLIPS.fetch_add(1, Ordering::Relaxed);
+        // Re-arm the sensor before showing the flip: if the write fails, the
+        // sensor still watches the old position, the screen stays consistent
+        // with it, and the level check retries after the lockout.
+        let next = orientation.flipped();
+        if write_sensor(lis3dh::INT1_CFG, armed_position(next)).await {
+            orientation = next;
+            orientation_sender.send(orientation);
+            TILT_FLIPS.fetch_add(1, Ordering::Relaxed);
+        }
 
         // Suppress the rest of the burst, then discard anything it latched.
         Timer::after_millis(REFRACTORY_MS).await;
         while embassy_hc32::exti::take_edge(TILT_EIRQ) {}
+    }
+}
+
+/// INT1_CFG for an orientation: raise INT1 in the position opposite it.
+fn armed_position(orientation: Orientation) -> u8 {
+    match orientation {
+        Orientation::Normal => lis3dh::POSITION_X_LOW,
+        Orientation::Inverted => lis3dh::POSITION_X_HIGH,
     }
 }
 
