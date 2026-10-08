@@ -97,7 +97,7 @@ pub struct SprObservation {
     pub soft_resets_sent: u8,
     pub soft_resets_accepted: u8,
     /// Longest Protocol Error to Soft_Reset TX write, in ms (tProtErrSoftReset
-    /// and tSoftReset are 15 ms max, Table 6.68).
+    /// and tSoftReset are 15 ms max, Table 7.9).
     pub soft_reset_ms: u8,
     /// Hard Reset Signaling we sent (`docs/SAFETY.md`), whether the
     /// FUSB302 confirmed it (I_HARDSENT within tHardResetComplete), and the ms

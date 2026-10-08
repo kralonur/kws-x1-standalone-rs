@@ -52,10 +52,10 @@ pub trait Platform {
 // Covers the 10-second window at 1 ms/poll, with handshake margin.
 const POLL_BUDGET: u16 = 16_384;
 // Software bound on waiting for SinkTxOK before the AMS start is Deferred. Longer
-// than tSinkTx max (20 ms, Table 6.68): a Source that asserts SinkTxNG to start
+// than tSinkTx max (20 ms, Table 7.9): a Source that asserts SinkTxNG to start
 // its own AMS is normally seen as a received Message first. Not a spec timer.
 const SINK_TX_WAIT_MS: u64 = 100;
-// BIST Carrier Mode length: nominal tBISTContMode (30-60 ms, Table 6.68); the
+// BIST Carrier Mode length: nominal tBISTContMode (30-60 ms, Table 7.9); the
 // carrier must stop within tBISTContMode of starting (section 7.31.6.2).
 const BIST_CARRIER_MS: u32 = 45;
 // tVCONNStable wait before the first cable Message.
@@ -67,10 +67,10 @@ const PPS_STATUS_ANSWER_MS: u64 = usbpd_traits::SENDER_RESPONSE_MS;
 /// The same window for the answer to an information request (`pd_partner`).
 const QUERY_ANSWER_MS: u64 = usbpd_traits::SENDER_RESPONSE_MS;
 /// Hard Reset timer cases are re-checked against the minimum of each timer
-/// (Table 6.68): tSenderResponse 27 ms, tPSTransition (SPR) 450 ms.
+/// (Table 7.9): tSenderResponse 27 ms, tPSTransition (SPR) 450 ms.
 const SENDER_RESPONSE_MIN_MS: u64 = 27;
 const PS_TRANSITION_MIN_MS: u64 = 450;
-/// tHardResetComplete max (Table 6.68): without I_HARDSENT by then, the
+/// tHardResetComplete max (Table 7.9): without I_HARDSENT by then, the
 /// Hard Reset counts as sent (section 7.31.10.1).
 const HARD_RESET_COMPLETE_MS: u64 = 5;
 /// Section 4.4.1: observed VBUS below vSafe0V (0.8 V) within tPSHardReset
@@ -227,7 +227,7 @@ enum ResetStep {
     WaitCapsAfterCarrier,
 }
 
-/// The stage of an acknowledged Request's AMS (section 8.3.3.3).
+/// The stage of an acknowledged Request's AMS (section 7.9.2).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RequestStage {
     /// Accept, Reject or Wait not yet received (PE_SNK_Select_Capability).
@@ -303,12 +303,12 @@ pub struct Session<'a, B: I2c, D, C, P: Platform> {
     tx_wait_flags: u8,
     request: Option<RequestStage>,
     // Time of the Protocol Error that armed our Soft_Reset: it bounds
-    // tProtErrSoftReset/tSoftReset (Table 6.68).
+    // tProtErrSoftReset/tSoftReset (Table 7.9).
     protocol_error_at: Option<u64>,
     // From a completed Soft Reset until the renegotiated Request ends.
     recovering: bool,
     // A mandatory Hard Reset is due (`docs/SAFETY.md`); the time of
-    // the Protocol Error bounds tHardReset/tProtErrHardReset (Table 6.68).
+    // the Protocol Error bounds tHardReset/tProtErrHardReset (Table 7.9).
     hard_reset_armed: bool,
     hard_reset_error_at: Option<u64>,
     // Hard Reset Signaling written / received (I_HARDRST): the session is over.
@@ -1151,7 +1151,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         let token_len = PACKSYM | (bytes.len() as u8);
         let mut fifo = [0u8; 40];
         fifo[0] = register::FIFOS;
-        // SOP* ordered sets as Sync symbols (USB PD R3.2 §5.4).
+        // SOP* sequences as Sync symbols (USB PD R3.2 §5.3.1.1.3, Table 5.3).
         fifo[1..5].copy_from_slice(match sop {
             Sop::Cable => &[SOP1, SOP1, SOP3, SOP3],
             Sop::CableDoublePrime => &[SOP1, SOP3, SOP1, SOP3],
@@ -1239,7 +1239,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                 self.protocol_error()?;
                 return Err(Error::NotAcknowledged);
             }
-            // Section 6.7.1: the GoodCRC with our MessageID is the acknowledgement;
+            // Section 7.32.1: the GoodCRC with our MessageID is the acknowledgement;
             // the FUSB302's I_TXSENT is only its own hint. On tested hardware,
             // a Source that answers at once left I_TXSENT unset
             // for the whole window. At the window's end the matching GoodCRC frame,
@@ -2334,7 +2334,7 @@ impl pd_discovery::Packet for pd_service::Packet {
     }
 }
 /// The first 32-bit Data Object, which follows the 16-bit Message Header
-/// (sections 6.2.1.1, 6.4), if the message is long enough to hold one.
+/// (sections 6.2.1, 6.4), if the message is long enough to hold one.
 fn first_data_object(message: &[u8]) -> Option<u32> {
     let &[_, _, a, b, c, d, ..] = message else {
         return None;

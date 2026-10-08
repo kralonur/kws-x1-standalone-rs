@@ -1154,8 +1154,8 @@ async fn button_task(inputs: [InputPin; 4]) {
 ///
 /// PC13 (stock slider sense, latched once at boot like stock `0x15ee2`) is read
 /// before any PHY access. Low (sink mode): the session starts at boot, inside
-/// the source's Source_Capabilities window (nCapsCount, PD R3.2 §8.3.3.2); a
-/// later start must not use the optional SinkWaitCapTimer Hard Reset.
+/// the source's Source_Capabilities window (nCapsCount, PD R3.2 §7.32.6); a
+/// later start must not use the optional SinkWaitCapTimer Hard Reset (§7.31.3.2).
 /// High (passthrough): read-only snapshot plus one verified SWITCHES0 = 0x00
 /// write (FUSB302 Rd off, as stock), then the receive-only sniffer
 /// (`docs/SAFETY.md`): never GoodCRC, TX or reset signaling.

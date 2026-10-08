@@ -518,7 +518,7 @@ fn spr_lines(observation: Observation, spr: SprObservation) -> [[u8; 24]; 8] {
         rows[2][offset] = if flag { b'Y' } else { b'-' };
     }
     if spr.tx_ack_goodcrc_only {
-        rows[2][10] = b'G'; // GoodCRC frame without I_TXSENT (section 6.7.1)
+        rows[2][10] = b'G'; // GoodCRC frame without I_TXSENT (section 7.32.1)
     }
     put(&mut rows[3], b"MS: AK:--- AC:--- RD:---");
     if let Some(ms) = spr.elapsed_ack_ms {

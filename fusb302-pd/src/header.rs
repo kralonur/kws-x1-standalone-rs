@@ -1,4 +1,4 @@
-//! USB PD Message Header field masks (USB PD R3.2 §6.2.1.1, Table 6.1).
+//! USB PD Message Header field masks (USB PD R3.2 §6.2.1, Table 6.2).
 
 /// Message Type, bits 4:0.
 pub const MESSAGE_TYPE: u16 = 0x001f;

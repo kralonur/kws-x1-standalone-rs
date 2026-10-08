@@ -56,8 +56,8 @@ impl I2c for SharedBus {
         let bus = guard.as_mut().ok_or(embassy_hc32::i2c::Error::NotReady)?;
         // Run the transfer to completion here (see `spin`). Awaiting it costs
         // one executor turn per byte: a 31-byte FIFO read took 14 ms on hardware
-        // and the Request missed the Source's SenderResponseTimer (24-30 ms,
-        // section 6.6.2), which then Hard Reset. At
+        // and the Request missed the Source's SenderResponseTimer (at least
+        // 27 ms, Table 7.9; 24 ms under PD 2.0), which then Hard Reset. At
         // 400 kHz a transfer takes under 1 ms; its 50 ms timeout still bounds it.
         let result = spin(bus.transaction(address, operations));
         note_max(&TRANSFER_MAX, locked);
