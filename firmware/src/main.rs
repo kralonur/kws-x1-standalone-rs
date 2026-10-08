@@ -931,6 +931,10 @@ async fn main(spawner: Spawner) {
         cortex_m::interrupt::enable();
     }
 
+    // Each task is spawned once, here, into its default one-slot pool, so a
+    // token is always free (`SpawnError::Busy` needs a second instance).
+    const ONE_SPAWN: &str = "each task is spawned once into its one-slot pool";
+
     let backlight_pwm;
     let button_inputs;
     let tilt_input;
@@ -1041,6 +1045,11 @@ async fn main(spawner: Spawner) {
             }
         }
 
+        // The PD task starts before the panel's sleep-out wait: in passthrough
+        // the charger sends its offer once, at most tFirstSourceCap (250 ms in
+        // the USB PD timing table) after VBUS, and the meter boots from that
+        // same VBUS.
+        spawner.spawn(pd_task::run(pd_input, pc13_input).expect(ONE_SPAWN));
         backlight_pwm = backlight.0;
         if !panel::init(backlight.1).await {
             // Backlight is already on, so a lit blank screen means the panel
@@ -1051,13 +1060,9 @@ async fn main(spawner: Spawner) {
         }
     }
 
-    // Each task is spawned once, here, into its default one-slot pool, so a
-    // token is always free (`SpawnError::Busy` needs a second instance).
-    const ONE_SPAWN: &str = "each task is spawned once into its one-slot pool";
     spawner.spawn(pulse_task().expect(ONE_SPAWN));
     spawner.spawn(tilt_task(tilt_input).expect(ONE_SPAWN));
     let (store, saved) = settings_store::Store::open();
     spawner.spawn(button_task(button_inputs, store, saved.unwrap_or_default()).expect(ONE_SPAWN));
     spawner.spawn(meter_task(backlight_pwm).expect(ONE_SPAWN));
-    spawner.spawn(pd_task::run(pd_input, pc13_input).expect(ONE_SPAWN));
 }
