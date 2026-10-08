@@ -205,7 +205,7 @@ pub unsafe fn render_measure(
         // 500 ms heartbeat square: proves meter_task and pulse_task both run.
         for y in 6..18 {
             for x in 222..234 {
-                framebuffer.add(y * 240 + x).write_volatile(alive);
+                framebuffer.add(y * WIDTH + x).write_volatile(alive);
             }
         }
     }
