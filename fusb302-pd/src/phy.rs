@@ -20,6 +20,9 @@ use pd_protocol::pd_rx::Sop;
 use pd_protocol::pd_spr::Limits;
 use usbpd_traits::{Driver, DriverRxError, DriverTxError};
 
+mod tx;
+use tx::PendingTx;
+
 /// Board policy and physical observations supplied by the caller. No sensor,
 /// power-on baseline, pin topology or nonstandard AMS override is assumed.
 pub trait Platform {
@@ -211,7 +214,7 @@ pub struct Session<'a, B: I2c, D, C, P: Platform> {
     register: Option<u8>,
     receiver: pd_service::Receiver,
     queue: [Option<pd_service::Packet>; 2],
-    tx_pending: bool,
+    pending_tx: Option<PendingTx>,
     partner_reset_pending: bool,
     partner_wait_caps: bool,
     protocol_started: bool,
@@ -253,8 +256,6 @@ pub struct Session<'a, B: I2c, D, C, P: Platform> {
     await_reset_accept: bool,
     // From a completed Soft Reset until the renegotiated Request ends.
     recovering: bool,
-    // I_RETRYFAIL observed for the pending transmission.
-    retry_failed: bool,
     // A mandatory Hard Reset is due (`docs/SAFETY.md`); the time of
     // the Protocol Error bounds tHardReset/tProtErrHardReset (Table 6.68).
     hard_reset_armed: bool,
@@ -266,16 +267,11 @@ pub struct Session<'a, B: I2c, D, C, P: Platform> {
     polls: u32,
     softrst_flag_at: Option<u32>,
     softrst_frame_at: Option<u32>,
-    tx_id: u16,
-    tx_sop: Sop,
-    // The pending transmission is a Soft_Reset (SOP or the SOP'' synchronization).
-    tx_soft_reset: bool,
     cable_phase: CablePhase,
     cable_rx_id: u8,
     tx_revision: u8,
     t_send: Option<u64>,
     t_ack: Option<u64>,
-    tx_goodcrc_at: Option<u64>,
     t_accept: Option<u64>,
     error: Option<Error<B::Error>>,
     pub observation: pd::Observation,
@@ -318,7 +314,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             register: None,
             receiver: pd_service::Receiver::for_spr_boundary(),
             queue: [None, None],
-            tx_pending: false,
+            pending_tx: None,
             partner_reset_pending: false,
             partner_wait_caps: false,
             protocol_started: false,
@@ -343,7 +339,6 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             protocol_error_at: None,
             await_reset_accept: false,
             recovering: false,
-            retry_failed: false,
             hard_reset_armed: false,
             hard_reset_error_at: None,
             hard_reset_sent: false,
@@ -351,15 +346,11 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             polls: 0,
             softrst_flag_at: None,
             softrst_frame_at: None,
-            tx_id: 0,
-            tx_sop: Sop::Partner,
-            tx_soft_reset: false,
             cable_phase: CablePhase::Idle,
             cable_rx_id: 0,
             tx_revision: 2,
             t_send: None,
             t_ack: None,
-            tx_goodcrc_at: None,
             t_accept: None,
             error: None,
             observation,
@@ -573,7 +564,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             && self.observation.rp_probe.is_none()
             && !self.rp_probing
             && self.trace().contract_seen
-            && !self.tx_pending
+            && self.pending_tx.is_none()
             && !self.reset_in_progress()
             && self.cable_phase == CablePhase::Idle
             && self.queue.iter().all(Option::is_none)
@@ -625,17 +616,20 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         }
         let outcome = outcome.map_err(Error::Rx)?;
         if flags[0] & 4 != 0 {
-            if !self.tx_pending {
+            if self.pending_tx.is_none() {
                 return Err(Error::UnexpectedAck);
             }
             self.trace().tx_sent_irq = true;
         }
         // I_RETRYFAIL: only for the pending transmission, never with TXSENT.
         if flags[0] & 0x10 != 0 {
-            if !self.tx_pending || self.trace().tx_sent_irq {
+            if self.trace().tx_sent_irq {
                 return Err(Error::Rx(pd_service::Error::TransmissionFault));
             }
-            self.retry_failed = true;
+            let Some(tx) = self.pending_tx.as_mut() else {
+                return Err(Error::Rx(pd_service::Error::TransmissionFault));
+            };
+            tx.retry_failed = true;
         }
         // I_SOFTRST: matched by a SOP Soft_Reset frame drained in this or an
         // adjacent poll, or by our own Soft_Reset transmission.
@@ -643,7 +637,10 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         // BIST_TMODE also clears a received Soft_Reset from the FIFO: in BIST
         // Test Data Mode it is not acted on (section 6.4.3.1).
         if flags[0] & 2 != 0 && !self.bist_test_data {
-            let own = self.tx_pending && self.tx_id == 0 && self.tx_soft_reset;
+            let own = self
+                .pending_tx
+                .as_ref()
+                .is_some_and(PendingTx::reset_with_zero_id);
             if own
                 || self
                     .softrst_frame_at
@@ -676,15 +673,14 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                 return Err(Error::Peer);
             }
             if frame.header() & 0xf01f == 1 {
-                if !self.tx_pending
-                    || frame.sop() != self.tx_sop
-                    || (frame.header() >> 9) & 7 != self.tx_id
-                {
+                let acknowledged = self.pending_tx.as_mut().is_some_and(|tx| {
+                    tx.acknowledge(frame.sop(), frame.header(), || self.clock.now_ms())
+                });
+                if !acknowledged {
                     return Err(Error::UnexpectedAck);
                 }
                 // Earliest software observation of GoodCRC; do not move the
                 // section 7.31.2 timer origin while waiting for I_TXSENT.
-                self.tx_goodcrc_at.get_or_insert(self.clock.now_ms());
                 self.trace().tx_goodcrc = true;
                 if self.trace().request_id.is_some() && !self.trace().contract_seen {
                     self.step(7);
@@ -1099,10 +1095,6 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         };
         // No await since the write: nothing can have polled these yet.
         self.t_send = Some(t_send);
-        self.tx_id = (header >> 9) & 7;
-        self.tx_sop = sop;
-        self.tx_soft_reset = header & 0xf01f == 13;
-        self.retry_failed = false;
         if sop == Sop::Partner {
             self.tx_revision = revision as u8;
             // Only the first Request locks SOP revision (section 6.1.3.1).
@@ -1110,17 +1102,16 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             if is_request || self.trace().peer_revision.is_some() {
                 self.trace().peer_revision = Some(if revision == 2 { 3 } else { 2 });
             }
-            self.trace().request_id = Some(self.tx_id as u8);
+            self.trace().request_id = Some(PendingTx::header_id(header) as u8);
         }
         if is_request {
             self.caps_reply = false;
             self.step(6);
         }
-        self.tx_pending = true;
+        self.pending_tx = Some(PendingTx::new(sop, header));
         self.trace().tx_written = true;
         self.trace().tx_sent_irq = false;
         self.trace().tx_goodcrc = false;
-        self.tx_goodcrc_at = None;
         self.trace().tx_ack_goodcrc_only = false;
         let began = self.clock.now_ms();
         let mut wait_packets = 0u8;
@@ -1137,10 +1128,8 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                 }
                 self.enqueue(packet)?;
             }
-            if self.retry_failed {
-                self.retry_failed = false;
-                self.tx_pending = false;
-                self.tx_soft_reset = false;
+            if self.pending_tx.as_ref().is_some_and(|tx| tx.retry_failed) {
+                self.pending_tx = None;
                 // A cable that does not acknowledge simply does not answer.
                 if sop != Sop::Partner {
                     return Err(Error::TxTimeout);
@@ -1176,10 +1165,16 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                 if goodcrc_only {
                     self.trace().txsent_missing = self.trace().txsent_missing.saturating_add(1);
                 }
-                let t_ack = self.tx_goodcrc_at.expect("matching GoodCRC observed");
+                let Some(t_ack) = self
+                    .pending_tx
+                    .as_ref()
+                    .and_then(PendingTx::acknowledged_at)
+                else {
+                    return Err(Error::UnexpectedAck);
+                };
                 self.trace().elapsed_ack_ms = Some(t_ack.saturating_sub(t_send).min(999) as u16);
                 self.t_ack = Some(t_ack);
-                self.tx_pending = false;
+                self.pending_tx = None;
                 if unsupported_reply {
                     self.unsupported_reply = None;
                 }
@@ -1214,7 +1209,6 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                         }
                     });
                 }
-                self.tx_soft_reset = false;
                 if reset_accept {
                     self.partner_reset_pending = false;
                     self.partner_wait_caps = true;
@@ -1271,8 +1265,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         // out, so it is Deferred (MessageID unused), never a fault. Any other
         // timeout stays uncertain and halts.
         if lost_to_partner {
-            self.tx_pending = false;
-            self.tx_soft_reset = false;
+            self.pending_tx = None;
             return self.defer(b'C');
         }
         Err(Error::TxTimeout)
@@ -1511,7 +1504,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                     // queued traffic. Startup Accept does not lock revision.
                     if !self.persistent
                         || !matches!(revision, 1 | 2)
-                        || self.tx_pending
+                        || self.pending_tx.is_some()
                         || self.partner_reset_pending
                         || self.soft_reset_armed
                         || self.cable_phase != CablePhase::Idle
@@ -1838,7 +1831,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                 s.cable_active() && s.target_mv() == 5000 && s.target_pps_object() == 0
             })
             || self.trace().peer_revision != Some(3)
-            || self.tx_pending
+            || self.pending_tx.is_some()
             || self.reset_in_progress()
             || self.queue.iter().any(Option::is_some)
         {
@@ -1949,7 +1942,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                 .selection
                 .is_some_and(|s| !s.request_in_flight() && s.established_target().is_some());
         if !self.request_is_reviewed(contract.request.0)
-            || self.tx_pending
+            || self.pending_tx.is_some()
             || self.reset_in_progress()
             || self.recovering
             || self.request_reply
@@ -2027,7 +2020,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         let startup_reset = self.partner_reset_pending || self.partner_wait_caps;
         if !self.persistent
             || (self.trace().peer_revision.is_none() && !startup_reset)
-            || self.tx_pending
+            || self.pending_tx.is_some()
             || self.cable_phase != CablePhase::Idle
             || !(self.hard_reset_armed || timed_out)
         {
@@ -2089,7 +2082,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
     /// vSafe5V, and only fresh Source_Capabilities may follow.
     async fn send_bist_carrier(&mut self) -> Result<(), Error<B::Error>> {
         if !core::mem::take(&mut self.bist_carrier_armed)
-            || self.tx_pending
+            || self.pending_tx.is_some()
             || self.reset_in_progress()
             || self.cable_phase != CablePhase::Idle
             || self.queue.iter().any(Option::is_some)
