@@ -12,7 +12,7 @@
 //! an explicit caller policy option for the nonstandard stale-SinkTxNG fallback
 //! (see `stale_sink_tx_ng`); no default opt-in is provided.
 //! Errors/cancellation halt without hardware cleanup; only normal completion restores.
-use crate::header;
+use crate::header::{self, vdm};
 use crate::register::{
     self, control0, control1, control3, interrupt, interrupta, interruptb, power, reset, status0,
     status1, switches0, switches1, tx_token,
@@ -959,12 +959,18 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                 && header & header::WITHOUT_ID_REVISION
                     == header::objects(1) | header::data::VENDOR_DEFINED
                 && rdo.is_some_and(|vdm| {
-                    let command = vdm & 0x1f;
-                    vdm & 0x87ff == 0x8000 | command
-                        && matches!(vdm & 0x7800, 0 | 0x2000 | 0x2800)
+                    let command = vdm & vdm::COMMAND;
+                    vdm & (vdm::STRUCTURED | vdm::POSITION_TYPE_COMMAND)
+                        == vdm::STRUCTURED | command
+                        && matches!(
+                            vdm & vdm::VERSION,
+                            vdm::VERSION_1_0 | vdm::VERSION_2_0 | vdm::VERSION_2_1
+                        )
                         && match command {
-                            1 | 2 => vdm >> 16 == 0xff00,
-                            3 => self
+                            vdm::DISCOVER_IDENTITY | vdm::DISCOVER_SVIDS => {
+                                vdm >> 16 == vdm::PD_SID
+                            }
+                            vdm::DISCOVER_MODES => self
                                 .config
                                 .svids
                                 .is_some_and(|store| store.contains((vdm >> 16) as u16)),
@@ -1326,9 +1332,10 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                             .selection
                             .is_some_and(|s| s.target_pps_object() != 0)
                         {
-                            (rdo & 0x7f) as u16 * 50
+                            (rdo & PPS_RDO_CURRENT) as u16 * PPS_RDO_CURRENT_MA
                         } else {
-                            ((rdo >> 10) & 0x3ff) as u16 * 10
+                            ((rdo >> FIXED_RDO_CURRENT_SHIFT) & FIXED_RDO_CURRENT) as u16
+                                * FIXED_RDO_CURRENT_MA
                         }
                     });
                 }
@@ -2374,6 +2381,15 @@ impl pd_discovery::Packet for pd_service::Packet {
 }
 /// The first 32-bit Data Object, which follows the 16-bit Message Header
 /// (sections 6.2.1, 6.4), if the message is long enough to hold one.
+// Request Data Object Operating Current fields: Fixed and Variable RDO bits
+// 19:10 in 10 mA units (USB PD Table 6.19); PPS RDO bits 6:0 in 50 mA units
+// (USB PD Table 6.21).
+const FIXED_RDO_CURRENT_SHIFT: u32 = 10;
+const FIXED_RDO_CURRENT: u32 = 0x3ff;
+const FIXED_RDO_CURRENT_MA: u16 = 10;
+const PPS_RDO_CURRENT: u32 = 0x7f;
+const PPS_RDO_CURRENT_MA: u16 = 50;
+
 fn first_data_object(message: &[u8]) -> Option<u32> {
     let &[_, _, a, b, c, d, ..] = message else {
         return None;
@@ -2385,16 +2401,17 @@ fn first_data_object(message: &[u8]) -> Option<u32> {
 /// inspection returned, 28 = VCONN off and restored, 30/31 = Ready after it.
 fn cable_step(bytes: &[u8], sop: Sop) -> u8 {
     let header = u16::from_le_bytes([bytes[0], bytes[1]]);
-    let command = bytes.get(2).copied().unwrap_or(0) & 0x1f;
+    const GET_MANUFACTURER_INFO: u16 = header::EXTENDED | header::extended::GET_MANUFACTURER_INFO;
+    let command = u32::from(bytes.get(2).copied().unwrap_or(0)) & vdm::COMMAND;
     match (sop, header & header::KIND) {
-        (Sop::Cable, 0x000d) => 11,                 // SOP' Soft_Reset
-        (Sop::Cable, 0x000f) if command == 1 => 13, // Discover Identity
-        (Sop::Cable, 0x000f) if command == 2 => 15, // Discover SVIDs
-        (Sop::Cable, 0x000f) => 17,                 // Discover Modes
-        (Sop::Cable, 0x8006) => 19,                 // Get_Manufacturer_Info
-        (Sop::Cable, 0x0012) => 21,                 // Get_Status
-        (Sop::CableDoublePrime, 0x000d) => 23,      // SOP'' Soft_Reset
-        (Sop::CableDoublePrime, _) => 25,           // SOP'' Get_Status
+        (Sop::Cable, header::control::SOFT_RESET) => 11,
+        (Sop::Cable, header::data::VENDOR_DEFINED) if command == vdm::DISCOVER_IDENTITY => 13,
+        (Sop::Cable, header::data::VENDOR_DEFINED) if command == vdm::DISCOVER_SVIDS => 15,
+        (Sop::Cable, header::data::VENDOR_DEFINED) => 17, // Discover Modes
+        (Sop::Cable, GET_MANUFACTURER_INFO) => 19,
+        (Sop::Cable, header::control::GET_STATUS) => 21,
+        (Sop::CableDoublePrime, header::control::SOFT_RESET) => 23,
+        (Sop::CableDoublePrime, _) => 25, // Get_Status
         _ => 0,
     }
 }

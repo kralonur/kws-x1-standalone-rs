@@ -1,4 +1,5 @@
-//! USB PD Message Header field masks (USB PD §6.2.1, Table 6.2).
+//! USB PD Message Header fields and message types (USB PD §6.2.1, Table 6.2),
+//! and the Structured VDM Header.
 
 /// Message Type, bits 4:0.
 pub const MESSAGE_TYPE: u16 = 0x001f;
@@ -78,4 +79,26 @@ pub mod extended {
         /// Reserved, bit 9: the receiver ignores it.
         pub const RESERVED: u16 = 0x0200;
     }
+}
+
+/// Structured VDM Header fields (USB PD Table 6.33): the first Data Object of
+/// a Vendor_Defined Message.
+pub mod vdm {
+    /// The PD SID, the SVID of the Discover Identity and Discover SVIDs
+    /// commands (bits 31:16).
+    pub const PD_SID: u32 = 0xff00;
+    /// VDM Type, bit 15: Structured VDM.
+    pub const STRUCTURED: u32 = 0x8000;
+    /// Structured VDM Version, Major (bits 14:13) and Minor (bits 12:11).
+    pub const VERSION: u32 = 0x7800;
+    pub const VERSION_1_0: u32 = 0x0000;
+    pub const VERSION_2_0: u32 = 0x2000;
+    pub const VERSION_2_1: u32 = 0x2800;
+    /// Object Position (10:8), Command Type (7:6), Reserved (5) and Command (4:0).
+    pub const POSITION_TYPE_COMMAND: u32 = 0x07ff;
+    /// Command, bits 4:0.
+    pub const COMMAND: u32 = 0x1f;
+    pub const DISCOVER_IDENTITY: u32 = 1;
+    pub const DISCOVER_SVIDS: u32 = 2;
+    pub const DISCOVER_MODES: u32 = 3;
 }
