@@ -17,8 +17,8 @@ struct Spi {
     driver: embassy_hc32::spi::Spi3,
     dc: OutputPin,
     reset: OutputPin,
-    _sck: AlternatePin,
     _mosi: AlternatePin,
+    _sck: AlternatePin,
     _backlight_pin: AlternatePin,
 }
 static DISPLAY: embassy_sync::mutex::Mutex<
@@ -114,6 +114,11 @@ unsafe fn stop_display_dma() -> bool {
     }
 }
 
+/// PB5 and PB6 pin functions: Func40 SPI3_MOSI and Func43 SPI3_SCK in
+/// Func_Grp2 (HC32 Datasheet Tables 2-1 and 2-2).
+const SPI3_MOSI: u8 = 40;
+const SPI3_SCK: u8 = 43;
+
 /// SPI_CR1: SPE | MSTR | TXMDS | SPIMDS, an enabled 3-wire master that only
 /// transmits (RM 27.12.2).
 const SPI_CR1: u32 = 1 << 6 | 1 << 3 | 1 << 1 | 1 << 0;
@@ -138,8 +143,8 @@ pub async unsafe fn init(mut backlight_pin: AlternatePin) -> bool {
         if !stop_display_dma() {
             return false;
         }
-        let sck = AlternatePin::new(Port::B, 5, 0x28, AlternateMode::Digital);
-        let mosi = AlternatePin::new(Port::B, 6, 0x2b, AlternateMode::Digital);
+        let mosi = AlternatePin::new(Port::B, 5, SPI3_MOSI, AlternateMode::Digital);
+        let sck = AlternatePin::new(Port::B, 6, SPI3_SCK, AlternateMode::Digital);
         let dc = OutputPin::new_high_drive(Port::B, 7, Level::High);
         let reset = OutputPin::new_high_drive(Port::A, 15, Level::High);
         // Preserve PH2's TimerA4 mux and legacy INTE=1 (not INVE/inversion).
@@ -158,8 +163,8 @@ pub async unsafe fn init(mut backlight_pin: AlternatePin) -> bool {
             driver,
             dc,
             reset,
-            _sck: sck,
             _mosi: mosi,
+            _sck: sck,
             _backlight_pin: backlight_pin,
         };
         bus.reset.set_low();

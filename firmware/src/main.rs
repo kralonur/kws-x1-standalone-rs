@@ -618,6 +618,11 @@ async fn meter_task() {
     }
 }
 
+/// PB14 and PB15 pin functions: Func48 I2C3_SDA and Func49 I2C3_SCL in
+/// Func_Grp2 (HC32 Datasheet Tables 2-1 and 2-2).
+const I2C3_SDA: u8 = 48;
+const I2C3_SCL: u8 = 49;
+
 /// SRAM wait control, wait protection and check protection registers (RM 8.2).
 const SRAM_WTCR: *mut u16 = 0x4005_0800 as *mut u16;
 const SRAM_WTPR: *mut u16 = 0x4005_0804 as *mut u16;
@@ -718,8 +723,8 @@ async fn main(spawner: Spawner) {
         // I2C3 first (PB14/PB15, FCG1), as in the hybrid startup order. The
         // async master publishes itself; every later use goes through that lock.
         let pins = [
-            AlternatePin::new(Port::B, 15, 0x31, AlternateMode::FunctionOnly),
-            AlternatePin::new(Port::B, 14, 0x30, AlternateMode::FunctionOnly),
+            AlternatePin::new(Port::B, 15, I2C3_SCL, AlternateMode::FunctionOnly),
+            AlternatePin::new(Port::B, 14, I2C3_SDA, AlternateMode::FunctionOnly),
         ];
         if let Ok(bus) = embassy_hc32::i2c::I2c3::new(clocks.pclk[3], 400_000, pins) {
             *I2C3.try_lock().expect("startup owns I2C3") = Some(bus);
