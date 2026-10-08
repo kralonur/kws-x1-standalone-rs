@@ -14,7 +14,9 @@ pub const INT1_THS: u8 = 0x32;
 
 /// CTRL_REG1 ODR = 0101: 100 Hz, HR/normal mode (LIS Tables 29 to 31).
 const ODR_100_HZ: u8 = 0b0101 << 4;
-/// CTRL_REG1 Yen: only the Y axis is enabled (LIS Table 30).
+/// CTRL_REG1 Xen: the X axis drives the INT1 position events (LIS Table 30).
+const XEN: u8 = 1 << 0;
+/// CTRL_REG1 Yen: the Y axis, enabled as before (LIS Table 30).
 const YEN: u8 = 1 << 1;
 /// CTRL_REG3 I1_IA1: interrupt activity 1 on INT1 (LIS Tables 35 and 36).
 const I1_IA1: u8 = 1 << 6;
@@ -35,7 +37,7 @@ pub const POSITION_X_HIGH: u8 = POSITION | XHIE;
 
 /// Start-up writes, in order; INT1_CFG is written last, once the rest is set.
 pub const INIT: [(u8, u8); 5] = [
-    (CTRL_REG1, ODR_100_HZ | YEN),
+    (CTRL_REG1, ODR_100_HZ | XEN | YEN),
     (CTRL_REG4, HR),
     (CTRL_REG3, I1_IA1),
     (INT1_THS, THRESHOLD),
