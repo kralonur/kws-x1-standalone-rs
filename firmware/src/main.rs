@@ -142,9 +142,9 @@ const FAULT: u16 = render::RED;
 static mut FRAMEBUFFER: core::mem::MaybeUninit<Frame> = core::mem::MaybeUninit::uninit();
 /// Incremented by `pulse_task` every [`PULSE_MS`].
 static PULSES: AtomicU32 = AtomicU32::new(0);
-/// Coherent input snapshot: buttons 0..3, main page 4..6, cable detail 8..31.
-/// `button_task` sends it when it changes; the renderer and PD trial read it.
-static BUTTON_STATE: Watch<CriticalSectionRawMutex, u32, 1> = Watch::new();
+/// `button_task` sends the input state when it changes; the renderer and PD
+/// trial read it.
+static BUTTON_STATE: Watch<CriticalSectionRawMutex, button_logic::Input, 1> = Watch::new();
 // One bitmap, outside both observations and async futures.
 static CABLE_SVIDS: embassy_sync::blocking_mutex::Mutex<
     embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
@@ -508,10 +508,10 @@ async fn button_task(inputs: [InputPin; 4]) {
         let raw = inputs.iter().enumerate().fold(0u8, |mask, (index, pin)| {
             mask | (u8::from(pin.is_low()) << index)
         });
-        let snapshot = u32::from(navigation.update(raw)) | (navigation.detail() << 8);
+        let input = navigation.update(raw);
         input_sender.send_if_modified(|current| {
-            let changed = *current != Some(snapshot);
-            *current = Some(snapshot);
+            let changed = *current != Some(input);
+            *current = Some(input);
             changed
         });
         Timer::after_millis(BUTTON_POLL_MS).await;
@@ -568,7 +568,7 @@ unsafe fn render_partner(framebuffer: *mut u16, page: u32) {
 async fn meter_task() {
     let fb = framebuffer();
     let mut input_updates = BUTTON_STATE.anon_receiver();
-    let mut buttons = 0;
+    let mut input = button_logic::Input::default();
     let mut dirty = true;
     // Last raw readings, `u16::MAX` until the first read; a changed reading
     // redraws the meter page.
@@ -596,10 +596,10 @@ async fn meter_task() {
 
         // The input task owns debounce/navigation, independently of this frame.
         if let Some(update) = input_updates.try_changed() {
-            buttons = update;
+            input = update;
             dirty = true;
         }
-        let page = ((buttons >> 4) & 7) as u8;
+        let page = input.page;
 
         // `tilt_task` owns the orientation (it flipped and reconfigured the
         // sensor); this task only follows it for flushing and redraws.
@@ -680,13 +680,13 @@ async fn meter_task() {
                     );
                 }
             } else if page == 3 || page == 4 {
-                let detail = (page == 4).then_some(buttons >> 8);
+                let detail = (page == 4).then_some(input.detail);
                 unsafe {
                     render_pd(fb, last_raw_v, detail);
                 }
             } else if page == 5 {
                 unsafe {
-                    render_partner(fb, buttons >> 8);
+                    render_partner(fb, input.detail);
                 }
             } else {
                 for (i, p) in ports.iter_mut().enumerate() {

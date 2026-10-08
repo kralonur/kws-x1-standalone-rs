@@ -127,19 +127,15 @@ impl pd_spr_phy::GatedBus for SharedBus {
     }
 }
 
-/// Latest input snapshot from `button_task`; 0 (nothing pressed, meter page)
+/// Latest input state from `button_task`; nothing pressed on the meter page
 /// until its first poll.
-fn input_snapshot() -> u32 {
-    crate::BUTTON_STATE.try_get().unwrap_or(0)
-}
-
-fn buttons() -> u8 {
-    input_snapshot() as u8
+fn input() -> firmware_core::buttons::Input {
+    crate::BUTTON_STATE.try_get().unwrap_or_default()
 }
 
 fn detail_page() -> Option<u32> {
-    let snapshot = input_snapshot();
-    ((snapshot >> 4) & 7 == 4).then_some(snapshot >> 8)
+    let input = input();
+    (input.page == 4).then_some(input.detail)
 }
 
 fn control(
@@ -147,12 +143,12 @@ fn control(
     selection: &firmware_core::pd_spr::Selection,
     store: Option<&dyn firmware_core::pd_svids::Store>,
 ) {
-    selection.update_buttons(buttons());
+    selection.update_buttons(input());
     pd::control_cable_selection(observation, selection, detail_page(), store);
 }
 
 fn stop_requested() -> bool {
-    input_snapshot() & 3 == 3
+    input().pressed & 3 == 3
 }
 
 use firmware_core::pd_spr;

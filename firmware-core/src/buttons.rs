@@ -57,6 +57,18 @@ impl Debounced {
 /// press). Publishing the latest snapshot avoids a render backlog losing taps.
 /// Meter, ports, IRQ test, PD, E-marker details, charger info.
 pub const PAGES: u8 = 6;
+
+/// One coherent input state, published by the input task as a unit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Input {
+    /// Stable pressed mask; bit `n` is `PINS[n]`.
+    pub pressed: u8,
+    /// Current page, `0..PAGES`.
+    pub page: u8,
+    /// Sub-page of the E-marker detail and charger info pages.
+    pub detail: u32,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Navigation {
     debounce: Debounced,
@@ -73,12 +85,8 @@ impl Navigation {
         }
     }
 
-    pub fn detail(&self) -> u32 {
-        self.detail
-    }
-
-    /// Feed one sample. Bits 0..3 are stable buttons; bits 4..6 are the page.
-    pub fn update(&mut self, raw_pressed: u8) -> u8 {
+    /// Feed one sample and return the resulting input state.
+    pub fn update(&mut self, raw_pressed: u8) -> Input {
         let before = self.debounce.stable();
         let after = self.debounce.update(raw_pressed, DEFAULT_THRESHOLD);
         let rising = after & !before;
@@ -99,7 +107,11 @@ impl Navigation {
                 self.detail = self.detail.saturating_sub(1);
             }
         }
-        after | (self.page << 4)
+        Input {
+            pressed: after,
+            page: self.page,
+            detail: self.detail,
+        }
     }
 }
 

@@ -111,13 +111,13 @@ impl Selection {
         self.mode_cursor.set(index);
     }
     /// PB2 previews, PB10 confirms/holds. Screen and hold timing stay board-local.
-    pub fn update_buttons(&self, snapshot: u8) {
-        let buttons = snapshot & 15;
+    pub fn update_buttons(&self, input: crate::buttons::Input) {
+        let buttons = input.pressed;
         let old = self.buttons.replace(buttons);
         let rising = buttons & !old;
         let falling = !buttons & old;
         let now = self.now_ms();
-        if snapshot >> 4 != 3
+        if input.page != 3
             || buttons & 3 == 3
             || self.has_pending()
             || self.request_in_flight()
