@@ -577,24 +577,23 @@ fn sniff_lines(sniff: SniffObservation) -> [[u8; 24]; 8] {
     rows
 }
 
-/// Passthrough: the latest advertised Source_Capabilities, after `lines`.
+/// Passthrough: the latest advertised Source_Capabilities, after `lines`,
+/// once one was captured. The charger sends it when the phone attaches, and
+/// the meter, powered from that same VBUS, is often still booting then.
 pub fn caps_lines(observation: Observation) -> Option<[[u8; 24]; 8]> {
-    observation.sniff.map(sniff_caps_lines)
+    observation
+        .sniff
+        .filter(|sniff| sniff.caps_count > 0)
+        .map(sniff_caps_lines)
 }
 
 fn sniff_caps_lines(sniff: SniffObservation) -> [[u8; 24]; 8] {
     use firmware_core::pd_sniff::{Row, describe_pdo};
     let mut rows = [[b' '; 24]; 8];
     let mut head = Row::new();
-    head.text(b"SNIFF CAPS N")
-        .decimal(sniff.caps_count as u32)
-        .text(b" GCRC:")
+    head.text(b"CHARGER OFFER  GCRC:")
         .decimal(sniff.log.goodcrc);
     rows[0] = head.bytes;
-    if sniff.caps_count == 0 {
-        put(&mut rows[1], b"NO SOURCE CAPS SEEN");
-        put(&mut rows[2], b"REPLUG SINK TO CAPTURE");
-    }
     for (i, &raw) in sniff.caps[..sniff.caps_count as usize].iter().enumerate() {
         rows[i + 1] = describe_pdo(i, raw);
     }
