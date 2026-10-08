@@ -5,6 +5,9 @@ use core::sync::atomic::Ordering;
 
 use crate::{BUTTON_GAP_MAX_MS, FRAME_MS, ina226};
 
+/// One full RGB565 frame in memory order.
+pub type Frame = [u16; firmware_core::panel::PIXELS];
+
 const CYAN: u16 = 0xff07;
 
 // 3 columns x 5 rows bitmap font (same glyphs as the earlier application).
@@ -57,7 +60,7 @@ pub fn glyph(c: u8) -> u16 {
 
 #[inline(never)]
 pub unsafe fn clear_screen(framebuffer: *mut u16) {
-    for offset in 0..32400 {
+    for offset in 0..firmware_core::panel::PIXELS {
         unsafe {
             framebuffer.add(offset).write_volatile(CYAN);
         }

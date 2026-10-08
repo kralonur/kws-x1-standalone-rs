@@ -3,7 +3,7 @@
 use super::{CableStatus, Observation, Phase, hex, paint_lines, put, sniff_caps_lines};
 
 pub fn paint_cable(
-    framebuffer: &mut [u16; 32400],
+    framebuffer: &mut crate::render::Frame,
     observation: Observation,
     page: u32,
     svid: Option<u16>,

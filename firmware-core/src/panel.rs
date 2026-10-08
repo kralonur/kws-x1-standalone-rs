@@ -10,6 +10,8 @@
 
 pub const WIDTH: u16 = 240;
 pub const HEIGHT: u16 = 135;
+/// Pixels in one full frame.
+pub const PIXELS: usize = WIDTH as usize * HEIGHT as usize;
 /// Column offset applied by the window setter (original default).
 pub const X_OFFSET: u16 = 40;
 /// Row offset applied by the window setter (original default).

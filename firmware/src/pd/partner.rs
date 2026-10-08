@@ -260,7 +260,7 @@ fn status_rows(
 
 /// Paint the charger page (`partner_lines`).
 pub fn paint_partner(
-    framebuffer: &mut [u16; 32400],
+    framebuffer: &mut crate::render::Frame,
     observation: Observation,
     page: u32,
     glyph: fn(u8) -> u16,

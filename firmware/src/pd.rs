@@ -810,11 +810,15 @@ fn decimal2(row: &mut [u8; 24], start: usize, milli: u16) {
 
 /// Paint compact 2x glyphs into the caller-owned, already-cleared meter frame.
 /// Eight rows fit the 135px panel; the original meter font remains unchanged.
-pub fn paint(framebuffer: &mut [u16; 32400], observation: Observation, glyph: fn(u8) -> u16) {
+pub fn paint(
+    framebuffer: &mut crate::render::Frame,
+    observation: Observation,
+    glyph: fn(u8) -> u16,
+) {
     paint_lines(framebuffer, lines(observation), glyph);
 }
 
-fn paint_lines(framebuffer: &mut [u16; 32400], rows: [[u8; 24]; 8], glyph: fn(u8) -> u16) {
+fn paint_lines(framebuffer: &mut crate::render::Frame, rows: [[u8; 24]; 8], glyph: fn(u8) -> u16) {
     for (line_index, line) in rows.iter().enumerate() {
         for (char_index, &c) in line.iter().enumerate() {
             // Compact diagnostic captions need N; do not alter the meter font.

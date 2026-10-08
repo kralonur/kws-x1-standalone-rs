@@ -41,7 +41,7 @@ use firmware_core::buttons as button_logic;
 use hc32f460_pac::interrupt;
 #[cfg(not(any(feature = "pd-boot-diagnostic", feature = "cable-log")))]
 use panic_halt as _;
-use render::{Counters, clear_screen, glyph, render_irq_test, render_measure, render_ports};
+use render::{Counters, Frame, clear_screen, glyph, render_irq_test, render_measure, render_ports};
 
 /// Return addresses the walk accepts: the application image after its initial
 /// stack pointer word, up to the end of the flash tool's application erase
@@ -135,8 +135,8 @@ const FAULT: u16 = 0xf800;
 /// Not zeroed by the runtime: `main` zeroes it before any task reads it.
 // SAFETY: memory.x reserves SRAM2 for this frame; startup initializes it before use.
 #[unsafe(link_section = ".sram2.framebuffer")]
-static mut FRAMEBUFFER: core::mem::MaybeUninit<[u16; 32400]> = core::mem::MaybeUninit::uninit();
-/// Incremented by `pulse_task` every 500 ms.
+static mut FRAMEBUFFER: core::mem::MaybeUninit<Frame> = core::mem::MaybeUninit::uninit();
+/// Incremented by `pulse_task` every [`PULSE_MS`].
 static PULSES: AtomicU32 = AtomicU32::new(0);
 /// Coherent input snapshot: buttons 0..3, main page 4..6, cable detail 8..31.
 static BUTTON_STATE: AtomicU32 = AtomicU32::new(0);
@@ -379,10 +379,22 @@ const fn line(n: u8) -> embassy_hc32::intc::Line {
     }
 }
 
+/// Heartbeat period in milliseconds; the meter page shows the pulse count.
+const PULSE_MS: u64 = 500;
+/// Button sampling period in milliseconds; debouncing counts these samples.
+const BUTTON_POLL_MS: u64 = 10;
+/// Meter task tick in milliseconds: inputs and the screen are checked this often.
+const METER_TICK_MS: u64 = 10;
+/// INA226 read pace; a deadline, so a slow frame never queues extra reads.
+const METER_READ_PERIOD: embassy_time::Duration = embassy_time::Duration::from_millis(100);
+/// I2C3 clock in Hz: Fast-mode 400 kHz, the LIS3DH maximum (LIS Table 8);
+/// the FUSB302B (DS Table 14) and INA226 accept faster clocks.
+const I2C3_HZ: u32 = 400_000;
+
 #[embassy_executor::task]
 async fn pulse_task() {
     loop {
-        Timer::after_millis(500).await;
+        Timer::after_millis(PULSE_MS).await;
         PULSES.fetch_add(1, Ordering::Relaxed);
     }
 }
@@ -461,7 +473,7 @@ async fn button_task(inputs: [InputPin; 4]) {
         });
         let snapshot = u32::from(navigation.update(raw)) | (navigation.detail() << 8);
         BUTTON_STATE.store(snapshot, Ordering::Relaxed);
-        Timer::after_millis(10).await;
+        Timer::after_millis(BUTTON_POLL_MS).await;
     }
 }
 #[inline(never)]
@@ -496,14 +508,14 @@ unsafe fn render_pd(framebuffer: *mut u16, raw_vbus: u16, cable_detail: Option<u
             let svid = pd::cable_svid_index(observation, page)
                 .and_then(|index| firmware_core::pd_svids::Store::at(&CABLE_SVID_STORE, index));
             pd::paint_cable(
-                &mut *(framebuffer as *mut [u16; 32400]),
+                &mut *(framebuffer as *mut Frame),
                 observation,
                 page,
                 svid,
                 glyph,
             );
         } else {
-            pd::paint(&mut *(framebuffer as *mut [u16; 32400]), observation, glyph);
+            pd::paint(&mut *(framebuffer as *mut Frame), observation, glyph);
         }
     }
 }
@@ -513,12 +525,7 @@ unsafe fn render_partner(framebuffer: *mut u16, page: u32) {
     let observation = PD_OBSERVATION.lock(|cell| *cell.borrow());
     unsafe {
         clear_screen(framebuffer);
-        pd::paint_partner(
-            &mut *(framebuffer as *mut [u16; 32400]),
-            observation,
-            page,
-            glyph,
-        );
+        pd::paint_partner(&mut *(framebuffer as *mut Frame), observation, page, glyph);
     }
 }
 
@@ -527,14 +534,16 @@ async fn meter_task() {
     let fb = framebuffer();
     let mut last_buttons = u32::MAX;
     let mut dirty = true;
-    let mut last_raw_v: u16 = 0xffff;
-    let mut last_raw_i: u16 = 0xffff;
+    // Last raw readings, `u16::MAX` until the first read; a changed reading
+    // redraws the meter page.
+    let mut last_raw_v: u16 = u16::MAX;
+    let mut last_raw_i: u16 = u16::MAX;
     // Reads are paced by an absolute deadline, never by subtracting from an
     // `Instant` (embassy-time panics on underflow, e.g. `Instant::now() - 200ms`
     // right after boot). The first read is due one period late on purpose: the
     // first frame must be drawn *before* any bus traffic, so a bus problem can
     // never leave the display uninitialized.
-    let mut next_read = Instant::now() + embassy_time::Duration::from_millis(100);
+    let mut next_read = Instant::now() + METER_READ_PERIOD;
     let mut current_rotation: u8 = 0;
     let mut last_secs = u32::MAX;
     let mut last_pulse: u16 = u16::MAX;
@@ -570,7 +579,7 @@ async fn meter_task() {
 
         let mut changed = false;
         if (page == 0 || page == 3) && now >= next_read {
-            next_read = now + embassy_time::Duration::from_millis(100);
+            next_read = now + METER_READ_PERIOD;
             if let Some(v) = read_meter(ina226::BUS_VOLTAGE).await {
                 if v != last_raw_v {
                     last_raw_v = v;
@@ -658,7 +667,7 @@ async fn meter_task() {
             FRAME_MS.store(frame_start.elapsed().as_millis() as u32, Ordering::Relaxed);
         }
 
-        Timer::after_millis(10).await;
+        Timer::after_millis(METER_TICK_MS).await;
     }
 }
 
@@ -713,7 +722,7 @@ async fn main(spawner: Spawner) {
     // SRAM2 holds only the frame buffer; write all of it before any read
     // (SRAM parity, RM section 8: uninitialized words must not be read).
     unsafe {
-        core::ptr::write_bytes(framebuffer(), 0, 32400);
+        core::ptr::write_bytes(framebuffer(), 0, firmware_core::panel::PIXELS);
     }
     #[cfg(any(feature = "pd-boot-diagnostic", feature = "cable-log"))]
     flash_log::start();
@@ -770,7 +779,7 @@ async fn main(spawner: Spawner) {
             AlternatePin::new(Port::B, 15, I2C3_SCL, AlternateMode::FunctionOnly),
             AlternatePin::new(Port::B, 14, I2C3_SDA, AlternateMode::FunctionOnly),
         ];
-        if let Ok(bus) = embassy_hc32::i2c::I2c3::new(clocks.pclk[3], 400_000, pins) {
+        if let Ok(bus) = embassy_hc32::i2c::I2c3::new(clocks.pclk[3], I2C3_HZ, pins) {
             *I2C3.try_lock().expect("startup owns I2C3") = Some(bus);
         } else {
             // Keep running: the meter screen stays alive without measurements,

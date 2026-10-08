@@ -198,7 +198,7 @@ const ROWS: [u8; 4] = span(panel::Y_OFFSET, panel::HEIGHT);
 const ROWS_INVERTED: [u8; 4] = span(panel::Y_OFFSET_INVERTED, panel::HEIGHT);
 
 /// # Safety
-/// `frame` must point to 32400 readable RGB565 wire-swapped halfwords. Callback
+/// `frame` must point to [`panel::PIXELS`] readable RGB565 wire-swapped halfwords. Callback
 /// may sample inputs/update model but must not modify the frame during transfer.
 async unsafe fn stream(
     bus: &mut impl Bus,
