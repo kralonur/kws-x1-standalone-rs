@@ -1,7 +1,7 @@
 //! `pd-boot-diagnostic` only (`docs/SAFETY.md`). A restart loses the
 //! screen and RAM (RSTF0 = PORF), so PD progress is appended to flash and the
 //! next boot shows the previous boot's last entry. Restricted to
-//! the stock settings/statistics area, with these limits:
+//! the original settings/statistics area, with these limits:
 //! - only a sector of `SECTORS` that is entirely blank, or already claimed by
 //!   this log; the last sector (0x7e000) is never used, it holds the FSWP
 //!   boot-swap word at 0x7ffdc (HC32F460 RM section 7.9.8);

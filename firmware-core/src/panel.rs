@@ -1,10 +1,8 @@
 //! Panel geometry, initialization sequence, and pixel framing (pure logic).
 //!
 //! The command sequence, the 240x135 geometry, the window offsets, and the memory
-//! access control value are transcribed from the stock image: the sequence is
-//! sent by `0x19e08`, the window setter
-//! `0x1a2ac` adds the offsets from `0x1fff8314+5`/`+6`, and `0x1a27c` selects the
-//! memory access control value. Stock's defaults in the decoded startup data are
+//! access control value are transcribed from the original firmware: its window
+//! setter adds the X and Y offsets from its startup data, whose defaults are
 //! X offset 40, Y offset 53, and MADCTL `0x60`.
 //!
 //! `ST` is the ST7789V controller data sheet; the README defines the cited revision.
@@ -12,11 +10,11 @@
 
 pub const WIDTH: u16 = 240;
 pub const HEIGHT: u16 = 135;
-/// Column offset applied by the window setter (stock default).
+/// Column offset applied by the window setter (original default).
 pub const X_OFFSET: u16 = 40;
-/// Row offset applied by the window setter (stock default).
+/// Row offset applied by the window setter (original default).
 pub const Y_OFFSET: u16 = 53;
-/// Memory access control value stock sends with command `0x36`: MX | MV,
+/// Memory access control value the original firmware sends with command `0x36`: MX | MV,
 /// normal landscape (ST 9.1.28).
 pub const MADCTL: u8 = 0x60;
 /// MY | MV: the 180-degree inverted landscape (ST 9.1.28).
@@ -26,7 +24,7 @@ pub const CONTROLLER_ROWS: u16 = 240;
 /// Row offset when inverted: MY mirrors the window inside the controller rows.
 pub const Y_OFFSET_INVERTED: u16 = CONTROLLER_ROWS - HEIGHT - Y_OFFSET;
 
-/// Stock panel initialization: command byte, then its data bytes.
+/// Original panel initialization: command byte, then its data bytes.
 pub const INIT: &[(u8, &[u8])] = &[
     (CMD_SLEEP_OUT, &[]),
     (CMD_PIXEL_FORMAT, &[0x05]),

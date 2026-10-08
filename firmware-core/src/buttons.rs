@@ -1,13 +1,13 @@
 //! Button sampling and debouncing (pure logic).
 //!
-//! Stock configures four button inputs as active-low with pull-ups: PB2, PB10,
-//! PH0 and PC14 (`0x19b58`, readers `0x19a88`, `0x19b10`, `0x19acc`, `0x19a40`,
-//! each treating a low level as pressed). Physical labels are still unknown, so
-//! this module reports pin-level states rather than names.
+//! The original firmware configures four button inputs as active-low with
+//! pull-ups: PB2, PB10, PH0 and PC14, each treating a low level as pressed.
+//! Physical labels are still unknown, so this module reports pin-level states
+//! rather than names.
 #![allow(dead_code)]
 
 pub const COUNT: usize = 4;
-/// Pin identifiers, matching the stock configuration.
+/// Pin identifiers, matching the original configuration.
 pub const PINS: [&str; COUNT] = ["PB2", "PB10", "PH0", "PC14"];
 
 /// Number of consecutive identical samples required to change a stable state.

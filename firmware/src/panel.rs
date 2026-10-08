@@ -147,7 +147,7 @@ pub async unsafe fn init(mut backlight_pin: AlternatePin) -> bool {
         let sck = AlternatePin::new(Port::B, 6, SPI3_SCK, AlternateMode::Digital);
         let dc = OutputPin::new_high_drive(Port::B, 7, Level::High);
         let reset = OutputPin::new_high_drive(Port::A, 15, Level::High);
-        // Preserve PH2's TimerA4 mux and legacy INTE=1 (not INVE/inversion).
+        // Preserve PH2's TimerA4 mux and inherited INTE=1 (not INVE/inversion).
         backlight_pin.configure_high_drive_output(Level::Low, true);
         let Ok(driver) = embassy_hc32::spi::Spi3::new(
             hc32f460_pac::Spi3::steal(),

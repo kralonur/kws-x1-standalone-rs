@@ -1,4 +1,4 @@
-//! X1 board policy and INA226 provider for the reusable FUSB302 PHY.
+//! Board policy and INA226 provider for the reusable FUSB302 PHY.
 //! All wire authorization remains in the shared PHY and portable policy gates.
 use core::sync::atomic::{AtomicBool, Ordering};
 use embedded_hal_async::i2c::I2c;

@@ -6,8 +6,8 @@ MEMORY
    * Bootloader below 0x10000 and settings at [0x72000, 0x80000) are untouched.
    */
   FLASH : ORIGIN = 0x00010000, LENGTH = 0x24000
-  /* SRAMH (32 KiB) upper half + SRAM1 (64 KiB). The origin leaves the stock
-   * clock bookkeeping words at 0x1FFF82A4/0x1FFF8C54 outside this image's
+  /* SRAMH (32 KiB) upper half + SRAM1 (64 KiB). The origin leaves the original
+   * firmware's clock bookkeeping words at 0x1FFF82A4/0x1FFF8C54 outside this image's
    * .bss, and the length stops 256 bytes short of SRAM1's exclusive end so the
    * initial stack pointer is strictly inside SRAM1. The 64.8 KiB frame buffer
    * plus stack fit comfortably; SRAM3 is left untouched.

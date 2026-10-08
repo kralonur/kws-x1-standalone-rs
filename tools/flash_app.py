@@ -50,11 +50,11 @@ DENY_SHA256 = {
     "d26f4ba7f66dc0217b4a731e5a7034b3b834e165cd2a01f2182366835e82b60c":
         "implausible voltage and resets",
     "294b268130a6192cd898544fc14aedd78d0b0f69a3b5067830bd8839136284a8":
-        "legacy patched image, not built here",
+        "earlier patched image, not built here",
 }
 PROTECTED = (
     (0x00000, 0x10000, "bootloader and sector 0 (ICG/security configuration)"),
-    (APP_ERASE_CEILING, 0x80000, "everything above the application erase envelope, including stock settings"),
+    (APP_ERASE_CEILING, 0x80000, "everything above the application erase envelope, including original settings"),
 )
 
 HEADER = bytes([0x05, 0x11, 0x09])
@@ -225,7 +225,7 @@ def query_info(device):
 def build_plan(image_path, confirm_sha256):
     """Validate the confirmed bytes before device discovery or I/O.
 
-    Only this firmware's vector layout is accepted; no stock-profile bypass.
+    Only this firmware's vector layout is accepted; no original-profile bypass.
     The checked payload is retained in the plan, avoiding a second file read.
     """
     if not image_path.is_file():

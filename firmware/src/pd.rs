@@ -1,4 +1,4 @@
-//! X1 observation adapter and renderer; controller I/O/telemetry live in fusb302-pd.
+//! Board observation adapter and renderer; controller I/O/telemetry live in fusb302-pd.
 mod cable;
 mod partner;
 

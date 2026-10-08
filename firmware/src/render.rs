@@ -7,7 +7,7 @@ use crate::{BUTTON_GAP_MAX_MS, FRAME_MS, ina226};
 
 const CYAN: u16 = 0xff07;
 
-// 3 columns x 5 rows bitmap font (same glyphs as the hybrid application).
+// 3 columns x 5 rows bitmap font (same glyphs as the earlier application).
 pub fn glyph(c: u8) -> u16 {
     match c {
         b'0' => 0b111_101_101_101_111,

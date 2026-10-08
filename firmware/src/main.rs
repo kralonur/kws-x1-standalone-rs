@@ -701,9 +701,9 @@ async fn main(spawner: Spawner) {
             InputPin::new_pull_up(Port::C, 14),
         ];
         tilt_input = InputPin::new_pull_up(Port::B, 13);
-        // Stock 0x15f8c: PC13 input + pull-up, no INTE. Read-only slider sense
-        // (stock 0x206e0 shows "Switch To Sink Mode" while it reads high;
-        // observed low with the slider ON).
+        // PC13 input + pull-up, no INTE, as the original firmware configures it.
+        // Read-only slider sense (the original shows "Switch To Sink Mode" while
+        // it reads high; observed low with the slider ON).
         pc13_input = InputPin::new_pull_up(Port::C, 13);
 
         // The INTC is not reset by a jump into this image, so a bootloader or an
@@ -711,7 +711,7 @@ async fn main(spawner: Spawner) {
         // those lines. Start from a clean slate: this application owns the INTC
         // and installs every handler it uses.
         embassy_hc32::intc::clear_routes();
-        // Stock config-field audit: PB12, not nearby PC13, supplies EIRQ12.
+        // PB12, not nearby PC13, supplies EIRQ12 (original firmware configuration).
         pd_input = embassy_hc32::exti::ExtiInput::from_input(
             InputPin::new_pull_up(Port::B, 12),
             embassy_hc32::intc::EirqTrigger::Falling,
@@ -720,7 +720,7 @@ async fn main(spawner: Spawner) {
             IRQ_REG_FAILURES.fetch_add(1, Ordering::Relaxed);
         }
 
-        // I2C3 first (PB14/PB15, FCG1), as in the hybrid startup order. The
+        // I2C3 first (PB14/PB15, FCG1), as in the original startup order. The
         // async master publishes itself; every later use goes through that lock.
         let pins = [
             AlternatePin::new(Port::B, 15, I2C3_SCL, AlternateMode::FunctionOnly),

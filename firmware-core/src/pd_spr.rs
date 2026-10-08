@@ -1,4 +1,4 @@
-//! X1 limits and button adapter for the reusable PD session engine.
+//! Board limits and button adapter for the reusable PD session engine.
 use core::cell::Cell;
 use pd_protocol::pd_spr as shared;
 use usbpd::protocol_layer::message::data::{request, source_capabilities};
@@ -6,7 +6,7 @@ use usbpd::protocol_layer::message::data::{request, source_capabilities};
 pub use shared::{
     Contract, Error, MaintainedTrace, Mode, PPS_MIN_MA, PpsStatus, ReviewedRdo, Timer,
 };
-// Preserve the existing X1 scheduling: delays are policy, not wire timers.
+// Preserve the existing board scheduling: delays are policy, not wire timers.
 pub const PPS_STATUS_SETTLE_MS: u64 = 300;
 pub const QUERY_SETTLE_MS: u64 = 500;
 pub const STATUS_MIN_INTERVAL_MS: u64 = 200;
@@ -110,7 +110,7 @@ impl Selection {
     pub fn set_mode_cursor(&self, index: Option<u16>) {
         self.mode_cursor.set(index);
     }
-    /// PB2 previews, PB10 confirms/holds. Screen and hold timing stay X1-local.
+    /// PB2 previews, PB10 confirms/holds. Screen and hold timing stay board-local.
     pub fn update_buttons(&self, snapshot: u8) {
         let buttons = snapshot & 15;
         let old = self.buttons.replace(buttons);

@@ -1,6 +1,6 @@
-//! KWS-X1 application image trailer and container framing.
+//! Application image trailer and container framing.
 //!
-//! The byte layout mirrors the preserved stock container exactly:
+//! The byte layout mirrors the preserved original container exactly:
 //!
 //! ```text
 //! container := 0x00 0x0a ++ payload
@@ -8,13 +8,13 @@
 //! checksum  := big-endian sum of content bytes, modulo 2^32
 //! ```
 //!
-//! Bootloader checksum necessity has not been isolated experimentally. The stock
+//! Bootloader checksum necessity has not been isolated experimentally. The original
 //! application never reads it; error 245 is handled during erase/preparation, not
-//! final verification. This crate reproduces the stock layout instead of inventing one.
+//! final verification. This crate reproduces the original layout instead of inventing one.
 
-/// Stock content region plus checksum and trailer (`0x33420`).
+/// Original content region plus checksum and trailer (`0x33420`).
 pub const PAYLOAD_LEN: usize = 0x33420;
-/// Stock length rounded up to a 64-byte chunk multiple, zero padded.
+/// Original length rounded up to a 64-byte chunk multiple, zero padded.
 /// This is a conservative tooling policy, not an acceptance guarantee or a proven
 /// universal bootloader requirement; see `docs/SAFETY.md`.
 pub const EXTENDED_PAYLOAD_LEN: usize = PAYLOAD_LEN.div_ceil(64) * 64;
@@ -50,7 +50,7 @@ pub fn additive_checksum(content: &[u8]) -> u32 {
 
 /// Sector count the host flasher derives from a payload length.
 ///
-/// This mirrors `kwsx1_flasher.py` (`chunks // 128 + 1`, 64-byte HID chunks) and is
+/// This mirrors the host flasher (`chunks // 128 + 1`, 64-byte HID chunks) and is
 /// a host-side convention, not a documented bootloader rule.
 pub fn erase_sectors_for(payload_len: usize) -> u32 {
     let chunks = payload_len.div_ceil(64);
@@ -78,7 +78,7 @@ pub fn build_payload(content: &[u8], out: &mut [u8]) -> Result<(), ImageError> {
     let checksum = additive_checksum(&out[..CHECKSUM_OFFSET]);
     out[CHECKSUM_OFFSET..CHECKSUM_OFFSET + 4].copy_from_slice(&checksum.to_be_bytes());
     out[MARKER_OFFSET] = MARKER;
-    // Marker, fifteen zero bytes, filler to the stock length, then the zero
+    // Marker, fifteen zero bytes, filler to the original length, then the zero
     // alignment bytes required by tooling policy.
     out[MARKER_OFFSET + 1..PAYLOAD_LEN].fill(0);
     out[PAYLOAD_LEN..].fill(0);
@@ -95,7 +95,7 @@ pub fn build_container(content: &[u8], out: &mut [u8]) -> Result<(), ImageError>
     build_payload(content, payload)
 }
 
-/// Validate a payload built by [`build_payload`], or the preserved stock payload.
+/// Validate a payload built by [`build_payload`], or the preserved original payload.
 pub fn verify_payload(payload: &[u8]) -> Result<(), ImageError> {
     if payload.len() < PAYLOAD_LEN {
         return Err(ImageError::WrongBufferLength { len: payload.len() });

@@ -13,12 +13,12 @@ use crate::{
 
 /// Slider-selected boot: one persistent fixed-target SPR session, or passive.
 ///
-/// PC13 (stock slider sense, latched once at boot like stock `0x15ee2`) is read
+/// PC13 (slider sense, latched once at boot as the original firmware does) is read
 /// before any PHY access. Low (sink mode): the session starts at boot, inside
 /// the source's Source_Capabilities window (nCapsCount, USB PD §7.32.6); a
 /// later start must not use the optional SinkWaitCapTimer Hard Reset (§7.31.3.2).
 /// High (passthrough): read-only snapshot plus one verified SWITCHES0 = 0x00
-/// write (FUSB302 Rd off, as stock), then the receive-only sniffer
+/// write (FUSB302 Rd off, as the original firmware does), then the receive-only sniffer
 /// (`docs/SAFETY.md`): never GoodCRC, TX or reset signaling.
 /// PHY interrupts remain globally masked. Errors halt without reset, retry or
 /// cleanup.

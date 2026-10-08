@@ -7,7 +7,7 @@ use kws_x1_core::latch::Latch;
 
 use crate::{ina226, lis3dh};
 
-// Board-owned shared bus: platform drivers never depend on X1 task ownership.
+// Board-owned shared bus: platform drivers never depend on application task ownership.
 pub static I2C3: embassy_sync::mutex::Mutex<
     embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
     Option<embassy_hc32::i2c::I2c3>,

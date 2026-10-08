@@ -1,4 +1,4 @@
-//! X1 power-on baseline and factories for the reusable FUSB startup adapters.
+//! Board power-on baseline and factories for the reusable FUSB startup adapters.
 #[allow(unused_imports)]
 pub use fusb302_pd::{config::Error, startup::Report};
 
@@ -17,7 +17,7 @@ pub(crate) const EXPECTED: [u8; 11] = [
     0x00, // MASKA
     0x00, // MASKB
 ];
-/// Stock boot releases both controller Rd terminations (0x15ea0..0x15f16).
+/// The original firmware's boot releases both controller Rd terminations.
 pub(crate) const PASSIVE_SWITCHES0: u8 = 0x00;
 const fn passive_expected() -> [u8; 11] {
     let mut values = EXPECTED;
