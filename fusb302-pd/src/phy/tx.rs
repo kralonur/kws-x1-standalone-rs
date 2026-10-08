@@ -1,13 +1,11 @@
 //! Identity and acknowledgement evidence owned by one in-flight transmission.
+use crate::header;
 use pd_protocol::pd_rx::Sop;
 
 // USB PD message header: MessageID occupies bits 11:9.
 const MESSAGE_ID_SHIFT: u32 = 9;
 // USB PD MessageID is a three-bit field, wrapping through values zero to seven.
 const MESSAGE_ID_MASK: u16 = 7;
-// USB PD header: extended bit, data-object count and message-type fields.
-// Masking these distinguishes control messages without considering roles/ID.
-const CONTROL_HEADER_MASK: u16 = 0xf01f;
 // USB PD control-message type encoding for GoodCRC.
 const GOODCRC_TYPE: u16 = 1;
 // USB PD control-message type encoding for Soft_Reset.
@@ -27,7 +25,7 @@ impl PendingTx {
         Self {
             message_id: Self::header_id(header),
             sop,
-            soft_reset: header & CONTROL_HEADER_MASK == SOFT_RESET_TYPE,
+            soft_reset: header & header::KIND_COUNT == SOFT_RESET_TYPE,
             retry_failed: false,
             goodcrc_at: None,
         }
@@ -49,7 +47,7 @@ impl PendingTx {
         header: u16,
         now_ms: impl FnOnce() -> u64,
     ) -> bool {
-        if header & CONTROL_HEADER_MASK != GOODCRC_TYPE
+        if header & header::KIND_COUNT != GOODCRC_TYPE
             || sop != self.sop
             || Self::header_id(header) != self.message_id
         {

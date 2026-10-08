@@ -12,9 +12,9 @@
 //! an explicit caller policy option for the nonstandard stale-SinkTxNG fallback
 //! (see `stale_sink_tx_ng`); no default opt-in is provided.
 //! Errors/cancellation halt without hardware cleanup; only normal completion restores.
-use crate::register;
 use crate::snapshot::{self, Snapshot};
 use crate::{config as pd_cc, observation as pd, service as pd_service};
+use crate::{header, register};
 use embedded_hal_async::{delay::DelayNs, i2c::I2c};
 use pd_cc::ConfigRegister;
 use pd_protocol::pd_rx::Sop;
@@ -699,11 +699,11 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                     )
             );
             if (!cable_allowed && frame.sop() != Sop::Partner)
-                || (cable_allowed && frame.header() & 0x100 == 0)
+                || (cable_allowed && frame.header() & header::POWER_ROLE == 0)
             {
                 return Err(Error::Peer);
             }
-            if frame.header() & 0xf01f == 1 {
+            if frame.header() & header::KIND_COUNT == 1 {
                 let acknowledged = self.pending_tx.as_mut().is_some_and(|tx| {
                     tx.acknowledge(frame.sop(), frame.header(), || self.clock.now_ms())
                 });
@@ -719,7 +719,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                 return Ok(None);
             }
             if frame.sop() == Sop::Partner
-                && frame.header() & 0xf01f == 13
+                && frame.header() & header::KIND_COUNT == 13
                 && self.softrst_flag_at.take().is_none()
             {
                 self.softrst_frame_at = Some(self.polls);
@@ -805,7 +805,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             && pd_protocol::pd_spr::sink_capabilities::<P::Limits>(self.tx_revision == 2)
                 .is_some_and(|(objects, count)| {
                     bytes.len() == 2 + 4 * count
-                        && header & 0xf1ff
+                        && header & header::WITHOUT_ID
                             == (count as u16) << 12 | u16::from(self.tx_revision) << 6 | 4
                         && bytes[2..]
                             .as_chunks::<4>()
@@ -820,7 +820,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             && self.skedb_reply
             && self.tx_revision == 2
             && bytes.len() == 30
-            && header & 0xf1ff == 0xf08f
+            && header & header::WITHOUT_ID == 0xf08f
             && bytes[2..4] == [0x18, 0x80]
             && pd_protocol::pd_spr::sink_capabilities_extended::<P::Limits>()
                 .is_some_and(|block| bytes[4..28] == block)
@@ -833,16 +833,17 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             && self.request.is_none()
             && self.cable_phase == CablePhase::Idle
             && self.config.selection.is_none_or(|s| !s.request_in_flight())
-            && header & 0xf1ff == 0xb082
+            && header & header::WITHOUT_ID == 0xb082
             && bytes[2..4] == [7, 0x80]
             && bytes[11..] == [0, 0, 0]
             && self.status_reply.is_some_and(|block| {
                 bytes[4..11] == block && pd_protocol::pd_spr::sink_status_valid(block)
             });
-        let unsupported_reply = bytes.len() == 2 && self.unsupported_reply == Some(header & 0xf1ff);
+        let unsupported_reply =
+            bytes.len() == 2 && self.unsupported_reply == Some(header & header::WITHOUT_ID);
         let revision_reply = sop == Sop::Partner
             && self.revision_reply
-            && header & 0xf1ff == 0x100c | (u16::from(self.tx_revision) << 6)
+            && header & header::WITHOUT_ID == 0x100c | (u16::from(self.tx_revision) << 6)
             && rdo == Some(pd_protocol::pd_spr::REVISION_DATA_OBJECT);
         let reset_accept = sop == Sop::Partner
             && self.reset == Some(ResetStep::AcceptPartner)
@@ -871,8 +872,10 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             && self.trace().cable_report.is_some_and(|r| {
                 r.status == usbpd_traits::CableStatus::Identity && r.revision == 2
             })
-            && (header & 0xf13f == 0x9006 && bytes.len() == 6 && bytes[2..] == [2, 0x80, 0, 0]
-                || header & 0xf13f == 0x0012
+            && (header & header::WITHOUT_ID_REVISION == 0x9006
+                && bytes.len() == 6
+                && bytes[2..] == [2, 0x80, 0, 0]
+                || header & header::WITHOUT_ID_REVISION == 0x0012
                     && bytes.len() == 2
                     && self
                         .trace()
@@ -898,7 +901,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             || cable_optional
             || (sop == Sop::Cable
                 && self.cable_phase == CablePhase::Identity
-                && header & 0xf13f == 0x100f
+                && header & header::WITHOUT_ID_REVISION == 0x100f
                 && rdo.is_some_and(|vdm| {
                     let command = vdm & 0x1f;
                     vdm & 0x87ff == 0x8000 | command
@@ -919,7 +922,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         // established PPS contract that no Request or reset is changing.
         let pps_status_query = sop == Sop::Partner
             && bytes.len() == 2
-            && header & 0xf1ff == pd_protocol::pd_spr::GET_PPS_STATUS_HEADER
+            && header & header::WITHOUT_ID == pd_protocol::pd_spr::GET_PPS_STATUS_HEADER
             && self.tx_revision == 2
             && self.config.persistent
             && self.trace().contract_seen
@@ -964,7 +967,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             .flatten();
         let sink_alert = query_ready
             && bytes.len() == 6
-            && header & 0xf1ff == 0x1086
+            && header & header::WITHOUT_ID == 0x1086
             && self
                 .config
                 .selection
@@ -1001,7 +1004,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             return Err(Error::Request);
         }
         let expected_type = if cable_identity {
-            header & 0xf13f
+            header & header::WITHOUT_ID_REVISION
         } else if is_request {
             0x1002
         } else if reset_accept {
@@ -1009,7 +1012,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         } else if soft_reset {
             0x000d
         } else if unsupported_reply {
-            header & 0xf13f
+            header & header::WITHOUT_ID_REVISION
         } else if revision_reply {
             0x100c
         } else if skedb_reply {
@@ -1018,9 +1021,9 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             0x0014
         } else {
             // Sink_Capabilities, or an information request (`query_request`), checked whole above.
-            header & 0xf13f
+            header & header::WITHOUT_ID_REVISION
         };
-        if header & 0xf13f != expected_type {
+        if header & header::WITHOUT_ID_REVISION != expected_type {
             return Err(Error::Request);
         }
         let revision = (header >> 6) & 3;
@@ -1089,8 +1092,8 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                     .config
                     .selection
                     .is_some_and(|s| s.target_pps_object() != 0)
-                && header & 0x7000 != 0
-                && header & 0x1f == 1
+                && header & header::OBJECT_COUNT != 0
+                && header & header::MESSAGE_TYPE == 1
                 && (header >> 6) & 3 != 2
             {
                 return Err(Error::Request);
@@ -1541,7 +1544,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                 let header = packet.frame().header();
                 // Normalize only the policy-engine copy, after CRC validation.
                 // Packet/observation headers retain the actual wire bits.
-                if header & 0xc0 == 0 {
+                if header & header::SPEC_REVISION == 0 {
                     buffer[0] |= 0x40;
                 }
                 let revision = (buffer[0] >> 6) & 3;
@@ -1554,7 +1557,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                 let now = self.clock.now_ms();
                 let revision_known = self.trace().peer_revision.is_some();
                 let same_revision = revision == self.tx_revision;
-                if header & 0xf01f == 13 {
+                if header & header::KIND_COUNT == 13 {
                     // PE_SNK_Soft_Reset from any state (section 9.2.5.2.2):
                     // MessageID 0 (section 7.7), no pending TX, cable work or
                     // queued traffic. Startup Accept does not lock revision.
@@ -1566,7 +1569,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                             Some(ResetStep::AcceptPartner | ResetStep::SendSoftReset)
                         )
                         || self.cable_phase != CablePhase::Idle
-                        || header & 0x0e00 != 0
+                        || header & header::MESSAGE_ID != 0
                         || (revision_known && !same_revision)
                         || self.queue.iter().any(Option::is_some)
                     {
@@ -1583,11 +1586,14 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                     // Our Soft_Reset: Accept with MessageID 0. Another Message at
                     // this revision is a Protocol Error during the Soft Reset:
                     // Hard Reset (section 7.7). A malformed Accept fails closed.
-                    if header & 0xf01f != 3 && same_revision {
+                    if header & header::KIND_COUNT != 3 && same_revision {
                         self.arm_hard_reset();
                         return Ok(length);
                     }
-                    if header & 0xf01f != 3 || header & 0x0e00 != 0 || !same_revision {
+                    if header & header::KIND_COUNT != 3
+                        || header & header::MESSAGE_ID != 0
+                        || !same_revision
+                    {
                         return Err(Error::Peer);
                     }
                     self.reset = Some(ResetStep::WaitCapsAfterReset);
@@ -1596,19 +1602,22 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                 if self.reset == Some(ResetStep::WaitCapsAfterCarrier) {
                     // PE_SNK_Wait_for_Capabilities after BIST Carrier Mode: only fresh
                     // Source_Capabilities. No Shall Hard Reset covers anything else.
-                    if header & 0x801f != 1 || header & 0x7000 == 0 || !same_revision {
+                    if header & header::KIND != 1
+                        || header & header::OBJECT_COUNT == 0
+                        || !same_revision
+                    {
                         return Err(Error::Peer);
                     }
                     self.reset = None;
                 } else if self.reset == Some(ResetStep::WaitCapsAfterReset) {
                     // Section 7.7: only fresh Source_Capabilities; another Message
                     // at this revision means Hard Reset.
-                    if header & 0x801f != 1 && same_revision {
+                    if header & header::KIND != 1 && same_revision {
                         self.arm_hard_reset();
                         return Ok(length);
                     }
-                    if header & 0x801f != 1
-                        || header & 0x7000 == 0
+                    if header & header::KIND != 1
+                        || header & header::OBJECT_COUNT == 0
                         || (revision_known && !same_revision)
                     {
                         return Err(Error::Peer);
@@ -1625,12 +1634,12 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                     // or Not_Supported. It is never answered. Another well-formed
                     // Message at this revision is a Protocol Error; a malformed
                     // PPS_Status fails closed.
-                    let pps_status = header & 0xf01f == 0xa00c
+                    let pps_status = header & header::KIND_COUNT == 0xa00c
                         && length == 10
                         && u16::from_le_bytes([buffer[2], buffer[3]]) & 0xfdff == 0x8004;
-                    let not_supported = header & 0xf01f == 0x0010 && length == 2;
+                    let not_supported = header & header::KIND_COUNT == 0x0010 && length == 2;
                     if !(pps_status || not_supported) || revision != 2 {
-                        if header & 0x801f == 0x800c || !same_revision {
+                        if header & header::KIND == 0x800c || !same_revision {
                             return Err(Error::Peer);
                         }
                         self.protocol_error()?;
@@ -1661,7 +1670,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                     .is_some_and(|until| now < until)
                 {
                     // Figure 9.27: only Get_Status in this bounded Alert AMS.
-                    if length == 2 && header & 0xf01f == 18 && same_revision {
+                    if length == 2 && header & header::KIND_COUNT == 18 && same_revision {
                         self.status_reply = <P::Limits as pd_protocol::pd_spr::Limits>::status()
                             .filter(|&block| pd_protocol::pd_spr::sink_status_valid(block));
                         if self.status_reply.is_none() {
@@ -1676,7 +1685,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                 } else if self.request == Some(RequestStage::TransitionSink) {
                     // Table 7.1, section 9.2.4.6: only PS_RDY while power transitions;
                     // another Message at this revision is answered with Hard Reset.
-                    if header & 0xf01f != 6 {
+                    if header & header::KIND_COUNT != 6 {
                         if !same_revision {
                             return Err(Error::Peer);
                         }
@@ -1689,7 +1698,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                 } else if self.request == Some(RequestStage::AwaitReply) {
                     // PE_SNK_Select_Capability: Accept, Reject or Wait; anything
                     // else is a Protocol Error (Figure 9.18 note 1).
-                    self.request = match header & 0xf01f {
+                    self.request = match header & header::KIND_COUNT {
                         3 => Some(RequestStage::TransitionSink),
                         4 | 12 => {
                             self.recovering = false;
@@ -1707,7 +1716,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                     && self.config.selection.is_none_or(|s| !s.request_in_flight())
                 {
                     use pd_protocol::pd_spr::{ReadyResponse, ready_response};
-                    let extended = (header & 0x8000 != 0 && length >= 4)
+                    let extended = (header & header::EXTENDED != 0 && length >= 4)
                         .then(|| u16::from_le_bytes([buffer[2], buffer[3]]));
                     // PE_BIST_Test_Mode (section 9.2.26.4.2.1), only at vSafe5V: the
                     // FUSB302 BIST_TMODE keeps sending GoodCRC and clears the RX
@@ -1742,7 +1751,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                         // Reject. The VCONN Source Shall Not Reject VCONN_Swap: if VCONN
                         // were on here, fail closed rather than send a forbidden reply.
                         ReadyResponse::Reject => {
-                            if header & 0x1f == 11 && self.trace().vconn_on {
+                            if header & header::MESSAGE_TYPE == 11 && self.trace().vconn_on {
                                 return Err(Error::Peer);
                             }
                             self.unsupported_reply = Some((u16::from(self.tx_revision) << 6) | 4);
@@ -1769,10 +1778,10 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                         _ => {}
                     }
                 }
-                if header & 0x801f == 1 && header & 0x7000 != 0 {
+                if header & header::KIND == 1 && header & header::OBJECT_COUNT != 0 {
                     self.caps_reply = true;
                 }
-                if header & 0x701f == 3 {
+                if header & header::COUNT_TYPE == 3 {
                     self.step(8);
                     self.trace().accept_seen = true;
                     let t_accept = self.clock.now_ms();
@@ -1782,7 +1791,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                     }
                     self.t_accept = Some(t_accept);
                 }
-                if header & 0x701f == 6 {
+                if header & header::COUNT_TYPE == 6 {
                     self.step(9);
                     self.trace().psrdy_seen = true;
                     if self.config.persistent {
@@ -2279,7 +2288,7 @@ fn first_data_object(message: &[u8]) -> Option<u32> {
 fn cable_step(bytes: &[u8], sop: Sop) -> u8 {
     let header = u16::from_le_bytes([bytes[0], bytes[1]]);
     let command = bytes.get(2).copied().unwrap_or(0) & 0x1f;
-    match (sop, header & 0x801f) {
+    match (sop, header & header::KIND) {
         (Sop::Cable, 0x000d) => 11,                 // SOP' Soft_Reset
         (Sop::Cable, 0x000f) if command == 1 => 13, // Discover Identity
         (Sop::Cable, 0x000f) if command == 2 => 15, // Discover SVIDs

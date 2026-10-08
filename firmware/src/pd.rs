@@ -125,7 +125,7 @@ impl SniffObservation {
     /// Log one CRC-checked SOP frame. Source_Capabilities replace the stored
     /// PDOs first, so a later Request decodes against the newest offer.
     pub fn record(&mut self, frame: &kws_x1_core::pd_rx::Frame<'_>) {
-        if frame.header() & 0x8000 == 0
+        if frame.header() & fusb302_pd::header::EXTENDED == 0
             && let Ok(objects) = frame.source_capabilities()
         {
             self.caps_count = objects.len().min(7) as u8;
