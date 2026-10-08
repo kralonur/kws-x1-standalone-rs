@@ -135,8 +135,13 @@ fn input() -> firmware_core::buttons::Input {
 
 fn detail_page() -> Option<u32> {
     use firmware_core::buttons::{Advanced, Page};
-    let input = input();
-    (input.page == Page::Advanced(Advanced::Cable)).then_some(input.detail)
+    match input().page {
+        Page::Advanced {
+            page: Advanced::Cable,
+            detail,
+        } => Some(detail),
+        _ => None,
+    }
 }
 
 fn control(

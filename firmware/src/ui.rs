@@ -9,7 +9,7 @@ use embedded_graphics::primitives::{
     Circle, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle, RoundedRectangle, StyledDrawable,
     Triangle,
 };
-use firmware_core::buttons::Edit;
+use firmware_core::buttons::{PpsFocus, SettingsFocus};
 use firmware_core::settings::{BRIGHTNESS_PERCENT, Item, Rotation, Settings};
 use u8g2_fonts::FontRenderer;
 use u8g2_fonts::fonts;
@@ -715,7 +715,7 @@ pub fn draw_pps<D: DrawTarget<Color = Rgb565>>(
     target: &mut D,
     header: &Header<'_>,
     offer: &Offer,
-    edit: Edit,
+    focus: PpsFocus,
     live: Option<Reading>,
 ) {
     draw_header(target, header, MAGENTA);
@@ -761,13 +761,20 @@ pub fn draw_pps<D: DrawTarget<Color = Rgb565>>(
             "SET VOLTAGE",
             volts,
             "V",
-            Edit::PpsVoltage,
+            PpsFocus::Voltage,
             YELLOW,
         ),
-        (PPS_AMPS, "CURRENT LIMIT", amps, "A", Edit::PpsCurrent, CYAN),
+        (
+            PPS_AMPS,
+            "CURRENT LIMIT",
+            amps,
+            "A",
+            PpsFocus::Current,
+            CYAN,
+        ),
     ];
     for (area, label, value, unit, field, color) in &boxes {
-        let focused = edit == *field;
+        let focused = focus == *field;
         let (tint, border) = if focused {
             (RULE, Some(*color))
         } else {
@@ -820,10 +827,10 @@ pub fn draw_pps<D: DrawTarget<Color = Rgb565>>(
     );
     hint(
         target,
-        match edit {
+        match focus {
             _ if !offer.session => VIEW_ONLY,
-            Edit::PpsVoltage => "< > volts    OK next: current",
-            Edit::PpsCurrent => "< > amps    OK request",
+            PpsFocus::Voltage => "< > volts    OK next: current",
+            PpsFocus::Current => "< > amps    OK request",
             _ => "OK adjust PPS    < > pages",
         },
     );
@@ -863,13 +870,12 @@ pub fn draw_settings<D: DrawTarget<Color = Rgb565>>(
     target: &mut D,
     header: &Header<'_>,
     settings: Settings,
-    cursor: Item,
-    edit: Edit,
+    focus: SettingsFocus,
 ) {
     draw_header(target, header, YELLOW);
     for (index, item) in Item::ALL.into_iter().enumerate() {
         let baseline = SETTINGS_BASELINE + index as i32 * SETTINGS_PITCH;
-        let selected = item == cursor;
+        let selected = item == focus.row();
         if selected {
             card(
                 target,
@@ -904,10 +910,10 @@ pub fn draw_settings<D: DrawTarget<Color = Rgb565>>(
                 target,
                 baseline,
                 settings.brightness,
-                edit == Edit::Brightness,
+                focus == SettingsFocus::Brightness,
             ),
             Item::Rotation => {
-                let editing = edit == Edit::Rotation;
+                let editing = focus == SettingsFocus::Rotation;
                 if editing {
                     card(
                         target,
@@ -944,9 +950,9 @@ pub fn draw_settings<D: DrawTarget<Color = Rgb565>>(
     }
     hint(
         target,
-        match edit {
-            Edit::Brightness => "< > dimmer/brighter    OK done",
-            Edit::Rotation => "< > auto/normal/flipped  OK done",
+        match focus {
+            SettingsFocus::Brightness => "< > dimmer/brighter    OK done",
+            SettingsFocus::Rotation => "< > auto/normal/flipped  OK done",
             _ => "< > choose  OK change  BACK exit",
         },
     );

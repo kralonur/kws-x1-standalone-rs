@@ -42,7 +42,7 @@ use bus::{
     ASYNC_READS, BUS_LATCH, I2C_ERRORS, I2C_FAULT_STEP, I2C_IRQ_COUNT, I2C_LAST_CR1, I2C_LAST_CR4,
     I2C_LAST_SR, I2C3, bus_failed, read_meter, write_meter, write_sensor,
 };
-use button_logic::{Advanced, Edit, Page};
+use button_logic::{Advanced, Page};
 use embassy_time::{Instant, Timer};
 use embedded_graphics::pixelcolor::{Rgb565, RgbColor};
 use firmware_core::buttons as button_logic;
@@ -504,7 +504,7 @@ async fn button_task(
     #[cfg(not(feature = "cable-log"))]
     let fatal = false;
     let mut navigation = if cfg!(feature = "pd-boot-diagnostic") || fatal {
-        button_logic::Navigation::new(Page::Advanced(Advanced::Pd), saved)
+        button_logic::Navigation::new(Page::advanced(Advanced::Pd), saved)
     } else {
         button_logic::Navigation::new(Page::Overview, saved)
     };
@@ -525,7 +525,7 @@ async fn button_task(
         navigation.set_selectable(observation.spr.is_some() && observation.capabilities.is_some());
         let (input, command) = navigation.update(raw);
         // Save once a value is no longer being changed.
-        if !matches!(input.edit, Edit::Brightness | Edit::Rotation) {
+        if !input.page.editing() {
             store.save(input.settings);
         }
         // The PD session drains these between transactions; a full queue
@@ -682,8 +682,8 @@ async fn meter_task(mut backlight: embassy_hc32::pwm::TimerA4Pwm) {
         let mut changed = false;
         // Pages showing live values read the meter; the PD details page reads
         // only the bus voltage, as before.
-        let reads_current = matches!(page, Page::Overview | Page::Fixed | Page::Pps);
-        let pd_details = page == Page::Advanced(Advanced::Pd);
+        let reads_current = matches!(page, Page::Overview | Page::Fixed { .. } | Page::Pps(_));
+        let pd_details = page == Page::advanced(Advanced::Pd);
         if (reads_current || pd_details) && now >= next_read {
             next_read = now + METER_READ_PERIOD;
             if let Some(v) = read_meter(ina226::BUS_VOLTAGE).await {
@@ -749,36 +749,38 @@ async fn meter_task(mut backlight: embassy_hc32::pwm::TimerA4Pwm) {
                         },
                     );
                 }
-                Page::Fixed => {
+                Page::Fixed { choosing } => {
                     render::clear(frame);
                     ui::draw_fixed(
                         &mut Canvas(frame),
                         &header("PD PROFILES"),
                         &pd::offer(&latest_observation()),
-                        input.edit == Edit::Fixed,
+                        choosing,
                     );
                 }
-                Page::Pps => {
+                Page::Pps(focus) => {
                     render::clear(frame);
                     ui::draw_pps(
                         &mut Canvas(frame),
                         &header("PPS"),
                         &pd::offer(&latest_observation()),
-                        input.edit,
+                        focus,
                         reading(last_raw_v, last_raw_i),
                     );
                 }
-                Page::Settings => {
+                Page::Settings(focus) => {
                     render::clear(frame);
                     ui::draw_settings(
                         &mut Canvas(frame),
                         &header("SETTINGS"),
                         input.settings,
-                        input.cursor,
-                        input.edit,
+                        focus,
                     );
                 }
-                Page::Advanced(Advanced::Irq) => {
+                Page::Advanced {
+                    page: Advanced::Irq,
+                    ..
+                } => {
                     let (stack_peak, stack_size) = stack_use();
                     unsafe {
                         render_irq_test(
@@ -798,16 +800,25 @@ async fn meter_task(mut backlight: embassy_hc32::pwm::TimerA4Pwm) {
                         );
                     }
                 }
-                Page::Advanced(advanced @ (Advanced::Pd | Advanced::Cable)) => {
-                    let detail = (advanced == Advanced::Cable).then_some(input.detail);
+                Page::Advanced {
+                    page: page @ (Advanced::Pd | Advanced::Cable),
+                    detail,
+                } => {
+                    let detail = (page == Advanced::Cable).then_some(detail);
                     unsafe {
                         render_pd(fb, last_raw_v, detail);
                     }
                 }
-                Page::Advanced(Advanced::Charger) => unsafe {
-                    render_partner(fb, input.detail);
+                Page::Advanced {
+                    page: Advanced::Charger,
+                    detail,
+                } => unsafe {
+                    render_partner(fb, detail);
                 },
-                Page::Advanced(Advanced::Ports) => {
+                Page::Advanced {
+                    page: Advanced::Ports,
+                    ..
+                } => {
                     for (i, p) in ports.iter_mut().enumerate() {
                         let port = [Port::A, Port::B, Port::C, Port::D, Port::E, Port::H];
                         *p = gpio::read_port(port[i]);

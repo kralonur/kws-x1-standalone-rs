@@ -78,20 +78,61 @@ const PPS_MV_REPEAT: i16 = 100;
 const PPS_MA_STEP: i16 = 50;
 const PPS_MA_REPEAT: i16 = 250;
 
-/// Screen pages. Left/Right cycle the everyday ones; Back on the overview
-/// opens the settings.
+/// The screen and what its Left, Right and OK act on. Each page carries only
+/// its own state, so e.g. a PPS edit outside the PPS page cannot exist.
+/// Left/Right cycle the everyday pages; Back on the overview opens the
+/// settings.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Page {
     #[default]
     Overview,
-    /// Fixed PD profile selector.
-    Fixed,
+    /// Fixed PD profile selector; while `choosing`, Left/Right preview
+    /// profiles.
+    Fixed { choosing: bool },
     /// PPS voltage and current selector.
-    Pps,
+    Pps(PpsFocus),
     /// Opened by Back on the overview.
-    Settings,
-    /// Detailed information, opened by holding Left and Right together.
-    Advanced(Advanced),
+    Settings(SettingsFocus),
+    /// Detailed information, opened by holding Left and Right together;
+    /// `detail` is the sub-page of the charger and cable pages.
+    Advanced { page: Advanced, detail: u32 },
+}
+
+/// What Left/Right change on the PPS page.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PpsFocus {
+    /// Nothing: Left/Right move between pages.
+    #[default]
+    Browse,
+    Voltage,
+    Current,
+}
+
+/// The settings page cursor, and whether its value is being changed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingsFocus {
+    /// Left/Right move the cursor.
+    Row(Item),
+    /// Left/Right change the value.
+    Brightness,
+    Rotation,
+}
+
+impl Default for SettingsFocus {
+    fn default() -> Self {
+        Self::Row(Item::default())
+    }
+}
+
+impl SettingsFocus {
+    /// The highlighted row.
+    pub fn row(self) -> Item {
+        match self {
+            Self::Row(item) => item,
+            Self::Brightness => Item::Brightness,
+            Self::Rotation => Item::Rotation,
+        }
+    }
 }
 
 /// Detailed information pages, in OK order.
@@ -110,7 +151,12 @@ pub enum Advanced {
     Irq,
 }
 
-const EVERYDAY: [Page; 3] = [Page::Overview, Page::Fixed, Page::Pps];
+/// The everyday pages as Left/Right enter them.
+const EVERYDAY: [Page; 3] = [
+    Page::Overview,
+    Page::Fixed { choosing: false },
+    Page::Pps(PpsFocus::Browse),
+];
 const ADVANCED: [Advanced; 5] = [
     Advanced::Pd,
     Advanced::Charger,
@@ -119,9 +165,8 @@ const ADVANCED: [Advanced; 5] = [
     Advanced::Irq,
 ];
 
-/// `items[index of current ± 1]`, wrapping.
-fn cycle<T: Copy + PartialEq>(items: &[T], current: T, forward: bool) -> T {
-    let index = items.iter().position(|item| *item == current).unwrap_or(0);
+/// `items[index ± 1]`, wrapping.
+fn cycle<T: Copy>(items: &[T], index: usize, forward: bool) -> T {
     let next = if forward {
         index + 1
     } else {
@@ -131,36 +176,41 @@ fn cycle<T: Copy + PartialEq>(items: &[T], current: T, forward: bool) -> T {
 }
 
 impl Page {
+    /// An advanced page at its first sub-page.
+    pub const fn advanced(page: Advanced) -> Self {
+        Self::Advanced { page, detail: 0 }
+    }
+
+    /// Index into `EVERYDAY`.
+    fn everyday(self) -> Option<usize> {
+        match self {
+            Self::Overview => Some(0),
+            Self::Fixed { .. } => Some(1),
+            Self::Pps(_) => Some(2),
+            Self::Settings(_) | Self::Advanced { .. } => None,
+        }
+    }
+
     /// One-based position in its group (everyday or advanced) and the group
     /// size; `None` for the settings page, which is outside both.
     pub fn position(self) -> Option<(u8, u8)> {
         let (index, count) = match self {
-            Self::Advanced(page) => (
-                ADVANCED.iter().position(|item| *item == page)?,
-                ADVANCED.len(),
-            ),
-            page => (
-                EVERYDAY.iter().position(|item| *item == page)?,
-                EVERYDAY.len(),
-            ),
+            Self::Advanced { page, .. } => (page as usize, ADVANCED.len()),
+            page => (page.everyday()?, EVERYDAY.len()),
         };
         Some((index as u8 + 1, count as u8))
     }
-}
 
-/// What Left, Right and OK are editing on the current page. `None` means
-/// Left/Right move between pages.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Edit {
-    #[default]
-    None,
-    /// Choosing a fixed profile.
-    Fixed,
-    PpsVoltage,
-    PpsCurrent,
-    /// Changing a settings value.
-    Brightness,
-    Rotation,
+    /// Left/Right change a value here, rather than moving between pages or
+    /// rows.
+    pub fn editing(self) -> bool {
+        matches!(
+            self,
+            Self::Fixed { choosing: true }
+                | Self::Pps(PpsFocus::Voltage | PpsFocus::Current)
+                | Self::Settings(SettingsFocus::Brightness | SettingsFocus::Rotation)
+        )
+    }
 }
 
 /// A request for the PD session, sent by the input task. Previews only change
@@ -186,12 +236,7 @@ pub struct Input {
     /// Stable pressed mask; bit `n` is `PINS[n]`.
     pub pressed: u8,
     pub page: Page,
-    pub edit: Edit,
-    /// Sub-page of the advanced charger and cable pages.
-    pub detail: u32,
     pub settings: Settings,
-    /// Highlighted settings row.
-    pub cursor: Item,
     /// Incremented by each peak reset request; the meter clears its peaks
     /// when this changes.
     pub peaks_reset: u8,
@@ -232,13 +277,8 @@ impl Navigation {
     /// PD and PPS pages only show the offer, and an open selection closes.
     pub fn set_selectable(&mut self, selectable: bool) {
         self.selectable = selectable;
-        if !selectable
-            && matches!(
-                self.input.edit,
-                Edit::Fixed | Edit::PpsVoltage | Edit::PpsCurrent
-            )
-        {
-            self.input.edit = Edit::None;
+        if !selectable && matches!(self.input.page, Page::Fixed { .. } | Page::Pps(_)) {
+            self.input.page = EVERYDAY[self.input.page.everyday().unwrap_or(0)];
         }
     }
 
@@ -273,7 +313,10 @@ impl Navigation {
             self.held += 1;
             if self.held >= REPEAT_DELAY_SAMPLES
                 && (self.held - REPEAT_DELAY_SAMPLES).is_multiple_of(REPEAT_SAMPLES)
-                && matches!(self.input.edit, Edit::PpsVoltage | Edit::PpsCurrent)
+                && matches!(
+                    self.input.page,
+                    Page::Pps(PpsFocus::Voltage | PpsFocus::Current)
+                )
             {
                 self.repeated = true;
                 command = self.step(left_right == RIGHT, true);
@@ -286,7 +329,14 @@ impl Navigation {
 
         if after & OK != 0 {
             self.ok_held += 1;
-            if self.ok_held == LONG_OK_SAMPLES && self.input.page == Page::Advanced(Advanced::Cable)
+            if self.ok_held == LONG_OK_SAMPLES
+                && matches!(
+                    self.input.page,
+                    Page::Advanced {
+                        page: Advanced::Cable,
+                        ..
+                    }
+                )
             {
                 self.ok_long = true;
                 command = Some(PdCommand::QueryCable);
@@ -304,85 +354,100 @@ impl Navigation {
         (self.input, command)
     }
 
-    fn go(&mut self, page: Page) {
-        self.input.page = page;
-        self.input.edit = Edit::None;
-        self.input.detail = 0;
-    }
-
     fn toggle_advanced(&mut self) {
-        self.go(match self.input.page {
-            Page::Advanced(_) => Page::Overview,
-            _ => Page::Advanced(Advanced::default()),
-        });
+        self.input.page = match self.input.page {
+            Page::Advanced { .. } => Page::Overview,
+            _ => Page::advanced(Advanced::default()),
+        };
     }
 
     fn back(&mut self) {
-        match (self.input.page, self.input.edit) {
-            (Page::Overview, _) => self.go(Page::Settings),
-            (_, Edit::None) => self.go(Page::Overview),
-            _ => self.input.edit = Edit::None,
-        }
+        let page = &mut self.input.page;
+        *page = match *page {
+            Page::Overview => Page::Settings(SettingsFocus::default()),
+            Page::Fixed { choosing: true } => Page::Fixed { choosing: false },
+            Page::Pps(PpsFocus::Voltage | PpsFocus::Current) => Page::Pps(PpsFocus::Browse),
+            Page::Settings(focus @ (SettingsFocus::Brightness | SettingsFocus::Rotation)) => {
+                Page::Settings(SettingsFocus::Row(focus.row()))
+            }
+            _ => Page::Overview,
+        };
     }
 
     /// Left (`forward` false) or Right; `repeat` for a held button.
     fn step(&mut self, forward: bool, repeat: bool) -> Option<PdCommand> {
         let sign = if forward { 1 } else { -1 };
         let input = &mut self.input;
-        match (input.page, input.edit) {
-            (Page::Advanced(_), _) => {
-                input.detail = if forward {
-                    input.detail.wrapping_add(1) & 0x00ff_ffff
+        match &mut input.page {
+            Page::Advanced { detail, .. } => {
+                *detail = if forward {
+                    detail.wrapping_add(1) & 0x00ff_ffff
                 } else {
-                    input.detail.saturating_sub(1)
+                    detail.saturating_sub(1)
                 };
             }
-            (Page::Settings, Edit::None) => {
-                input.cursor = cycle(&Item::ALL, input.cursor, forward);
+            Page::Settings(SettingsFocus::Row(item)) => {
+                let index = Item::ALL.iter().position(|row| row == item).unwrap_or(0);
+                *item = cycle(&Item::ALL, index, forward);
             }
-            (page, Edit::None) => self.go(cycle(&EVERYDAY, page, forward)),
-            (_, Edit::Fixed) => return Some(PdCommand::StepFixed(sign as i8)),
-            (_, Edit::PpsVoltage) => {
+            Page::Settings(SettingsFocus::Brightness) => input.settings.step_brightness(forward),
+            Page::Settings(SettingsFocus::Rotation) => input.settings.step_rotation(forward),
+            Page::Fixed { choosing: true } => return Some(PdCommand::StepFixed(sign as i8)),
+            Page::Pps(PpsFocus::Voltage) => {
                 let step = if repeat { PPS_MV_REPEAT } else { PPS_MV_STEP };
                 return Some(PdCommand::PpsVoltage(sign * step));
             }
-            (_, Edit::PpsCurrent) => {
+            Page::Pps(PpsFocus::Current) => {
                 let step = if repeat { PPS_MA_REPEAT } else { PPS_MA_STEP };
                 return Some(PdCommand::PpsCurrent(sign * step));
             }
-            (_, Edit::Brightness) => input.settings.step_brightness(forward),
-            (_, Edit::Rotation) => input.settings.step_rotation(forward),
+            page => {
+                let index = page.everyday().unwrap_or(0);
+                *page = cycle(&EVERYDAY, index, forward);
+            }
         }
         None
     }
 
     fn ok(&mut self) -> Option<PdCommand> {
         let input = &mut self.input;
-        match (input.page, input.edit) {
-            (Page::Advanced(page), _) => self.go(Page::Advanced(cycle(&ADVANCED, page, true))),
-            (Page::Fixed | Page::Pps, Edit::None) if !self.selectable => {}
-            (Page::Fixed, Edit::None) => {
-                input.edit = Edit::Fixed;
-                return Some(PdCommand::StepFixed(0));
+        let (page, command) = match input.page {
+            Page::Advanced { page, .. } => {
+                (Page::advanced(cycle(&ADVANCED, page as usize, true)), None)
             }
-            (Page::Pps, Edit::None) => {
-                input.edit = Edit::PpsVoltage;
-                return Some(PdCommand::PpsVoltage(0));
+            page @ (Page::Fixed { choosing: false } | Page::Pps(PpsFocus::Browse))
+                if !self.selectable =>
+            {
+                (page, None)
             }
-            (_, Edit::PpsVoltage) => input.edit = Edit::PpsCurrent,
-            (_, Edit::Fixed | Edit::PpsCurrent) => {
-                input.edit = Edit::None;
-                return Some(PdCommand::Confirm);
+            Page::Fixed { choosing: false } => (
+                Page::Fixed { choosing: true },
+                Some(PdCommand::StepFixed(0)),
+            ),
+            Page::Fixed { choosing: true } => {
+                (Page::Fixed { choosing: false }, Some(PdCommand::Confirm))
             }
-            (Page::Settings, Edit::None) => match input.cursor {
-                Item::Brightness => input.edit = Edit::Brightness,
-                Item::Rotation => input.edit = Edit::Rotation,
-                Item::ResetPeaks => input.peaks_reset = input.peaks_reset.wrapping_add(1),
-            },
-            (_, Edit::Brightness | Edit::Rotation) => input.edit = Edit::None,
-            (Page::Overview, Edit::None) => {}
-        }
-        None
+            Page::Pps(PpsFocus::Browse) => {
+                (Page::Pps(PpsFocus::Voltage), Some(PdCommand::PpsVoltage(0)))
+            }
+            Page::Pps(PpsFocus::Voltage) => (Page::Pps(PpsFocus::Current), None),
+            Page::Pps(PpsFocus::Current) => (Page::Pps(PpsFocus::Browse), Some(PdCommand::Confirm)),
+            Page::Settings(SettingsFocus::Row(item)) => (
+                Page::Settings(match item {
+                    Item::Brightness => SettingsFocus::Brightness,
+                    Item::Rotation => SettingsFocus::Rotation,
+                    Item::ResetPeaks => {
+                        input.peaks_reset = input.peaks_reset.wrapping_add(1);
+                        SettingsFocus::Row(item)
+                    }
+                }),
+                None,
+            ),
+            Page::Settings(focus) => (Page::Settings(SettingsFocus::Row(focus.row())), None),
+            Page::Overview => (Page::Overview, None),
+        };
+        input.page = page;
+        command
     }
 }
 
