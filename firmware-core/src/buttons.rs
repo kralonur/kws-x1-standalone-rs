@@ -78,7 +78,8 @@ const PPS_MV_REPEAT: i16 = 100;
 const PPS_MA_STEP: i16 = 50;
 const PPS_MA_REPEAT: i16 = 250;
 
-/// Everyday pages, in Left/Right order.
+/// Screen pages. Left/Right cycle the everyday ones; Back on the overview
+/// opens the settings.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Page {
     #[default]
@@ -87,6 +88,7 @@ pub enum Page {
     Fixed,
     /// PPS voltage and current selector.
     Pps,
+    /// Opened by Back on the overview.
     Settings,
     /// Detailed information, opened by holding Left and Right together.
     Advanced(Advanced),
@@ -108,7 +110,7 @@ pub enum Advanced {
     Irq,
 }
 
-const EVERYDAY: [Page; 4] = [Page::Overview, Page::Fixed, Page::Pps, Page::Settings];
+const EVERYDAY: [Page; 3] = [Page::Overview, Page::Fixed, Page::Pps];
 const ADVANCED: [Advanced; 5] = [
     Advanced::Pd,
     Advanced::Charger,
@@ -129,19 +131,20 @@ fn cycle<T: Copy + PartialEq>(items: &[T], current: T, forward: bool) -> T {
 }
 
 impl Page {
-    /// One-based position in its group (everyday or advanced) and the group size.
-    pub fn position(self) -> (u8, u8) {
+    /// One-based position in its group (everyday or advanced) and the group
+    /// size; `None` for the settings page, which is outside both.
+    pub fn position(self) -> Option<(u8, u8)> {
         let (index, count) = match self {
             Self::Advanced(page) => (
-                ADVANCED.iter().position(|item| *item == page),
+                ADVANCED.iter().position(|item| *item == page)?,
                 ADVANCED.len(),
             ),
             page => (
-                EVERYDAY.iter().position(|item| *item == page),
+                EVERYDAY.iter().position(|item| *item == page)?,
                 EVERYDAY.len(),
             ),
         };
-        (index.map_or(0, |index| index as u8 + 1), count as u8)
+        Some((index as u8 + 1, count as u8))
     }
 }
 
@@ -155,9 +158,9 @@ pub enum Edit {
     Fixed,
     PpsVoltage,
     PpsCurrent,
-    /// Moving between settings rows.
-    SettingsRows,
+    /// Changing a settings value.
     Brightness,
+    Rotation,
 }
 
 /// A request for the PD session, sent by the input task. Previews only change
@@ -212,14 +215,31 @@ pub struct Navigation {
     /// Samples OK has been held, and whether that hold already acted.
     ok_held: u32,
     ok_long: bool,
+    /// A sink session runs, so the PD and PPS pages can select.
+    selectable: bool,
 }
 
 impl Navigation {
-    /// Start on `page`, e.g. a diagnostic boot page.
-    pub fn at_page(page: Page) -> Self {
+    /// Start on `page` (e.g. a diagnostic boot page) with saved `settings`.
+    pub fn new(page: Page, settings: Settings) -> Self {
         let mut navigation = Self::default();
         navigation.input.page = page;
+        navigation.input.settings = settings;
         navigation
+    }
+
+    /// Whether a sink session runs. Without one (passthrough, no charger) the
+    /// PD and PPS pages only show the offer, and an open selection closes.
+    pub fn set_selectable(&mut self, selectable: bool) {
+        self.selectable = selectable;
+        if !selectable
+            && matches!(
+                self.input.edit,
+                Edit::Fixed | Edit::PpsVoltage | Edit::PpsCurrent
+            )
+        {
+            self.input.edit = Edit::None;
+        }
     }
 
     /// Feed one sample; returns the input state and any PD session request.
@@ -298,11 +318,10 @@ impl Navigation {
     }
 
     fn back(&mut self) {
-        let input = &mut self.input;
-        match input.edit {
-            Edit::Brightness => input.edit = Edit::SettingsRows,
-            Edit::None => self.go(Page::Overview),
-            _ => input.edit = Edit::None,
+        match (self.input.page, self.input.edit) {
+            (Page::Overview, _) => self.go(Page::Settings),
+            (_, Edit::None) => self.go(Page::Overview),
+            _ => self.input.edit = Edit::None,
         }
     }
 
@@ -318,6 +337,9 @@ impl Navigation {
                     input.detail.saturating_sub(1)
                 };
             }
+            (Page::Settings, Edit::None) => {
+                input.cursor = cycle(&Item::ALL, input.cursor, forward);
+            }
             (page, Edit::None) => self.go(cycle(&EVERYDAY, page, forward)),
             (_, Edit::Fixed) => return Some(PdCommand::StepFixed(sign as i8)),
             (_, Edit::PpsVoltage) => {
@@ -328,8 +350,8 @@ impl Navigation {
                 let step = if repeat { PPS_MA_REPEAT } else { PPS_MA_STEP };
                 return Some(PdCommand::PpsCurrent(sign * step));
             }
-            (_, Edit::SettingsRows) => input.cursor = cycle(&Item::ALL, input.cursor, forward),
             (_, Edit::Brightness) => input.settings.step_brightness(forward),
+            (_, Edit::Rotation) => input.settings.step_rotation(forward),
         }
         None
     }
@@ -338,6 +360,7 @@ impl Navigation {
         let input = &mut self.input;
         match (input.page, input.edit) {
             (Page::Advanced(page), _) => self.go(Page::Advanced(cycle(&ADVANCED, page, true))),
+            (Page::Fixed | Page::Pps, Edit::None) if !self.selectable => {}
             (Page::Fixed, Edit::None) => {
                 input.edit = Edit::Fixed;
                 return Some(PdCommand::StepFixed(0));
@@ -351,12 +374,12 @@ impl Navigation {
                 input.edit = Edit::None;
                 return Some(PdCommand::Confirm);
             }
-            (Page::Settings, Edit::None) => input.edit = Edit::SettingsRows,
-            (_, Edit::SettingsRows) => match input.cursor {
+            (Page::Settings, Edit::None) => match input.cursor {
                 Item::Brightness => input.edit = Edit::Brightness,
+                Item::Rotation => input.edit = Edit::Rotation,
                 Item::ResetPeaks => input.peaks_reset = input.peaks_reset.wrapping_add(1),
             },
-            (_, Edit::Brightness) => input.edit = Edit::SettingsRows,
+            (_, Edit::Brightness | Edit::Rotation) => input.edit = Edit::None,
             (Page::Overview, Edit::None) => {}
         }
         None

@@ -117,6 +117,9 @@ pub struct SniffObservation {
     pub caps_count: u8,
     pub flags: [u8; 3],
     pub stop: Option<SniffStop>,
+    /// Header and decoded supply of the newest Request, kept beyond the
+    /// rolling log: a PPS sink's other traffic soon scrolls it out.
+    pub request: Option<(u16, Supply)>,
 }
 
 impl SniffObservation {
@@ -130,6 +133,7 @@ impl SniffObservation {
             caps_count: 0,
             flags: [0; 3],
             stop: None,
+            request: None,
         }
     }
     /// Log one CRC-checked SOP frame. Source_Capabilities replace the stored
@@ -142,13 +146,15 @@ impl SniffObservation {
             for (slot, raw) in self.caps.iter_mut().zip(objects) {
                 *slot = raw;
             }
+            // New capabilities start a new negotiation.
+            self.request = None;
         }
         let caps = &self.caps[..self.caps_count as usize];
-        self.log.push(firmware_core::pd_sniff::Entry::classify(
-            frame.header(),
-            frame.data(),
-            caps,
-        ));
+        let entry = firmware_core::pd_sniff::Entry::classify(frame.header(), frame.data(), caps);
+        if let Some(supply) = entry.supply {
+            self.request = Some((entry.header, supply));
+        }
+        self.log.push(entry);
     }
 }
 
@@ -157,12 +163,7 @@ impl SniffObservation {
 /// offer, then the Type-C current advertisement on the attached CC.
 pub fn protocol(observation: &Observation) -> Protocol {
     if let Some(sniff) = observation.sniff {
-        let request = sniff
-            .log
-            .entries()
-            .filter_map(|entry| entry.supply.map(|supply| (entry.header, supply)))
-            .last();
-        if let Some((header, supply)) = request {
+        if let Some((header, supply)) = sniff.request {
             return match supply {
                 Supply::Pps { mv, ma } => Protocol::Pps {
                     mv: mv.min(u32::from(u16::MAX)) as u16,
@@ -260,6 +261,23 @@ pub fn offer(observation: &Observation) -> ui::Offer {
             ma,
             pps: spr.pps,
         });
+    } else if let Some((_, supply)) = observation.sniff.and_then(|sniff| sniff.request) {
+        // Passthrough: the device's own choice is both shown and in force.
+        let to_u16 = |value: u32| value.min(u32::from(u16::MAX)) as u16;
+        offer.contract = match supply {
+            Supply::Fixed { mv, ma } => Some(ui::Supply {
+                mv: to_u16(mv),
+                ma: to_u16(ma),
+                pps: false,
+            }),
+            Supply::Pps { mv, ma } => Some(ui::Supply {
+                mv: to_u16(mv),
+                ma: to_u16(ma),
+                pps: true,
+            }),
+            Supply::Raw => None,
+        };
+        offer.preview = offer.contract;
     }
     offer
 }

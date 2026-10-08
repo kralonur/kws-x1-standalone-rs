@@ -10,7 +10,7 @@ use embedded_graphics::primitives::{
     Triangle,
 };
 use firmware_core::buttons::Edit;
-use firmware_core::settings::{BRIGHTNESS_PERCENT, Item, Settings};
+use firmware_core::settings::{BRIGHTNESS_PERCENT, Item, Rotation, Settings};
 use u8g2_fonts::FontRenderer;
 use u8g2_fonts::fonts;
 use u8g2_fonts::types::{FontColor, HorizontalAlignment, VerticalPosition};
@@ -177,10 +177,11 @@ impl Offer {
     }
 }
 
-/// Page header: title on the left, one-based page position on the right.
+/// Page header: title on the left, one-based page position (when the page
+/// is in a cycle) on the right.
 pub struct Header<'a> {
     pub title: &'a str,
-    pub position: (u8, u8),
+    pub position: Option<(u8, u8)>,
 }
 
 /// Everything the overview page shows. `reading` is `None` before the first
@@ -374,16 +375,17 @@ fn draw_header<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'_
         HorizontalAlignment::Left,
         accent,
     );
-    let (index, count) = header.position;
-    let counter = Label::new().two_digits(index).push(b"/").two_digits(count);
-    text(
-        target,
-        &PLAIN,
-        counter.as_str(),
-        Point::new(RIGHT, TITLE_BASELINE),
-        HorizontalAlignment::Right,
-        MUTED,
-    );
+    if let Some((index, count)) = header.position {
+        let counter = Label::new().two_digits(index).push(b"/").two_digits(count);
+        text(
+            target,
+            &PLAIN,
+            counter.as_str(),
+            Point::new(RIGHT, TITLE_BASELINE),
+            HorizontalAlignment::Right,
+            MUTED,
+        );
+    }
     rule(target, HEADER_RULE_Y);
 }
 
@@ -601,7 +603,8 @@ const PROFILE_PITCH: i32 = 19;
 const PROFILE_ROWS: usize = 5;
 
 /// The fixed PD profile selector. While `editing`, the previewed profile is
-/// framed; the contract in force is marked ACTIVE.
+/// framed; the contract in force is marked ACTIVE. Without a sink session
+/// (passthrough) the page only shows the offer and the device's choice.
 pub fn draw_fixed<D: DrawTarget<Color = Rgb565>>(
     target: &mut D,
     header: &Header<'_>,
@@ -612,15 +615,6 @@ pub fn draw_fixed<D: DrawTarget<Color = Rgb565>>(
     let profiles = offer.fixed();
     if profiles.is_empty() {
         notice(target, "NO PD CHARGER", "plug in a PD source", GREEN);
-        return;
-    }
-    if !offer.session {
-        notice(
-            target,
-            "SINK MODE OFF",
-            "switch to sink mode to select",
-            GREEN,
-        );
         return;
     }
     let preview = offer
@@ -698,13 +692,18 @@ pub fn draw_fixed<D: DrawTarget<Color = Rgb565>>(
     }
     hint(
         target,
-        if editing {
+        if !offer.session {
+            VIEW_ONLY
+        } else if editing {
             "< > choose  OK request  BACK cancel"
         } else {
             "OK select a profile    < > pages"
         },
     );
 }
+
+/// Hint on the selector pages without a sink session.
+const VIEW_ONLY: &str = "passthrough: view only    < > pages";
 
 /// PPS value boxes.
 const PPS_VOLTS: Rectangle = Rectangle::new(Point::new(4, 52), Size::new(114, 44));
@@ -726,15 +725,6 @@ pub fn draw_pps<D: DrawTarget<Color = Rgb565>>(
             target,
             "NO PPS",
             "this charger offers no PPS range",
-            MAGENTA,
-        );
-        return;
-    }
-    if !offer.session {
-        notice(
-            target,
-            "SINK MODE OFF",
-            "switch to sink mode to select",
             MAGENTA,
         );
         return;
@@ -831,6 +821,7 @@ pub fn draw_pps<D: DrawTarget<Color = Rgb565>>(
     hint(
         target,
         match edit {
+            _ if !offer.session => VIEW_ONLY,
             Edit::PpsVoltage => "< > volts    OK next: current",
             Edit::PpsCurrent => "< > amps    OK request",
             _ => "OK adjust PPS    < > pages",
@@ -863,11 +854,11 @@ fn arrows<D: DrawTarget<Color = Rgb565>>(target: &mut D, area: Rectangle, color:
 }
 
 /// Settings rows: first baseline and pitch.
-const SETTINGS_BASELINE: i32 = 46;
-const SETTINGS_PITCH: i32 = 28;
+const SETTINGS_BASELINE: i32 = 44;
+const SETTINGS_PITCH: i32 = 27;
 
-/// The settings page: the cursor row is marked while choosing a row, and the
-/// brightness value is framed while it is being changed.
+/// The settings page: the cursor row is highlighted, and the value being
+/// changed is framed.
 pub fn draw_settings<D: DrawTarget<Color = Rgb565>>(
     target: &mut D,
     header: &Header<'_>,
@@ -878,7 +869,7 @@ pub fn draw_settings<D: DrawTarget<Color = Rgb565>>(
     draw_header(target, header, YELLOW);
     for (index, item) in Item::ALL.into_iter().enumerate() {
         let baseline = SETTINGS_BASELINE + index as i32 * SETTINGS_PITCH;
-        let selected = item == cursor && edit != Edit::None;
+        let selected = item == cursor;
         if selected {
             card(
                 target,
@@ -897,6 +888,7 @@ pub fn draw_settings<D: DrawTarget<Color = Rgb565>>(
         }
         let name = match item {
             Item::Brightness => "BRIGHTNESS",
+            Item::Rotation => "ROTATION",
             Item::ResetPeaks => "RESET MAX",
         };
         text(
@@ -914,6 +906,30 @@ pub fn draw_settings<D: DrawTarget<Color = Rgb565>>(
                 settings.brightness,
                 edit == Edit::Brightness,
             ),
+            Item::Rotation => {
+                let editing = edit == Edit::Rotation;
+                if editing {
+                    card(
+                        target,
+                        Rectangle::new(Point::new(154, baseline - 16), Size::new(78, 24)),
+                        BLACK,
+                        Some(YELLOW),
+                    );
+                }
+                let value = match settings.rotation {
+                    Rotation::Auto => "AUTO",
+                    Rotation::Normal => "NORMAL",
+                    Rotation::Flipped => "FLIPPED",
+                };
+                text(
+                    target,
+                    &ROW,
+                    value,
+                    Point::new(193, baseline),
+                    HorizontalAlignment::Center,
+                    if selected { YELLOW } else { MUTED },
+                );
+            }
             Item::ResetPeaks => {
                 text(
                     target,
@@ -929,9 +945,9 @@ pub fn draw_settings<D: DrawTarget<Color = Rgb565>>(
     hint(
         target,
         match edit {
-            Edit::SettingsRows => "< > choose    OK change    BACK done",
             Edit::Brightness => "< > dimmer/brighter    OK done",
-            _ => "OK change settings    < > pages",
+            Edit::Rotation => "< > auto/normal/flipped  OK done",
+            _ => "< > choose  OK change  BACK exit",
         },
     );
 }

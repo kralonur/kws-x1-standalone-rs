@@ -11,6 +11,7 @@
 
 mod bus;
 mod clock_setup;
+mod flash;
 mod ina226;
 mod lis3dh;
 #[path = "panel.rs"]
@@ -24,6 +25,7 @@ mod pd_trial;
 mod pd_service;
 mod pd_sniff;
 mod render;
+mod settings_store;
 mod ui;
 
 use core::ptr::addr_of_mut;
@@ -44,6 +46,7 @@ use button_logic::{Advanced, Edit, Page};
 use embassy_time::{Instant, Timer};
 use embedded_graphics::pixelcolor::{Rgb565, RgbColor};
 use firmware_core::buttons as button_logic;
+use firmware_core::settings::Rotation;
 use hc32f460_pac::interrupt;
 use panel::Orientation;
 #[cfg(not(any(feature = "pd-boot-diagnostic", feature = "cable-log")))]
@@ -484,7 +487,11 @@ fn armed_position(orientation: Orientation) -> u8 {
 /// This task never awaits display/I2C work. Navigation is retained even when a
 /// press and release both finish during a frame; only the renderer owns pixels.
 #[embassy_executor::task]
-async fn button_task(inputs: [InputPin; 4]) {
+async fn button_task(
+    inputs: [InputPin; 4],
+    mut store: settings_store::Store,
+    saved: firmware_core::settings::Settings,
+) {
     // `pd-boot-diagnostic`: open on the PD page so the state before a
     // source Hard Reset is on screen (docs/SAFETY.md).
     // `cable-log`: a panic/fault/hang record from the previous boot opens the
@@ -497,9 +504,9 @@ async fn button_task(inputs: [InputPin; 4]) {
     #[cfg(not(feature = "cable-log"))]
     let fatal = false;
     let mut navigation = if cfg!(feature = "pd-boot-diagnostic") || fatal {
-        button_logic::Navigation::at_page(Page::Advanced(Advanced::Pd))
+        button_logic::Navigation::new(Page::Advanced(Advanced::Pd), saved)
     } else {
-        button_logic::Navigation::default()
+        button_logic::Navigation::new(Page::Overview, saved)
     };
     let input_sender = BUTTON_STATE.sender();
     let mut previous = Instant::now();
@@ -513,7 +520,14 @@ async fn button_task(inputs: [InputPin; 4]) {
         let raw = inputs.iter().enumerate().fold(0u8, |mask, (index, pin)| {
             mask | (u8::from(pin.is_low()) << index)
         });
+        // Selecting needs a sink session that has received the charger's offer.
+        let observation = latest_observation();
+        navigation.set_selectable(observation.spr.is_some() && observation.capabilities.is_some());
         let (input, command) = navigation.update(raw);
+        // Save once a value is no longer being changed.
+        if !matches!(input.edit, Edit::Brightness | Edit::Rotation) {
+            store.save(input.settings);
+        }
         // The PD session drains these between transactions; a full queue
         // drops the press, as a missed tap would.
         if let Some(command) = command {
@@ -614,6 +628,7 @@ async fn meter_task(mut backlight: embassy_hc32::pwm::TimerA4Pwm) {
     let mut next_read = Instant::now() + METER_READ_PERIOD;
     let mut orientation_updates = ORIENTATION.anon_receiver();
     let mut current_rotation = Orientation::Normal;
+    let mut sensed_rotation = Orientation::Normal;
     let mut last_secs = u32::MAX;
     let mut last_pulse = None;
     let mut ports = [0u16; 6];
@@ -645,11 +660,17 @@ async fn meter_task(mut backlight: embassy_hc32::pwm::TimerA4Pwm) {
                 .ok();
         }
 
-        // `tilt_task` owns the orientation (it flipped and reconfigured the
-        // sensor); this task only follows it for flushing and redraws.
-        if let Some(rotation_now) = orientation_updates.try_changed()
-            && rotation_now != current_rotation
-        {
+        // `tilt_task` owns the sensed orientation (it flipped and reconfigured
+        // the sensor); this task follows it unless the settings lock one.
+        if let Some(tilted) = orientation_updates.try_changed() {
+            sensed_rotation = tilted;
+        }
+        let rotation_now = match input.settings.rotation {
+            Rotation::Auto => sensed_rotation,
+            Rotation::Normal => Orientation::Normal,
+            Rotation::Flipped => Orientation::Inverted,
+        };
+        if rotation_now != current_rotation {
             // Only the display task changes MADCTL, before its matching RASET.
             unsafe {
                 panel::set_orientation(rotation_now).await;
@@ -1001,7 +1022,8 @@ async fn main(spawner: Spawner) {
     const ONE_SPAWN: &str = "each task is spawned once into its one-slot pool";
     spawner.spawn(pulse_task().expect(ONE_SPAWN));
     spawner.spawn(tilt_task(tilt_input).expect(ONE_SPAWN));
-    spawner.spawn(button_task(button_inputs).expect(ONE_SPAWN));
+    let (store, saved) = settings_store::Store::open();
+    spawner.spawn(button_task(button_inputs, store, saved.unwrap_or_default()).expect(ONE_SPAWN));
     spawner.spawn(meter_task(backlight_pwm).expect(ONE_SPAWN));
     spawner.spawn(pd_task::run(pd_input, pc13_input).expect(ONE_SPAWN));
 }
