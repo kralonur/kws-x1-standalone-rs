@@ -126,9 +126,8 @@ unsafe fn HardFault(frame: &cortex_m_rt::ExceptionFrame) -> ! {
 /// Heartbeat square colours, alternating with each pulse.
 const ALIVE_A: u16 = render::WHITE;
 const ALIVE_B: u16 = render::BLUE;
-/// Heartbeat colour while the I2C3 latch is tripped: RGB565 0x00f8, a dark
-/// blue (R 0, G 7, B 24).
-const FAULT: u16 = render::color(0x00f8);
+/// Heartbeat colour while the I2C3 latch is tripped.
+const FAULT: u16 = render::RED;
 
 /// 240 x 135 RGB565 frame, memory byte order expected by `panel::flush`.
 /// It lives alone in SRAM2 (`memory.x`): in SRAMH+SRAM1 it left the stack only

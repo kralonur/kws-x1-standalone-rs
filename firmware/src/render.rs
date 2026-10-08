@@ -19,6 +19,7 @@ pub const fn color(rgb565: u16) -> u16 {
 pub const BLACK: u16 = color(0x0000);
 pub const WHITE: u16 = color(0xffff);
 pub const BLUE: u16 = color(0x001f);
+pub const RED: u16 = color(0xf800);
 const CYAN: u16 = color(0x07ff);
 
 // 3 columns x 5 rows bitmap font (same glyphs as the earlier application).
