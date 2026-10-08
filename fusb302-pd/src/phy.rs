@@ -221,6 +221,15 @@ enum ResetStep {
     WaitCapsAfterCarrier,
 }
 
+/// The stage of an acknowledged Request's AMS (section 8.3.3.3).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RequestStage {
+    /// Accept, Reject or Wait not yet received (PE_SNK_Select_Capability).
+    AwaitReply,
+    /// Accept received: power transitions until PS_RDY (PE_SNK_Transition_Sink).
+    TransitionSink,
+}
+
 pub struct Session<'a, B: I2c, D, C, P: Platform> {
     bus: &'a mut B,
     delay: &'a mut D,
@@ -258,10 +267,7 @@ pub struct Session<'a, B: I2c, D, C, P: Platform> {
     query_until: Option<(u64, pd_protocol::pd_partner::PartnerQuery)>,
     // INTERRUPTA bits seen since the last transmission was written.
     tx_wait_flags: u8,
-    // Request acknowledged, its Accept/Reject/Wait not yet received.
-    request_reply: bool,
-    // Accept received: power transitions until PS_RDY (PE_SNK_Transition_Sink).
-    power_transition: bool,
+    request: Option<RequestStage>,
     // Time of the Protocol Error that armed our Soft_Reset: it bounds
     // tProtErrSoftReset/tSoftReset (Table 6.68).
     protocol_error_at: Option<u64>,
@@ -342,8 +348,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             pps_status_until: None,
             query_until: None,
             tx_wait_flags: 0,
-            request_reply: false,
-            power_transition: false,
+            request: None,
             protocol_error_at: None,
             recovering: false,
             hard_reset_armed: false,
@@ -804,8 +809,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             && bytes.len() == 14
             && self.persistent
             && self.trace().contract_seen
-            && !self.power_transition
-            && !self.request_reply
+            && self.request.is_none()
             && self.cable_phase == CablePhase::Idle
             && self.selection.is_none_or(|s| !s.request_in_flight())
             && header & 0xf1ff == 0xb082
@@ -837,7 +841,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         }
         // One Request at a time: none while its Accept/Reject/Wait is awaited
         // (PE_SNK_Select_Capability) or power transitions (PE_SNK_Transition_Sink).
-        if is_request && (self.request_reply || self.power_transition) {
+        if is_request && self.request.is_some() {
             return Err(Error::Request);
         }
         let cable_optional = sop == Sop::Cable
@@ -1233,7 +1237,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                     }
                 }
                 if is_request {
-                    self.request_reply = true;
+                    self.request = Some(RequestStage::AwaitReply);
                     if let Some(selection) = self.selection {
                         selection.note_request_sent(t_ack);
                     }
@@ -1281,8 +1285,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
     /// Abandon the AMS in progress for a Soft Reset (sections 7.1.1, 9.2.5.2).
     fn begin_reset(&mut self) {
         self.contract_object = None;
-        self.request_reply = false;
-        self.power_transition = false;
+        self.request = None;
         self.pps_status_until = None;
         self.query_until = None;
         self.status_reply = None;
@@ -1622,7 +1625,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                     } else {
                         return Err(Error::Peer);
                     }
-                } else if self.power_transition {
+                } else if self.request == Some(RequestStage::TransitionSink) {
                     // Table 7.1, section 9.2.4.6: only PS_RDY while power transitions;
                     // another Message at this revision is answered with Hard Reset.
                     if header & 0xf01f != 6 {
@@ -1632,22 +1635,24 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                         self.arm_hard_reset();
                         return Ok(length);
                     }
-                    self.power_transition = false;
+                    self.request = None;
                     self.recovering = false;
                     self.contract_object = self.requested_object;
-                } else if self.request_reply {
+                } else if self.request == Some(RequestStage::AwaitReply) {
                     // PE_SNK_Select_Capability: Accept, Reject or Wait; anything
                     // else is a Protocol Error (Figure 9.18 note 1).
-                    match header & 0xf01f {
-                        3 => self.power_transition = true,
-                        4 | 12 => self.recovering = false,
+                    self.request = match header & 0xf01f {
+                        3 => Some(RequestStage::TransitionSink),
+                        4 | 12 => {
+                            self.recovering = false;
+                            None
+                        }
                         _ if same_revision => {
                             self.protocol_error()?;
                             return Ok(length);
                         }
                         _ => return Err(Error::Peer),
-                    }
-                    self.request_reply = false;
+                    };
                 } else if self.persistent
                     && self.trace().contract_seen
                     && self.reset != Some(ResetStep::AcceptPartner)
@@ -1949,8 +1954,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             || self.pending_tx.is_some()
             || self.reset_in_progress()
             || self.recovering
-            || self.request_reply
-            || self.power_transition
+            || self.request.is_some()
             || !self.trace().tx_goodcrc
             || (!established && (!self.trace().accept_seen || !self.trace().psrdy_seen))
             || self.queue.iter().any(Option::is_some)
@@ -2018,9 +2022,11 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         P::set_rx_idle(false);
         let now = self.clock.now_ms();
         let since = |at: Option<u64>, min: u64| at.is_some_and(|at| now.saturating_sub(at) >= min);
-        let timed_out = ((self.request_reply || self.reset == Some(ResetStep::AwaitAccept))
+        let timed_out = ((self.request == Some(RequestStage::AwaitReply)
+            || self.reset == Some(ResetStep::AwaitAccept))
             && since(self.t_ack, SENDER_RESPONSE_MIN_MS))
-            || (self.power_transition && since(self.t_accept, PS_TRANSITION_MIN_MS));
+            || (self.request == Some(RequestStage::TransitionSink)
+                && since(self.t_accept, PS_TRANSITION_MIN_MS));
         let startup_reset = matches!(
             self.reset,
             Some(ResetStep::AcceptPartner | ResetStep::WaitCapsAfterReset)
