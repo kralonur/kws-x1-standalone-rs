@@ -6,7 +6,7 @@
 pub use pd_protocol::pd_rx::*;
 
 /// SOP* address from an RX FIFO token byte. The low five token bits are
-/// undefined (FUSB302B datasheet Table 42), not flags.
+/// undefined (DS Table 42), not flags.
 fn address(token: u8) -> Result<Sop, Error> {
     match token >> 5 {
         7 => Ok(Sop::Partner),

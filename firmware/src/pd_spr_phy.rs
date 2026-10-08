@@ -12,10 +12,12 @@ impl fusb302_pd::phy::Platform for X1Platform {
     const CABLE_SVID_NO_PROGRESS_TIMEOUT_MS: u64 = 1_000;
     type Limits = kws_x1_core::pd_spr::X1Limits;
     const BASELINE: [u8; 11] = crate::pd_cc::EXPECTED;
-    const MEASURE: u8 = 0x31;
+    const MEASURE: u8 = crate::pd_sniff::MEASURE;
     const INSPECTION_CC: u8 = 1;
     // Owner-approved direct CC2 VCONN diagnostic; no role negotiation added.
-    const INSPECTION_SWITCHES0: u8 = 0x24;
+    // VCONN on CC2 while the measure block watches CC1 (DS Table 18).
+    const INSPECTION_SWITCHES0: u8 =
+        fusb302_pd::register::switches0::VCONN_CC2 | fusb302_pd::register::switches0::MEAS_CC1;
     const ALLOW_STALE_SINK_TX_NG: bool = true;
     const VBUS_ADDRESS: u8 = 0x40;
     const VBUS_REGISTER: u8 = 2;

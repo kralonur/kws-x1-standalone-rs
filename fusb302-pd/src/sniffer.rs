@@ -7,7 +7,9 @@
 //! and the FIFO are never written, so the tester never transmits or acknowledges
 //! (no GoodCRC). Errors/cancellation halt without retry or cleanup writes.
 use crate::pd_sniff;
-use crate::register::{self, STATUS0, control1, interrupt, interrupta, interruptb, status1};
+use crate::register::{
+    self, STATUS0, control1, interrupt, interrupta, interruptb, power, status1, switches0,
+};
 use crate::{config as pd_cc, service as pd_service, snapshot as pd};
 use embedded_hal_async::{delay::DelayNs, i2c::I2c};
 use pd_cc::ConfigRegister;
@@ -33,8 +35,13 @@ pub enum Error<E> {
 /// Configuration while listening: passive values plus measure/receiver power.
 pub const fn listening(baseline: [u8; 11], cc: u8) -> [u8; 11] {
     let mut values = baseline;
-    values[1] = if cc == 1 { 0x04 } else { 0x08 };
-    values[7] = 0x07;
+    // Indices follow `snapshot::REGISTERS`: 1 is SWITCHES0, 7 is POWER.
+    values[1] = if cc == 1 {
+        switches0::MEAS_CC1
+    } else {
+        switches0::MEAS_CC2
+    };
+    values[7] = power::BANDGAP_WAKE | power::RECEIVER | power::MEASURE;
     values
 }
 
@@ -157,9 +164,18 @@ impl Sniffer {
             }));
         }
         // Measure block + references (also powers the receiver; flushed below).
-        evidence.write(bus, ConfigRegister::Power, 0x07).await?;
+        evidence
+            .write(
+                bus,
+                ConfigRegister::Power,
+                power::BANDGAP_WAKE | power::RECEIVER | power::MEASURE,
+            )
+            .await?;
         let mut cc = [0; 2];
-        for (i, switches) in [0x04, 0x08].into_iter().enumerate() {
+        for (i, switches) in [switches0::MEAS_CC1, switches0::MEAS_CC2]
+            .into_iter()
+            .enumerate()
+        {
             evidence
                 .write(bus, ConfigRegister::Switches0, switches)
                 .await?;
@@ -169,7 +185,13 @@ impl Sniffer {
         evidence.cc_status = Some(cc);
         let selected = pd_sniff::orientation(cc).ok_or(Error::Orientation(cc))?;
         // Keep receiver/references OFF while clocking the flush.
-        evidence.write(bus, ConfigRegister::Power, 0x09).await?;
+        evidence
+            .write(
+                bus,
+                ConfigRegister::Power,
+                power::OSCILLATOR | power::BANDGAP_WAKE,
+            )
+            .await?;
         evidence
             .write(bus, ConfigRegister::Control1Flush, control1::RX_FLUSH)
             .await?;
@@ -197,10 +219,20 @@ impl Sniffer {
             .write(
                 bus,
                 ConfigRegister::Switches0,
-                if selected == 1 { 0x04 } else { 0x08 },
+                if selected == 1 {
+                    switches0::MEAS_CC1
+                } else {
+                    switches0::MEAS_CC2
+                },
             )
             .await?;
-        evidence.write(bus, ConfigRegister::Power, 0x07).await?;
+        evidence
+            .write(
+                bus,
+                ConfigRegister::Power,
+                power::BANDGAP_WAKE | power::RECEIVER | power::MEASURE,
+            )
+            .await?;
         if let Some((register, value)) = mismatch(bus, listening(self.baseline, selected)).await? {
             return Err(Error::Config(pd_cc::Error::Verify { register, value }));
         }

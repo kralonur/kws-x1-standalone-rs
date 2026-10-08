@@ -1,6 +1,6 @@
 //! Caller-baseline-gated FUSB startup measurements and passive release.
 use crate::config::{ConfigRegister, Error, write_checked};
-use crate::register;
+use crate::register::{self, power, switches0};
 use crate::snapshot::{self as pd, Snapshot};
 use embedded_hal_async::{delay::DelayNs, i2c::I2c};
 
@@ -141,17 +141,38 @@ impl Diagnostic {
         bus: &mut B,
         delay: &mut D,
     ) -> Result<Report, Error<B::Error>> {
-        write_checked(bus, ConfigRegister::Power, 0x07).await?; // bandgap + receiver/references + measure
-        write_checked(bus, ConfigRegister::Switches0, 0x07).await?; // preserve Rd1/Rd2, measure CC1 only
+        write_checked(
+            bus,
+            ConfigRegister::Power,
+            power::BANDGAP_WAKE | power::RECEIVER | power::MEASURE,
+        )
+        .await?;
+        // Keep Rd on both CCs; measure one CC at a time.
+        write_checked(
+            bus,
+            ConfigRegister::Switches0,
+            switches0::PDWN1 | switches0::PDWN2 | switches0::MEAS_CC1,
+        )
+        .await?;
         delay.delay_ms(10).await; // nominal settling interval; no calibrated voltage result
         let cc1 = read(bus, register::STATUS0).await?;
-        write_checked(bus, ConfigRegister::Switches0, 0x0b).await?; // preserve Rd1/Rd2, measure CC2 only
+        write_checked(
+            bus,
+            ConfigRegister::Switches0,
+            switches0::PDWN1 | switches0::PDWN2 | switches0::MEAS_CC2,
+        )
+        .await?;
         delay.delay_ms(10).await;
         let cc2 = read(bus, register::STATUS0).await?;
         // Normal successful sequence restores the known originals. On any
         // preceding error/cancellation: abort, no retries or blind cleanup writes.
-        write_checked(bus, ConfigRegister::Switches0, 0x03).await?;
-        write_checked(bus, ConfigRegister::Power, 0x01).await?;
+        write_checked(
+            bus,
+            ConfigRegister::Switches0,
+            switches0::PDWN1 | switches0::PDWN2,
+        )
+        .await?;
+        write_checked(bus, ConfigRegister::Power, power::BANDGAP_WAKE).await?;
         let after = pd::snapshot(bus).await.map_err(|f| Error::Bus {
             register: f.register,
             source: f.source,

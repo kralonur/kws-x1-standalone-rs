@@ -8,7 +8,8 @@ use embedded_hal_async::i2c::I2c;
 /// 7-bit I2C address of the FUSB302BMPX, FUSB302BVMPX and FUSB302BUCX
 /// (DS Table 15); the FUSB302B01/10/11MPX variants answer at 0x23..=0x25.
 pub const ADDRESS: u8 = 0x22;
-// Datasheet: ID, switches, control0..3, power, masks, status0/1. Never interrupt/FIFO.
+// DS Table 16: ID, switches, control0..3, power, masks, status0/1. Never the
+// read-clear interrupts or the FIFO.
 pub const REGISTERS: [u8; 13] = [
     DEVICE_ID, SWITCHES0, SWITCHES1, CONTROL0, CONTROL1, CONTROL2, CONTROL3, POWER, MASK, MASKA,
     MASKB, STATUS0, STATUS1,

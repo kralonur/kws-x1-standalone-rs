@@ -14,7 +14,8 @@
 //! Errors/cancellation halt without hardware cleanup; only normal completion restores.
 use crate::header;
 use crate::register::{
-    self, control0, control1, control3, interrupt, interrupta, interruptb, reset, status0, status1,
+    self, control0, control1, control3, interrupt, interrupta, interruptb, power, reset, status0,
+    status1, switches0, switches1, tx_token,
 };
 use crate::snapshot::{self, Snapshot};
 use crate::{config as pd_cc, observation as pd, service as pd_service};
@@ -536,7 +537,11 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             return Err(Error::InputVoltage { raw });
         }
         self.trace().vbus_pre_mv = Some(mv as u16);
-        self.checked(ConfigRegister::Power, 9).await?;
+        self.checked(
+            ConfigRegister::Power,
+            power::OSCILLATOR | power::BANDGAP_WAKE,
+        )
+        .await?;
         self.checked(ConfigRegister::Control1Flush, control1::RX_FLUSH)
             .await?;
         let status = self.byte(register::STATUS1).await?;
@@ -558,7 +563,13 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         }
         self.checked(
             ConfigRegister::Switches0,
-            if selected == 1 { 7 } else { 0x0b },
+            switches0::PDWN1
+                | switches0::PDWN2
+                | if selected == 1 {
+                    switches0::MEAS_CC1
+                } else {
+                    switches0::MEAS_CC2
+                },
         )
         .await?;
         // Keep GoodCRC SPECREV=01 and sink/UFP roles; do not write reserved
@@ -566,12 +577,22 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         self.trace().tx_off_verified = false; // before enabling TX await, even on NACK
         self.checked(
             ConfigRegister::Switches1,
-            if selected == 1 { 0x25 } else { 0x26 },
+            switches1::SPECREV_2_0
+                | switches1::AUTO_CRC
+                | if selected == 1 {
+                    switches1::TXCC1
+                } else {
+                    switches1::TXCC2
+                },
         )
         .await?;
         self.steps_t0 = Some(self.clock.now_ms());
         self.step(3);
-        self.checked(ConfigRegister::Power, 0x0f).await?;
+        self.checked(
+            ConfigRegister::Power,
+            power::BANDGAP_WAKE | power::RECEIVER | power::MEASURE | power::OSCILLATOR,
+        )
+        .await?;
         self.observation.selected_cc = Some(selected);
         self.lifecycle = Lifecycle::Running;
         Ok(())
@@ -1051,9 +1072,10 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         {
             return Err(Error::Request);
         }
+        // nRetryCount: 3 for PD 2.0 (revision 1), 2 for PD 3.x (revision 2).
         let retries = match revision {
-            1 => 7,
-            2 => 5,
+            1 => control3::AUTO_RETRY | control3::n_retries(3),
+            2 => control3::AUTO_RETRY | control3::n_retries(2),
             _ => return Err(Error::Request),
         };
         if is_request {
@@ -1125,22 +1147,24 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             });
         }
         self.checked(ConfigRegister::Control3, retries).await?;
-        let token_len = 0x80 | (bytes.len() as u8);
+        use tx_token::{EOP, JAM_CRC, PACKSYM, SOP1, SOP2, SOP3, TXOFF, TXON};
+        let token_len = PACKSYM | (bytes.len() as u8);
         let mut fifo = [0u8; 40];
-        fifo[0] = 0x43;
+        fifo[0] = register::FIFOS;
+        // SOP* ordered sets as Sync symbols (USB PD R3.2 §5.4).
         fifo[1..5].copy_from_slice(match sop {
-            Sop::Cable => &[0x12, 0x12, 0x1b, 0x1b],
-            Sop::CableDoublePrime => &[0x12, 0x1b, 0x12, 0x1b],
-            _ => &[0x12, 0x12, 0x12, 0x13],
+            Sop::Cable => &[SOP1, SOP1, SOP3, SOP3],
+            Sop::CableDoublePrime => &[SOP1, SOP3, SOP1, SOP3],
+            _ => &[SOP1, SOP1, SOP1, SOP2],
         });
         fifo[5] = token_len;
         fifo[6..6 + bytes.len()].copy_from_slice(bytes);
         let end = 6 + bytes.len();
         let total_end = if matches!(sop, Sop::Cable | Sop::CableDoublePrime) {
-            fifo[end..end + 3].copy_from_slice(&[0xff, 0x14, 0xa1]);
+            fifo[end..end + 3].copy_from_slice(&[JAM_CRC, EOP, TXON]);
             end + 3
         } else {
-            fifo[end..end + 4].copy_from_slice(&[0xff, 0x14, 0xfe, 0xa1]);
+            fifo[end..end + 4].copy_from_slice(&[JAM_CRC, EOP, TXOFF, TXON]);
             end + 4
         };
         self.register = Some(register::FIFOS);
@@ -1429,8 +1453,14 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
     /// each write read back. Rd on the active CC never changes.
     async fn probe_rp(&mut self) -> Result<(), Error<B::Error>> {
         let (both, single) = match self.observation.selected_cc {
-            Some(1) => (7, 5),
-            Some(2) => (0x0b, 0x0a),
+            Some(1) => (
+                switches0::PDWN1 | switches0::PDWN2 | switches0::MEAS_CC1,
+                switches0::PDWN1 | switches0::MEAS_CC1,
+            ),
+            Some(2) => (
+                switches0::PDWN1 | switches0::PDWN2 | switches0::MEAS_CC2,
+                switches0::PDWN2 | switches0::MEAS_CC2,
+            ),
             _ => return Ok(()),
         };
         self.rp_probing = true;
@@ -1918,8 +1948,8 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             return Err(Error::Request);
         }
         let original_switch = match self.observation.selected_cc {
-            Some(1) => 7,
-            Some(2) => 11,
+            Some(1) => switches0::PDWN1 | switches0::PDWN2 | switches0::MEAS_CC1,
+            Some(2) => switches0::PDWN1 | switches0::PDWN2 | switches0::MEAS_CC2,
             _ => return Err(Error::Orientation),
         };
         let mut report = CableReport {
@@ -2064,10 +2094,17 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
     /// The power-on register baseline the boot path checks: AUTO_CRC and the
     /// receiver off, MEAS_CC cleared. SWITCHES0 keeps both PDWN bits (Rd).
     async fn restore_baseline(&mut self) -> Result<Snapshot, Error<B::Error>> {
-        self.checked(ConfigRegister::Switches1, 0x20).await?;
-        self.checked(ConfigRegister::Power, 1).await?;
-        self.checked(ConfigRegister::Switches0, 3).await?;
-        self.checked(ConfigRegister::Control3, 6).await?;
+        self.checked(ConfigRegister::Switches1, switches1::SPECREV_2_0)
+            .await?;
+        self.checked(ConfigRegister::Power, power::BANDGAP_WAKE)
+            .await?;
+        self.checked(
+            ConfigRegister::Switches0,
+            switches0::PDWN1 | switches0::PDWN2,
+        )
+        .await?;
+        self.checked(ConfigRegister::Control3, control3::n_retries(3))
+            .await?;
         self.register = None; // snapshot cancellation has unknown in-flight address
         let after = snapshot::snapshot(self.bus).await.map_err(|f| {
             self.register = Some(f.register);
