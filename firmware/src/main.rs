@@ -303,13 +303,26 @@ fn stack_use() -> (u32, u32) {
     (peak as u32, (words * 4) as u32)
 }
 
+/// PH2 Func4 is TIMA_4_PWM7 (HC32 Datasheet Table 2-1): TimerA4 channel 7.
+const BACKLIGHT_FUNCTION: u8 = 4;
+const BACKLIGHT_CHANNEL: u8 = 7;
+/// TimerA4 counts PCLK1 / 256 (RM 21.5.4, set up by the HAL), so 1875 counts
+/// give 125 Hz at a 60 MHz PCLK1, 156 Hz at 75 MHz. Retained, hardware-tested.
+const BACKLIGHT_PERIOD: u16 = 1875;
+/// Compare at 60% of [`BACKLIGHT_PERIOD`]: the retained backlight level.
+const BACKLIGHT_COMPARE: u16 = 1125;
+
 unsafe fn init_backlight(
     compare: u16,
 ) -> Result<(embassy_hc32::pwm::TimerA4Pwm, AlternatePin), embassy_hc32::pwm::Error> {
     unsafe {
-        let mut pwm = embassy_hc32::pwm::TimerA4Pwm::new(hc32f460_pac::Tmra4::steal(), 7, 1875)?;
+        let mut pwm = embassy_hc32::pwm::TimerA4Pwm::new(
+            hc32f460_pac::Tmra4::steal(),
+            BACKLIGHT_CHANNEL,
+            BACKLIGHT_PERIOD,
+        )?;
 
-        let pin = AlternatePin::new(Port::H, 2, 4, AlternateMode::DigitalOutput);
+        let pin = AlternatePin::new(Port::H, 2, BACKLIGHT_FUNCTION, AlternateMode::DigitalOutput);
         pwm.start(compare)?;
         Ok((pwm, pin))
     }
@@ -703,7 +716,7 @@ async fn main(spawner: Spawner) {
         //   3. Then claim the line, clear pending and enable NVIC (register()).
         // The timer arguments are constants, so this only fails on an edit
         // that breaks them; stop like a failed clock or panel start.
-        let Ok(backlight) = init_backlight(1125) else {
+        let Ok(backlight) = init_backlight(BACKLIGHT_COMPARE) else {
             loop {
                 core::hint::spin_loop();
             }
