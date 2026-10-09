@@ -147,15 +147,23 @@ fn detail_page() -> Option<u32> {
     (shown && page == Detail::Cable).then_some(u32::from(view.section))
 }
 
+/// Applies the input task's requests. With `plug_in_charger` (both CCs
+/// carried Rp at startup) CC2 is the charger's own CC pin, not a cable's VCONN
+/// pin, so no cable query starts: it would drive VCONN into the charger.
 fn control(
     observation: &mut fusb302_pd::observation::Observation,
     selection: &firmware_core::pd_spr::Selection,
     store: Option<&dyn firmware_core::pd_svids::Store>,
+    plug_in_charger: bool,
 ) {
     while let Ok(command) = crate::PD_COMMANDS.try_receive() {
-        selection.apply(command);
+        if !(plug_in_charger && command == firmware_core::buttons::PdCommand::QueryCable) {
+            selection.apply(command);
+        }
     }
-    pd::control_cable_selection(observation, selection, detail_page(), store);
+    if !plug_in_charger {
+        pd::control_cable_selection(observation, selection, detail_page(), store);
+    }
 }
 
 /// Back held (for the session's stop delay) ends the session.
@@ -192,9 +200,10 @@ pub async fn run(observation: &mut pd::Observation, report: pd_cc::Report) {
     let mut delay = TimedDelay;
     let mut error;
     {
+        let plug_in_charger = observation.listen.is_some();
         let control = |observation: &mut fusb302_pd::observation::Observation,
                        store: Option<&dyn firmware_core::pd_svids::Store>| {
-            control(observation, &selection, store)
+            control(observation, &selection, store, plug_in_charger)
         };
         let identity_started = || selection.set_mode_cursor(None);
         let board_observation = *observation;

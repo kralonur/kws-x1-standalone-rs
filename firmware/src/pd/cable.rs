@@ -79,6 +79,11 @@ pub fn cable_lines(observation: Observation, page: u32, svid: Option<u16>) -> [[
     use firmware_core::{pd_cable_details, pd_cable_modes::Status};
     let mut rows = [[b' '; 24]; 8];
     put(&mut rows[0], b"E-MARKER DETAILS");
+    if observation.listen.is_some() {
+        put(&mut rows[1], b"METER PLUG IN CHARGER:");
+        put(&mut rows[2], b"NO CABLE TO INSPECT");
+        return rows;
+    }
     let Some(spr) = observation.spr else {
         put(&mut rows[1], b"NO DISCOVERY YET");
         return rows;
