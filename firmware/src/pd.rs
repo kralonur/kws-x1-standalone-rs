@@ -605,9 +605,12 @@ pub fn startup_lines(observation: Observation) -> Option<[[u8; 24]; 8]> {
             None => b"BOTH RP: NO SINGLE LINE",
         },
     );
-    put(&mut rows[3], b"HEARD SOP:--- CABLE:---");
-    decimal3(&mut rows[3], 10, listen.partner.into());
-    decimal3(&mut rows[3], 20, listen.cable.into());
+    for (index, row) in rows[3..5].iter_mut().enumerate() {
+        put(row, b"CC- SOP:--- CABLE:---");
+        row[2] = b'1' + index as u8;
+        decimal3(row, 8, listen.partner[index].into());
+        decimal3(row, 18, listen.cable[index].into());
+    }
     Some(rows)
 }
 

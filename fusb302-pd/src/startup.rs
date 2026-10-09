@@ -96,12 +96,14 @@ pub struct Report {
 /// What the receive-only listen on both CCs heard.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Listen {
-    /// The one CC (1 or 2) that showed BMC activity, if exactly one did.
+    /// The CC (1 or 2) the source talks on: the one CC that received
+    /// CRC-valid packets or, when neither or both did, the one CC that showed
+    /// BMC activity.
     pub traffic: Option<u8>,
-    /// CRC-valid packets addressed to the port partner (SOP) and to a cable
-    /// plug (SOP' or SOP''), counted from the RX FIFO after each window.
-    pub partner: u8,
-    pub cable: u8,
+    /// Per CC: CRC-valid packets addressed to the port partner (SOP) and to a
+    /// cable plug (SOP' or SOP''), counted from the RX FIFO after its window.
+    pub partner: [u8; 2],
+    pub cable: [u8; 2],
 }
 
 /// Largest FIFO frame the listen counts: token, header, seven data objects
@@ -236,9 +238,9 @@ async fn listen<B: I2c, D: DelayNs>(bus: &mut B, delay: &mut D) -> Result<Listen
         control1::ENSOP1 | control1::ENSOP2,
     )
     .await?;
-    for (seen, measure) in active
-        .iter_mut()
-        .zip([switches0::MEAS_CC1, switches0::MEAS_CC2])
+    for (index, measure) in [switches0::MEAS_CC1, switches0::MEAS_CC2]
+        .into_iter()
+        .enumerate()
     {
         write_checked(
             bus,
@@ -249,46 +251,55 @@ async fn listen<B: I2c, D: DelayNs>(bus: &mut B, delay: &mut D) -> Result<Listen
         write_checked(bus, ConfigRegister::Control1Flush, control1::RX_FLUSH).await?;
         read(bus, register::INTERRUPT).await?;
         delay.delay_ms(TRAFFIC_LISTEN_MS).await;
-        *seen = read(bus, register::INTERRUPT).await? & interrupt::I_ACTIVITY != 0;
-        count_frames(bus, &mut heard).await?;
+        active[index] = read(bus, register::INTERRUPT).await? & interrupt::I_ACTIVITY != 0;
+        let (partner, cable) = count_frames(bus).await?;
+        heard.partner[index] = partner;
+        heard.cable[index] = cable;
     }
     write_checked(bus, ConfigRegister::Control1, 0).await?;
     write_checked(bus, ConfigRegister::Control1Flush, control1::RX_FLUSH).await?;
-    heard.traffic = match active {
-        [true, false] => Some(1),
-        [false, true] => Some(2),
-        _ => None,
-    };
+    let received = heard.partner.map(|count| count > 0);
+    heard.traffic = only_one(received).or(only_one(active));
     Ok(heard)
 }
 
-/// Count the complete, CRC-valid frames in the RX FIFO by address. The first
-/// frame that does not decode (an extended or overrun one) ends the count;
-/// the caller flushes the rest.
-async fn count_frames<B: I2c>(bus: &mut B, heard: &mut Listen) -> Result<(), Error<B::Error>> {
+/// The CC (1 or 2) whose flag alone is set.
+fn only_one(flags: [bool; 2]) -> Option<u8> {
+    match flags {
+        [true, false] => Some(1),
+        [false, true] => Some(2),
+        _ => None,
+    }
+}
+
+/// Count the complete, CRC-valid frames in the RX FIFO addressed to the
+/// partner and to a cable plug. The first frame that does not decode (an
+/// extended or overrun one) ends the count; the caller flushes the rest.
+async fn count_frames<B: I2c>(bus: &mut B) -> Result<(u8, u8), Error<B::Error>> {
+    let (mut partner, mut cable) = (0u8, 0u8);
     let mut frame = [0; MAX_FRAME];
     while read(bus, register::STATUS1).await? & status1::RX_EMPTY == 0 {
         let mut prefix = [0; 3];
         read_fifo(bus, &mut prefix).await?;
         let Ok(length) = pd_rx::fifo_frame_len(&prefix) else {
-            return Ok(());
+            break;
         };
         let Some(rest) = frame.get_mut(3..length) else {
-            return Ok(());
+            break;
         };
         read_fifo(bus, rest).await?;
         frame[..3].copy_from_slice(&prefix);
         let Ok((decoded, _)) = pd_rx::decode(&frame[..length]) else {
-            return Ok(());
+            break;
         };
         let count = match decoded.sop() {
-            Sop::Partner => &mut heard.partner,
-            Sop::Cable | Sop::CableDoublePrime => &mut heard.cable,
+            Sop::Partner => &mut partner,
+            Sop::Cable | Sop::CableDoublePrime => &mut cable,
             Sop::Debug | Sop::DebugDoublePrime => continue,
         };
         *count = count.saturating_add(1);
     }
-    Ok(())
+    Ok((partner, cable))
 }
 
 async fn read_fifo<B: I2c>(bus: &mut B, bytes: &mut [u8]) -> Result<(), Error<B::Error>> {
