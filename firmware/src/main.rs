@@ -385,6 +385,12 @@ const BACKLIGHT_PERIOD: u16 = 1875;
 /// Compare at 60% of [`BACKLIGHT_PERIOD`]: the retained backlight level.
 const BACKLIGHT_COMPARE: u16 = 1125;
 
+/// The reset cause flags, read only: nothing here clears them.
+fn reset_flags() -> u16 {
+    // SAFETY: a read of a status register that no other code accesses.
+    unsafe { hc32f460_pac::Rmu::steal() }.rstf0().read().bits()
+}
+
 unsafe fn init_backlight(
     compare: u16,
 ) -> Result<(embassy_hc32::pwm::TimerA4Pwm, AlternatePin), embassy_hc32::pwm::Error> {
@@ -835,6 +841,7 @@ async fn meter_task(mut backlight: embassy_hc32::pwm::TimerA4Pwm) {
                                 reg_failures: IRQ_REG_FAILURES.load(Ordering::Relaxed),
                                 errors: I2C_ERRORS.load(Ordering::Relaxed),
                                 reads: ASYNC_READS.load(Ordering::Relaxed),
+                                reset_flags: reset_flags(),
                             };
                             ui::draw_detail(
                                 canvas,

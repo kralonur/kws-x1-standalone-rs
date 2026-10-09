@@ -92,7 +92,31 @@ pub struct Counters {
     pub reg_failures: u32,
     pub errors: u32,
     pub reads: u32,
+    /// The reset cause flags (`RESET_FLAGS` bit order).
+    pub reset_flags: u16,
 }
+
+/// Reset cause flag names, by bit (reference manual, reset control flag
+/// register): power-on, reset pin, brown-out, voltage detectors 1 and 2,
+/// watchdog, special watchdog, power-down, software, MPU error, RAM parity,
+/// RAM ECC, clock failure, crystal failure and multiple causes.
+const RESET_FLAGS: [&[u8]; 15] = [
+    b"POWER",
+    b"PIN",
+    b"BROWNOUT",
+    b"PVD1",
+    b"PVD2",
+    b"WDT",
+    b"SWDT",
+    b"PDOWN",
+    b"SOFT",
+    b"MPU",
+    b"RAMPAR",
+    b"RAMECC",
+    b"CLOCK",
+    b"XTAL",
+    b"MULTI",
+];
 
 /// System page, one value per row: the I2C bus section, then timing and
 /// memory. `STEP` is the bring-up step whose wait
@@ -143,5 +167,16 @@ pub fn system_lines(counters: Counters, latched: bool) -> [Lines; 2] {
     put(&mut timing[3], b"STACK: 000000/000000");
     decimal(&mut timing[3], 7, 6, counters.stack_peak);
     decimal(&mut timing[3], 14, 6, counters.stack_size);
+    // The flags are never cleared here: after a power-up only POWER is set,
+    // so any other name is a reset since the meter last lost power.
+    put(&mut timing[4], b"LAST RESET: 0000");
+    hex(&mut timing[4], 12, 4, u32::from(counters.reset_flags));
+    let mut at = 0;
+    for (bit, name) in RESET_FLAGS.iter().enumerate() {
+        if counters.reset_flags & (1 << bit) != 0 && at + name.len() <= timing[5].len() {
+            timing[5][at..at + name.len()].copy_from_slice(name);
+            at += name.len() + 1;
+        }
+    }
     [rows, timing]
 }
