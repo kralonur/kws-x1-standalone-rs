@@ -779,6 +779,17 @@ fn spr_lines(observation: Observation, spr: SprObservation) -> [[u8; 24]; 8] {
         put(&mut rows[5], b"CHARGER BUSY: OVERRIDDEN");
     }
     put(&mut rows[6], b"POST S1:---- C3:----    ");
+    // Start refused (orientation or input voltage): both STATUS0 samples
+    // (BC_LVL in bits 1:0, ACTIVITY 0x40), e.g. Rp on both CCs with no
+    // traffic heard.
+    if observation.phase == Phase::Guarded
+        && let Some(cc) = observation.cc_status
+    {
+        rows[6] = [b' '; 24];
+        put(&mut rows[6], b"CC1:-- CC2:--");
+        hex8(&mut rows[6], 4, cc[0]);
+        hex8(&mut rows[6], 11, cc[1]);
+    }
     if observation.phase == Phase::Contracted
         && let Some(after) = observation.post_snapshot
     {
