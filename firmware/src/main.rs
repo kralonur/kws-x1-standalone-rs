@@ -740,6 +740,7 @@ async fn meter_task(mut backlight: embassy_hc32::pwm::TimerA4Pwm) {
                             peaks,
                             protocol: pd::protocol(&observation),
                             cc: pd::attached_cc(&observation),
+                            flipped: current_rotation == Orientation::Inverted,
                             alive: pulse_now,
                         },
                     );

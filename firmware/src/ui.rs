@@ -193,6 +193,8 @@ pub struct Meter {
     pub protocol: Protocol,
     /// Attached CC pin (1 or 2), when known.
     pub cc: Option<u8>,
+    /// The frame is shown turned 180 degrees, so the plug is on the right.
+    pub flipped: bool,
     /// Heartbeat dot colour (alternates every pulse, red on a bus fault).
     pub alive: Rgb565,
 }
@@ -439,11 +441,9 @@ const POWER_VALUE: i32 = 43;
 /// Below this current magnitude no flow arrow is drawn, in mA: a chosen
 /// margin over the shunt's zero offset (40 INA226 counts), not a measured one.
 const FLOW_MIN_MA: u32 = 20;
-/// Flow arrow length and head half-height, in pixels, and its centre's
-/// offset from the card's top-right corner.
-const FLOW_LENGTH: i32 = 16;
-const FLOW_HEAD: i32 = 4;
-const FLOW_CENTRE: Point = Point::new(-16, 7);
+/// Right edge of the flow chevrons on the bottom row, in pixels: clear of
+/// the heartbeat dot.
+const FLOW_RIGHT: i32 = RIGHT - 10;
 /// Protocol pill along the bottom edge.
 const PILL: Rectangle = Rectangle::new(Point::new(4, 121), Size::new(52, 13));
 
@@ -491,11 +491,6 @@ pub fn draw_meter<D: DrawTarget<Color = Rgb565>>(
     for (area, tint, color, label, value, unit) in &cards {
         card(target, *area, *tint, None);
         card_label(target, *area, label, *color);
-        if *area == AMPS_CARD
-            && let Some(reading) = meter.reading
-        {
-            flow_arrow(target, *area, reading.ma, *color);
-        }
         value_with_unit(
             target,
             &READING,
@@ -562,6 +557,9 @@ pub fn draw_meter<D: DrawTarget<Color = Rgb565>>(
         HorizontalAlignment::Left,
         WHITE,
     );
+    if let Some(reading) = meter.reading {
+        flow(target, reading.ma, meter.flipped);
+    }
     fill(
         target,
         Circle::with_center(Point::new(RIGHT - 1, HINT_BASELINE - 5), 6),
@@ -569,42 +567,27 @@ pub fn draw_meter<D: DrawTarget<Color = Rgb565>>(
     );
 }
 
-/// Which way the current flows between the meter's ends, as the meter sits:
-/// plug on the left, receptacle on the right. Positive current runs from the
-/// receptacle to the plug (charger on the receptacle), so the arrow points
-/// left; negative current points it right.
-fn flow_arrow<D: DrawTarget<Color = Rgb565>>(
-    target: &mut D,
-    area: Rectangle,
-    ma: i32,
-    color: Rgb565,
-) {
+/// Which way the current flows, as chevrons on the bottom row. Upright, the
+/// plug is on the left and the receptacle on the right; `flipped` (the frame
+/// turned 180 degrees) swaps them. Positive current runs from the receptacle
+/// to the plug (charger on the receptacle), negative the other way.
+fn flow<D: DrawTarget<Color = Rgb565>>(target: &mut D, ma: i32, flipped: bool) {
     if ma.unsigned_abs() < FLOW_MIN_MA {
         return;
     }
-    let centre =
-        Point::new(area.top_left.x + area.size.width as i32, area.top_left.y) + FLOW_CENTRE;
-    // +1 points right, -1 points left.
-    let toward = if ma < 0 { 1 } else { -1 };
-    let tip = centre + Point::new(toward * FLOW_LENGTH / 2, 0);
-    let base = tip - Point::new(toward * 2 * FLOW_HEAD, 0);
-    let tail = centre - Point::new(toward * FLOW_LENGTH / 2, 0);
-    fill(
+    let toward_plug = ma > 0;
+    let chevrons = if toward_plug != flipped {
+        "< < <"
+    } else {
+        "> > >"
+    };
+    text(
         target,
-        Rectangle::with_corners(
-            Point::new(tail.x.min(base.x), centre.y - 1),
-            Point::new(tail.x.max(base.x), centre.y + 1),
-        ),
-        color,
-    );
-    fill(
-        target,
-        Triangle::new(
-            tip,
-            base - Point::new(0, FLOW_HEAD),
-            base + Point::new(0, FLOW_HEAD),
-        ),
-        color,
+        &BOLD,
+        chevrons,
+        Point::new(FLOW_RIGHT, HINT_BASELINE - 1),
+        HorizontalAlignment::Right,
+        CYAN,
     );
 }
 
