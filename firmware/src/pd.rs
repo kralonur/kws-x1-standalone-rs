@@ -25,6 +25,15 @@ pub struct Observation {
     /// Sink startup: what the receive-only listen heard when both CCs carried
     /// Rp (`fusb302_pd::startup::Listen`).
     pub listen: Option<fusb302_pd::startup::Listen>,
+    /// This boot runs the 5 A cable test (`Settings::cable_test`): with the
+    /// meter's plug in the charger, answer as a 5 A cable.
+    pub cable_test: bool,
+    /// The saved settings asked for the test, but this boot did not follow a
+    /// power-up or clearing that request failed, so it runs normally (`main`).
+    pub cable_test_skipped: bool,
+    /// The boot's reset cause flags, shown during the test, whose page is
+    /// the only one open.
+    pub reset_flags: u16,
 }
 impl core::ops::Deref for Observation {
     type Target = fusb302_pd::observation::Observation;
@@ -42,6 +51,9 @@ impl Observation {
         Self {
             phy: fusb302_pd::observation::Observation::new(),
             pc13_high: None,
+            cable_test: false,
+            cable_test_skipped: false,
+            reset_flags: 0,
             sniff: None,
             last_boot: None,
             listen: None,
@@ -599,12 +611,17 @@ pub fn startup_lines(observation: Observation) -> Option<[[u8; 24]; 8]> {
     };
     put(
         &mut rows[2],
-        match listen.traffic {
-            Some(1) => b"BOTH RP: TRAFFIC ON CC1",
-            Some(_) => b"BOTH RP: TRAFFIC ON CC2",
-            None => b"BOTH RP: NO SINGLE LINE",
+        match (listen.vconn, listen.traffic) {
+            (Some(1), _) => &b"BOTH RP: VCONN ON CC1"[..],
+            (Some(_), _) => b"BOTH RP: VCONN ON CC2",
+            (None, Some(1)) => b"BOTH RP: TRAFFIC ON CC1",
+            (None, Some(_)) => b"BOTH RP: TRAFFIC ON CC2",
+            (None, None) => b"BOTH RP: NO SINGLE LINE",
         },
     );
+    if listen.vconn.is_some() {
+        return Some(rows);
+    }
     for (index, row) in rows[3..5].iter_mut().enumerate() {
         put(row, b"CC- SOP:--- CABLE:---");
         row[2] = b'1' + index as u8;

@@ -80,8 +80,15 @@ pub fn cable_lines(observation: Observation, page: u32, svid: Option<u16>) -> [[
     let mut rows = [[b' '; 24]; 8];
     put(&mut rows[0], b"E-MARKER DETAILS");
     if observation.listen.is_some() {
+        // The meter's plug is the cable: in the 5 A cable test it answers as
+        // a 5 A passive cable (`pd_spr_phy::BoardPlatform::EMARKER`).
         put(&mut rows[1], b"METER PLUG IN CHARGER:");
-        put(&mut rows[2], b"NO CABLE TO INSPECT");
+        if observation.cable_test {
+            put(&mut rows[2], b"ACTS AS 5A CABLE");
+        } else {
+            put(&mut rows[2], b"NOT ACTING AS 5A CABLE");
+            put(&mut rows[3], b"5A TEST: CHARGER PAGE");
+        }
         return rows;
     }
     let Some(spr) = observation.spr else {

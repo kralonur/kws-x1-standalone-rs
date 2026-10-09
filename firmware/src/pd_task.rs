@@ -23,8 +23,16 @@ use crate::{
 /// PHY interrupts remain globally masked. Errors halt without reset, retry or
 /// cleanup.
 #[embassy_executor::task]
-pub async fn run(mut input: embassy_hc32::exti::ExtiInput, pc13: InputPin) {
+pub async fn run(
+    mut input: embassy_hc32::exti::ExtiInput,
+    pc13: InputPin,
+    cable_test: bool,
+    cable_test_skipped: bool,
+) {
     let mut observation = pd::Observation::new();
+    observation.cable_test = cable_test;
+    observation.cable_test_skipped = cable_test_skipped;
+    observation.reset_flags = crate::reset_flags();
     // Three equal samples or passthrough: an unsettled level never starts a sink.
     let mut sink_mode = true;
     for _ in 0..3 {

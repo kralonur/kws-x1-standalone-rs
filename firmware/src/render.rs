@@ -171,12 +171,18 @@ pub fn system_lines(counters: Counters, latched: bool) -> [Lines; 2] {
     // so any other name is a reset since the meter last lost power.
     put(&mut timing[4], b"LAST RESET: 0000");
     hex(&mut timing[4], 12, 4, u32::from(counters.reset_flags));
+    reset_names(&mut timing[5], counters.reset_flags);
+    [rows, timing]
+}
+
+/// The names of the set reset cause `flags`, space separated, as many as fit
+/// in `row`.
+pub fn reset_names(row: &mut [u8], flags: u16) {
     let mut at = 0;
     for (bit, name) in RESET_FLAGS.iter().enumerate() {
-        if counters.reset_flags & (1 << bit) != 0 && at + name.len() <= timing[5].len() {
-            timing[5][at..at + name.len()].copy_from_slice(name);
+        if flags & (1 << bit) != 0 && at + name.len() <= row.len() {
+            row[at..at + name.len()].copy_from_slice(name);
             at += name.len() + 1;
         }
     }
-    [rows, timing]
 }

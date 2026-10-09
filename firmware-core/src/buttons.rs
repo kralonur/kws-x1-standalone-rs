@@ -183,6 +183,16 @@ impl Page {
         }
     }
 
+    fn is_charger(self) -> bool {
+        matches!(
+            self,
+            Self::Detail {
+                page: Detail::Charger,
+                ..
+            }
+        )
+    }
+
     /// Whether the page has anything to show: in passthrough the meter only
     /// listens, so the selectors and the charger and cable pages, which need
     /// a sink session, are left out.
@@ -269,6 +279,11 @@ pub enum PdCommand {
     Confirm,
     /// Ask the cable for its E-marker identity (from fixed 5 V only).
     QueryCable,
+    /// Ask an EPR capable charger for its EPR offer (informational only).
+    QueryEpr,
+    /// Restart the meter through a charger power cycle: into the 5 A cable
+    /// test when the saved settings ask for it, else back to normal.
+    Restart,
 }
 
 /// One coherent input state, published by the input task as a unit.
@@ -303,6 +318,10 @@ pub struct Navigation {
     ok_long: bool,
     /// A sink session runs, so the PD and PPS pages can select.
     selectable: bool,
+    /// The meter's plug sits in the charger, and whether this boot runs the
+    /// 5 A cable test.
+    plug_in_charger: bool,
+    cable_test: bool,
     /// Last row the shown detail list can start at, as the renderer laid it
     /// out.
     list_end: u16,
@@ -335,6 +354,18 @@ impl Navigation {
         }
     }
 
+    /// The meter's plug sits in the charger (`plug_in_charger`), and this
+    /// boot runs the 5 A cable test (`testing`). Then a long OK on the
+    /// charger page restarts into the test, and Back there ends it.
+    /// The test keeps the charger page open (`update`).
+    pub fn set_cable_test(&mut self, plug_in_charger: bool, testing: bool) {
+        self.plug_in_charger = plug_in_charger;
+        self.cable_test = testing;
+        if testing && !self.input.page.is_charger() {
+            self.input.page = Page::detail(Detail::Charger);
+        }
+    }
+
     /// The last row the shown detail list can start at; a list that got
     /// shorter scrolls back.
     pub fn set_list_end(&mut self, end: u16) {
@@ -346,6 +377,7 @@ impl Navigation {
 
     /// Feed one sample; returns the input state and any PD session request.
     pub fn update(&mut self, raw_pressed: u8) -> (Input, Option<PdCommand>) {
+        let page_before = self.input.page;
         let before = self.debounce.stable();
         let after = self.debounce.update(raw_pressed, DEFAULT_THRESHOLD);
         let rising = after & !before;
@@ -386,16 +418,21 @@ impl Navigation {
         if after & OK != 0 {
             self.ok_held += 1;
             if self.ok_held == LONG_OK_SAMPLES
-                && matches!(
-                    self.input.page,
-                    Page::Detail {
-                        page: Detail::Cable,
-                        ..
-                    }
-                )
+                && let Page::Detail { page, .. } = self.input.page
             {
-                self.ok_long = true;
-                command = Some(PdCommand::QueryCable);
+                let query = match page {
+                    Detail::Cable => Some(PdCommand::QueryCable),
+                    Detail::Charger if self.plug_in_charger && !self.cable_test => {
+                        self.input.settings.cable_test = true;
+                        Some(PdCommand::Restart)
+                    }
+                    Detail::Charger => Some(PdCommand::QueryEpr),
+                    _ => None,
+                };
+                if query.is_some() {
+                    self.ok_long = true;
+                    command = query;
+                }
             }
         } else {
             if falling & OK != 0 && !self.ok_long {
@@ -405,7 +442,20 @@ impl Navigation {
             self.ok_long = false;
         }
         if rising & BACK != 0 {
-            self.back();
+            if self.cable_test && self.input.page.is_charger() {
+                command = Some(PdCommand::Restart);
+            } else {
+                self.back();
+            }
+        }
+        // The 5 A cable test tells the charger the path carries 5 A, so the
+        // meter stays on the charger page: it scrolls, asks for the EPR offer
+        // or ends the test, and never selects another profile.
+        if self.cable_test {
+            if !self.input.page.is_charger() {
+                self.input.page = page_before;
+            }
+            command = command.filter(|c| matches!(c, PdCommand::QueryEpr | PdCommand::Restart));
         }
         (self.input, command)
     }

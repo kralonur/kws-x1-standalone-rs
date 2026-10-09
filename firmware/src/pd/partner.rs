@@ -2,22 +2,29 @@
 
 use super::{Observation, decimal3, decimal4, hex, hex8, put};
 
-/// Sections of the charger list: three with a PD session, else one.
+/// Sections of the charger list: with a PD session the capabilities (two
+/// sections, the second often empty) and the three answer sections; else one.
 pub fn partner_sections(observation: Observation) -> u32 {
     if observation.spr.is_some() && observation.sniff.is_none() {
-        3
+        CAPABILITY_SECTIONS + 3
     } else {
         1
     }
 }
 
-/// Section `page` of [`partner_sections`]: what the Source said about itself
-/// in reply to the information requests (`pd_partner`). These are the
-/// Source's claims, not measurements.
+/// Section `page` of [`partner_sections`]: what the Source offers, then what
+/// it said about itself in reply to the information requests (`pd_partner`).
+/// These are the Source's claims, not measurements.
 pub fn partner_lines(observation: Observation, page: u32) -> [[u8; 24]; 8] {
     use firmware_core::pd_partner::Answer;
+    if page < CAPABILITY_SECTIONS {
+        let rows = capability_rows(observation);
+        let mut section = [[b' '; 24]; 8];
+        section.copy_from_slice(&rows[page as usize * 8..][..8]);
+        return section;
+    }
     let mut rows = [[b' '; 24]; 8];
-    let sub = page % 3;
+    let sub = (page - CAPABILITY_SECTIONS) % 3;
     let second = sub == 1;
     put(
         &mut rows[0],
@@ -173,6 +180,113 @@ pub fn partner_lines(observation: Observation, page: u32) -> [[u8; 24]; 8] {
 }
 
 /// Charger page wording for the outcome of one information request.
+/// EPR Mode Capable, bit 23 of the first (vSafe5V Fixed Supply) PDO (Table 6.9).
+const EPR_MODE_CAPABLE: u32 = 1 << 23;
+/// Fixed Supply PDO type, bits 31..30 = 00b (Table 6.7).
+const PDO_TYPE_SHIFT: u32 = 30;
+/// EPR Capabilities: the 5V Fixed Supply PDO and up to 10 more (section 6.5.15).
+const EPR_OBJECTS: usize = firmware_core::pd_spr::EPR_OBJECTS;
+
+/// Sections the capability list spans: a heading, up to 11 objects (the
+/// EPR answer, section 6.5.15) and two note rows.
+const CAPABILITY_SECTIONS: u32 = 2;
+/// Where the reset cause follows the 12-character `CAPABILITIES` heading.
+const TEST_RESET_COLUMN: usize = 13;
+
+/// Everything the charger offers: the EPR answer once received (its first
+/// seven positions repeat the SPR offer, section 6.5.15.1), else the latest
+/// Source_Capabilities. A `*` marks a fixed object the answer rates above the
+/// live offer: the charger gives that current only with a 5 A cable.
+fn capability_rows(observation: Observation) -> [[u8; 24]; 16] {
+    use firmware_core::pd_sniff::describe_pdo;
+    use firmware_core::pd_spr::EprOffer;
+    let mut rows = [[b' '; 24]; 16];
+    put(&mut rows[0], b"CAPABILITIES");
+    // How the test boot started: POWER alone is the restart's power cycle.
+    if observation.cable_test {
+        crate::render::reset_names(&mut rows[0][TEST_RESET_COLUMN..], observation.reset_flags);
+    }
+    let Some(spr) = observation.spr else {
+        put(&mut rows[1], b"NO PD SESSION");
+        return rows;
+    };
+    let Some(caps) = observation.capabilities.filter(|caps| caps.count > 0) else {
+        put(&mut rows[1], b"NO OFFER YET");
+        return rows;
+    };
+    let live = &caps.objects[..usize::from(caps.count)];
+    let objects = match spr.epr_offer {
+        EprOffer::Received(answer) => answer,
+        _ => {
+            let mut objects = [0; EPR_OBJECTS];
+            for (object, advertised) in objects.iter_mut().zip(live) {
+                *object = advertised.raw;
+            }
+            objects
+        }
+    };
+    let mut next = 1;
+    let mut marked = false;
+    for (index, &raw) in objects.iter().enumerate().filter(|(_, raw)| **raw != 0) {
+        rows[next] = describe_pdo(index, raw);
+        if live
+            .get(index)
+            .is_some_and(|advertised| above_live(raw, advertised.raw))
+        {
+            rows[next][23] = b'*';
+            marked = true;
+        }
+        next += 1;
+    }
+    if marked {
+        put(&mut rows[next], b"* ONLY WITH 5A CABLE");
+        next += 1;
+    }
+    // With the meter's plug in the charger, a long OK first restarts into
+    // the 5 A cable test (`PdCommand::Restart`); there it asks for EPR.
+    let plug_in_charger = observation.listen.is_some();
+    let note: &[u8] = if plug_in_charger && observation.cable_test_skipped {
+        b"5A TEST DID NOT START"
+    } else if plug_in_charger && !observation.cable_test {
+        b"HOLD OK: 5A CABLE TEST"
+    } else if !epr_capable(live[0].raw) || spr.peer_revision != Some(3) {
+        b""
+    } else {
+        match spr.epr_offer {
+            EprOffer::NotAsked => b"HOLD OK FOR ALL",
+            EprOffer::Asked => b"ASKING CHARGER",
+            EprOffer::NoAnswer => b"NO ANSWER, HOLD OK AGAIN",
+            EprOffer::NotSent => b"LINE BUSY, HOLD OK AGAIN",
+            EprOffer::Received(_) => b"",
+        }
+    };
+    put(&mut rows[next], note);
+    // The test locks this page whether or not the plug sits in the charger.
+    let follow: &[u8] = match (plug_in_charger, observation.cable_test) {
+        (_, true) => b"BACK ENDS 5A CABLE TEST",
+        (true, false) if observation.cable_test_skipped => b"HOLD OK TO TRY AGAIN",
+        (true, false) => b"(METER RESTARTS FOR IT)",
+        (false, false) => b"",
+    };
+    put(&mut rows[next + usize::from(!note.is_empty())], follow);
+    rows
+}
+
+/// Both Fixed Supply objects at the same voltage, `answer` with the higher
+/// Maximum Current (Table 6.9: bits 19..10 voltage, 9..0 current).
+fn above_live(answer: u32, live: u32) -> bool {
+    const VOLTAGE: u32 = 0x3ff << 10;
+    const CURRENT: u32 = 0x3ff;
+    answer >> PDO_TYPE_SHIFT == 0
+        && live >> PDO_TYPE_SHIFT == 0
+        && answer & VOLTAGE == live & VOLTAGE
+        && answer & CURRENT > live & CURRENT
+}
+
+fn epr_capable(first: u32) -> bool {
+    first >> PDO_TYPE_SHIFT == 0 && first & EPR_MODE_CAPABLE != 0
+}
+
 fn answer_caption<T>(answer: &firmware_core::pd_partner::Answer<T>) -> &'static [u8] {
     use firmware_core::pd_partner::Answer;
     match answer {

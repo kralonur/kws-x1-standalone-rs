@@ -86,6 +86,8 @@ pub struct SprObservation {
     pub pps_status: Option<pd_protocol::pd_spr::PpsStatus>,
     /// What the Source answered to the information requests (`pd_partner`).
     pub partner: pd_protocol::pd_partner::PartnerInfo,
+    /// The Source's EPR offer, when asked (`pd_spr::Limits::EPR_OFFER`).
+    pub epr_offer: pd_protocol::pd_spr::EprOffer,
     /// Last transmission that saw neither GoodCRC nor I_RETRYFAIL (ERR 000D).
     pub tx_timeout: Option<TxTimeout>,
     /// The last transmission was acknowledged by its GoodCRC frame without the
@@ -146,6 +148,7 @@ impl SprObservation {
             sink_tx_refused: None,
             pps_status: None,
             partner: pd_protocol::pd_partner::PartnerInfo::PENDING,
+            epr_offer: pd_protocol::pd_spr::EprOffer::NotAsked,
             tx_timeout: None,
             tx_ack_goodcrc_only: false,
             txsent_missing: 0,

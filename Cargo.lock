@@ -608,7 +608,7 @@ checksum = "a513e167849a384b7f9b746e517604398518590a9142f4846a32e3c2a4de7b11"
 [[package]]
 name = "pd-protocol"
 version = "0.1.0"
-source = "git+https://github.com/kralonur/embedded-charging-protocols-rs?rev=b9adb62c2baf8a357ff486eaa779ada8fcf686e4#b9adb62c2baf8a357ff486eaa779ada8fcf686e4"
+source = "git+https://github.com/kralonur/embedded-charging-protocols-rs?rev=a9885a8a1c49689bf825e5701580d6c0ca964e7f#a9885a8a1c49689bf825e5701580d6c0ca964e7f"
 dependencies = [
  "usbpd",
  "usbpd-traits",
@@ -898,7 +898,7 @@ dependencies = [
 [[package]]
 name = "usbpd"
 version = "2.0.0"
-source = "git+https://github.com/kralonur/usbpd?rev=326123330125a74cfc75bc58a6d81e34fba97f4b#326123330125a74cfc75bc58a6d81e34fba97f4b"
+source = "git+https://github.com/kralonur/usbpd?rev=13e747ed116874d30ac54b58ff6d104cbe6b9ec3#13e747ed116874d30ac54b58ff6d104cbe6b9ec3"
 dependencies = [
  "byteorder",
  "embassy-futures",
@@ -912,7 +912,7 @@ dependencies = [
 [[package]]
 name = "usbpd-traits"
 version = "2.0.0"
-source = "git+https://github.com/kralonur/usbpd?rev=326123330125a74cfc75bc58a6d81e34fba97f4b#326123330125a74cfc75bc58a6d81e34fba97f4b"
+source = "git+https://github.com/kralonur/usbpd?rev=13e747ed116874d30ac54b58ff6d104cbe6b9ec3#13e747ed116874d30ac54b58ff6d104cbe6b9ec3"
 
 [[package]]
 name = "valuable"

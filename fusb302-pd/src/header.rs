@@ -96,6 +96,9 @@ pub mod vdm {
     pub const VERSION_2_1: u32 = 0x2800;
     /// Object Position (10:8), Command Type (7:6), Reserved (5) and Command (4:0).
     pub const POSITION_TYPE_COMMAND: u32 = 0x07ff;
+    /// Command Type, bits 7:6, and its ACK value.
+    pub const COMMAND_TYPE: u32 = 0xc0;
+    pub const ACK: u32 = 0x40;
     /// Command, bits 4:0.
     pub const COMMAND: u32 = 0x1f;
     pub const DISCOVER_IDENTITY: u32 = 1;

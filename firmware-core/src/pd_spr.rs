@@ -6,7 +6,8 @@ use pd_protocol::pd_spr as shared;
 use usbpd::protocol_layer::message::data::{request, source_capabilities};
 
 pub use shared::{
-    Contract, Error, MaintainedTrace, Mode, PPS_MIN_MA, PpsStatus, ReviewedRdo, Timer,
+    Contract, EPR_OBJECTS, EprOffer, Error, MaintainedTrace, Mode, PPS_MIN_MA, PpsStatus,
+    ReviewedRdo, Timer,
 };
 // Preserve the existing board scheduling: delays are policy, not wire timers.
 pub const PPS_STATUS_SETTLE_MS: u64 = 300;
@@ -92,6 +93,9 @@ impl shared::Limits for BoardLimits {
     const SINK_POWER_MODES: u8 = 0b0000_0010;
     const FIXED_TARGETS: &'static [u16] = &[5_000, 9_000, 12_000, 15_000, 20_000];
     const PPS_REFRESH_MS: u64 = PPS_REFRESH_MS;
+    // Long OK on the charger page asks an EPR capable charger for its EPR
+    // offer, as the source firmware's capability test did.
+    const EPR_OFFER: bool = true;
     fn status() -> Option<[u8; 7]> {
         // Table 6.51: DC input (VBUS), no battery; temperature reporting and
         // power-state change reporting unsupported. No qualified fault events.
@@ -156,6 +160,11 @@ impl Selection {
             PdCommand::QueryCable => {
                 self.request_cable();
             }
+            PdCommand::QueryEpr => {
+                self.request_epr_offer();
+            }
+            // The board's PD task restarts the meter; nothing to request.
+            PdCommand::Restart => {}
         }
     }
 

@@ -40,6 +40,12 @@ pub trait Platform {
     const INSPECTION_CC: u8;
     const INSPECTION_SWITCHES0: u8;
     const ALLOW_STALE_SINK_TX_NG: bool;
+    /// NOT STANDARD (`docs/SAFETY.md`): when the port's own plug sits in the
+    /// Source's receptacle (Rp on both CCs), that plug is the cable, so the
+    /// port answers SOP' Discover Identity as a passive cable with these ID
+    /// Header, Cert Stat, Product and Passive Cable VDOs (USB PD section
+    /// 6.4.4.3.1). `None` never answers SOP'.
+    const EMARKER: Option<[u32; 4]> = None;
     const VBUS_ADDRESS: u8;
     const VBUS_REGISTER: u8;
     fn voltage_mv(raw: u16) -> u32;
@@ -64,8 +70,16 @@ const VCONN_SETTLE_MS: u64 = 50;
 /// Not_Supported is its answer: the same selected tSenderResponse (Table 7.9)
 /// and GoodCRC origin as the engine's SenderResponseTimer.
 const PPS_STATUS_ANSWER_MS: u64 = usbpd_traits::SENDER_RESPONSE_MS;
-/// The same window for the answer to an information request (`pd_partner`).
+/// The same window for the answer to an information request (`pd_partner`)
+/// and to EPR_Get_Source_Cap.
 const QUERY_ANSWER_MS: u64 = usbpd_traits::SENDER_RESPONSE_MS;
+/// Window after a Chunk request's GoodCRC for that Chunk: tChunkSenderResponse
+/// is 24-30 ms (Table 6.68); the engine's SenderResponseTimer bounds the whole
+/// answer, so the same selected value is used.
+const CHUNK_ANSWER_MS: u64 = usbpd_traits::SENDER_RESPONSE_MS;
+/// Discover Identity ACK from a passive cable: header, VDM Header and four
+/// VDOs (USB PD section 6.4.4.3.1).
+const EMARKER_REPLY_BYTES: usize = 2 + 5 * 4;
 /// Hard Reset timer cases are re-checked against the minimum of each timer
 /// (Table 7.9): tSenderResponse 27 ms, tPSTransition (SPR) 450 ms.
 const SENDER_RESPONSE_MIN_MS: u64 = 27;
@@ -142,6 +156,15 @@ pub fn sink_tx_allowed(status0: u8, status1: u8, rp_required: bool) -> bool {
 pub fn stale_sink_tx_ng(status0: u8, status1: u8) -> bool {
     use crate::pd_sniff::{Rp, quiet, rp};
     quiet(status0) && status1 & status1::RX_EMPTY != 0 && rp(status0) == Some(Rp::Current1A5)
+}
+
+/// The same quiet refusal at the Rp default level, which is neither SinkTxOK
+/// nor SinkTxNG. Measured with the port's plug in the Source's receptacle (Rp
+/// on both CCs, Rd kept on both): the talking CC read BC_LVL 1 (STATUS0 11h)
+/// for a whole PD3 contract, so no AMS start was ever allowed.
+pub fn stale_rp_default(status0: u8, status1: u8) -> bool {
+    use crate::pd_sniff::{Rp, quiet, rp};
+    quiet(status0) && status1 & status1::RX_EMPTY != 0 && rp(status0) == Some(Rp::Default)
 }
 
 pub trait Clock {
@@ -254,6 +277,10 @@ pub struct Config<'a, L: Limits> {
     pub trace_cable: bool,
     pub stop_requested: Option<fn() -> bool>,
     pub svids: Option<&'a dyn pd_protocol::pd_svids::Store>,
+    /// Answer as the cable (`Platform::EMARKER`) when the plug sits in the
+    /// Source's receptacle. The Source asks only right after attach, so the
+    /// caller decides before the session starts.
+    pub emarker: bool,
 }
 
 /// Whether the session may perform I/O. `Halted` is the latch held across
@@ -299,6 +326,17 @@ pub struct Session<'a, B: I2c, D, C, P: Platform> {
     pps_status_until: Option<u64>,
     // An information request acknowledged: its answer window and which request.
     query_until: Option<(u64, pd_protocol::pd_partner::PartnerQuery)>,
+    // EPR_Get_Source_Cap or a Chunk request acknowledged: the answer window
+    // ends at this time, and the Chunk of EPR_Source_Capabilities due next.
+    epr_until: Option<u64>,
+    epr_chunk: Option<u8>,
+    // `Platform::EMARKER` while the plug sits in the Source's receptacle, the
+    // reply due to its SOP' Discover Identity, and our SOP' MessageID.
+    emarker: Option<[u32; 4]>,
+    emarker_due: Option<[u8; EMARKER_REPLY_BYTES]>,
+    emarker_id: u16,
+    // The session started with Rp on both CCs (the plug in the Source's receptacle).
+    both_rp: bool,
     // INTERRUPTA bits seen since the last transmission was written.
     tx_wait_flags: u8,
     request: Option<RequestStage>,
@@ -390,6 +428,12 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             caps_reply: false,
             pps_status_until: None,
             query_until: None,
+            epr_until: None,
+            epr_chunk: None,
+            emarker: None,
+            emarker_due: None,
+            emarker_id: 0,
+            both_rp: false,
             tx_wait_flags: 0,
             request: None,
             protocol_error_at: None,
@@ -531,7 +575,11 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         let selected = match (cc[0] & 3 != 0, cc[1] & 3 != 0, traffic) {
             (true, false, _) => 1,
             (false, true, _) => 2,
-            (true, true, Some(cc @ (1 | 2))) => cc,
+            (true, true, Some(cc @ (1 | 2))) => {
+                self.both_rp = true;
+                self.emarker = P::EMARKER.filter(|_| self.config.emarker);
+                cc
+            }
             _ => return Err(Error::Orientation),
         };
         self.trace().tx_off_verified = true;
@@ -606,9 +654,35 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             power::BANDGAP_WAKE | power::RECEIVER | power::MEASURE | power::OSCILLATOR,
         )
         .await?;
+        if self.emarker.is_some() {
+            self.checked(ConfigRegister::Control1, control1::ENSOP1)
+                .await?;
+        }
         self.observation.selected_cc = Some(selected);
         self.lifecycle = Lifecycle::Running;
         Ok(())
+    }
+    /// Discover Identity ACK as a passive cable plug (USB PD section
+    /// 6.4.4.3.1): Vendor_Defined from the Cable Plug, the request's
+    /// revision, our SOP' MessageID; the request's VDM Header as ACK.
+    fn emarker_reply(&self, request: u16, vdm: u32, vdos: [u32; 4]) -> [u8; EMARKER_REPLY_BYTES] {
+        let header = header::data::VENDOR_DEFINED
+            | (request & header::SPEC_REVISION)
+            | header::POWER_ROLE
+            | header::message_id(self.emarker_id)
+            | header::objects(5);
+        let mut reply = [0; EMARKER_REPLY_BYTES];
+        reply[..2].copy_from_slice(&header.to_le_bytes());
+        let ack = vdm & !vdm::COMMAND_TYPE | vdm::ACK;
+        for (slot, object) in reply[2..]
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(core::iter::once(ack).chain(vdos))
+        {
+            *slot = object.to_le_bytes();
+        }
+        reply
     }
     async fn poll(&mut self) -> Result<Option<pd_service::Packet>, Error<B::Error>> {
         if let Some(selection) = self.config.selection {
@@ -633,6 +707,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             }
             self.trace().pps_status = selection.pps_status();
             self.trace().partner = selection.partner_info();
+            self.trace().epr_offer = selection.epr_offer();
         }
         if self.config.trace_steps
             && self.observation.rp_probe.is_none()
@@ -741,7 +816,12 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                         CablePhase::SecondReset | CablePhase::SecondStatus
                     )
             );
-            if (!cable_allowed && frame.sop() != Sop::Partner)
+            // With `Platform::EMARKER` the port is the cable: SOP' from the
+            // Source (Cable Plug bit clear) addresses it.
+            let emarker_frame = self.emarker.is_some()
+                && frame.sop() == Sop::Cable
+                && frame.header() & header::POWER_ROLE == 0;
+            if (!cable_allowed && !emarker_frame && frame.sop() != Sop::Partner)
                 || (cable_allowed && frame.header() & header::POWER_ROLE == 0)
             {
                 return Err(Error::Peer);
@@ -758,6 +838,27 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                 self.trace().tx_goodcrc = true;
                 if self.trace().request_id.is_some() && !self.trace().contract_seen {
                     self.step(7);
+                }
+                return Ok(None);
+            }
+            if emarker_frame {
+                // Only Discover Identity is answered; other SOP' Messages get
+                // their GoodCRC and no reply, as from a cable without modes.
+                let request = frame.header();
+                // A cable Soft_Reset restarts the plug's MessageID (section 6.7.1.2).
+                if request & header::KIND_COUNT == header::control::SOFT_RESET {
+                    self.emarker_id = 0;
+                }
+                let vdm = frame.data().first_chunk().map(|b| u32::from_le_bytes(*b));
+                if let (Some(vdos), Some(vdm)) = (self.emarker, vdm)
+                    && matches!((request & header::SPEC_REVISION) >> 6, 1 | 2)
+                    && request & header::KIND_COUNT
+                        == header::objects(1) | header::data::VENDOR_DEFINED
+                    && vdm >> 16 == vdm::PD_SID
+                    && vdm & (vdm::STRUCTURED | vdm::POSITION_TYPE_COMMAND)
+                        == vdm::STRUCTURED | vdm::DISCOVER_IDENTITY
+                {
+                    self.emarker_due = Some(self.emarker_reply(request, vdm, vdos));
                 }
                 return Ok(None);
             }
@@ -990,7 +1091,10 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                             _ => false,
                         }
                 }));
-        if sop != Sop::Partner && !cable_identity {
+        // The cable plug's answer to SOP' Discover Identity (`Platform::EMARKER`).
+        let emarker_reply =
+            sop == Sop::Cable && self.emarker_due.is_some_and(|due| due[..] == *bytes);
+        if sop != Sop::Partner && !cable_identity && !emarker_reply {
             return Err(Error::Request);
         }
         // Get_PPS_Status (sections 6.3.20, 7.16): PD3 only, from Ready with an
@@ -1024,7 +1128,8 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             return Err(Error::Request); // PE_SNK_Wait_for_Get_Status is not Ready
         }
         let answer_window_open = self.query_until.is_some_and(|(until, _)| now < until)
-            || self.pps_status_until.is_some_and(|until| now < until);
+            || self.pps_status_until.is_some_and(|until| now < until)
+            || self.epr_until.is_some_and(|until| now < until);
         let query_ready = sop == Sop::Partner
             && self.tx_revision == header::REVISION_3
             && self.config.persistent
@@ -1040,6 +1145,25 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         let query = query_ready
             .then(|| pd_protocol::pd_partner::query_request(bytes))
             .flatten();
+        // EPR_Get_Source_Cap (`pd_spr::Limits::EPR_OFFER`): exactly its bytes,
+        // as an information request, while policy has asked for the EPR offer.
+        let epr_request = query_ready
+            && bytes.len() == 6
+            && header & header::WITHOUT_ID == pd_protocol::pd_spr::EPR_GET_SOURCE_CAP_HEADER
+            && bytes[2..] == pd_protocol::pd_spr::EPR_GET_SOURCE_CAP_BODY
+            && self
+                .config
+                .selection
+                .is_some_and(|s| s.epr_offer() == pd_protocol::pd_spr::EprOffer::Asked);
+        // The chunking layer's request for the next Chunk of that answer, right
+        // after the previous Chunk closed its window.
+        let epr_chunk_request = sop == Sop::Partner
+            && bytes.len() == 6
+            && self.epr_until.is_none()
+            && header & header::WITHOUT_ID == pd_protocol::pd_spr::EPR_CHUNK_REQUEST_HEADER
+            && self.epr_chunk.is_some_and(|chunk| {
+                chunk > 0 && bytes[2..] == pd_protocol::pd_spr::epr_chunk_request(chunk)
+            });
         let sink_alert = query_ready
             && bytes.len() == 6
             && header & header::WITHOUT_ID
@@ -1060,6 +1184,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             || cable_identity
             || pps_status_query
             || query.is_some()
+            || epr_request
             || (is_request
                 && self.config.persistent
                 && self.trace().contract_seen
@@ -1075,6 +1200,9 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             && !sink_alert
             && !pps_status_query
             && query.is_none()
+            && !epr_request
+            && !epr_chunk_request
+            && !emarker_reply
             && !soft_reset
         {
             return Err(Error::Request);
@@ -1337,6 +1465,13 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                 if let Some(query) = query {
                     self.query_until = Some((t_ack + QUERY_ANSWER_MS, query));
                 }
+                if epr_request {
+                    self.epr_until = Some(t_ack + QUERY_ANSWER_MS);
+                    self.epr_chunk = Some(0);
+                }
+                if epr_chunk_request {
+                    self.epr_until = Some(t_ack + CHUNK_ANSWER_MS);
+                }
                 if is_request {
                     self.requested_object = rdo.map(|rdo| (rdo >> 28) as u8);
                     self.trace().request_ma = rdo.map_or(0, |rdo| {
@@ -1421,6 +1556,8 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         self.request = None;
         self.pps_status_until = None;
         self.query_until = None;
+        self.epr_until = None;
+        self.epr_chunk = None;
         self.status_reply = None;
         self.sink_alert_until = None;
         self.unsupported_reply = None;
@@ -1571,7 +1708,9 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                 return Ok(sampled);
             }
             self.trace().sink_tx_refused = Some(samples);
-            stale &= P::ALLOW_STALE_SINK_TX_NG && stale_sink_tx_ng(samples[0], samples[1]);
+            stale &= P::ALLOW_STALE_SINK_TX_NG
+                && (stale_sink_tx_ng(samples[0], samples[1])
+                    || self.both_rp && stale_rp_default(samples[0], samples[1]));
             if fallback {
                 return self.defer(b'G'); // activity or RX at the fallback sample
             }
@@ -1616,6 +1755,30 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         }
         loop {
             P::set_rx_idle(false);
+            if let Some(reply) = self.emarker_due.filter(|_| !self.reset_in_progress()) {
+                // The reply is the cable's, not this port's: keep the port's
+                // GoodCRC origin and transmit evidence (Hard Reset timers, finish).
+                let t_ack = self.t_ack;
+                let trace = *self.trace();
+                let sent = self.send_sop(&reply, Sop::Cable).await;
+                self.t_ack = t_ack;
+                let now = self.trace();
+                now.elapsed_ack_ms = trace.elapsed_ack_ms;
+                now.tx_written = trace.tx_written;
+                now.tx_sent_irq = trace.tx_sent_irq;
+                now.tx_goodcrc = trace.tx_goodcrc;
+                now.tx_ack_goodcrc_only = trace.tx_ack_goodcrc_only;
+                match sent {
+                    Ok(()) => {
+                        self.emarker_id = (self.emarker_id + 1) & 7;
+                    }
+                    // No GoodCRC after the retries: the Source did not take it,
+                    // and nothing of ours is left pending.
+                    Err(Error::TxTimeout) if self.pending_tx.is_none() => {}
+                    Err(error) => return Err(error),
+                }
+                self.emarker_due = None;
+            }
             let packet = match self.dequeue() {
                 Some(packet) => Some(packet),
                 None => self.poll().await?,
@@ -1741,6 +1904,29 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                         }
                         self.protocol_error()?;
                         return Ok(length);
+                    }
+                } else if let Some(chunk) = self.epr_until.take().and_then(|until| {
+                    let chunk = self.epr_chunk.take();
+                    chunk.filter(|_| now < until)
+                }) {
+                    // PE_SNK_Get_Source_Cap for the EPR offer: only the expected
+                    // Chunk of PD3 EPR_Source_Capabilities (`pd_spr::epr_chunk`).
+                    // This engine answers Not_Supported or another well-formed
+                    // Message at this revision with Soft_Reset: a Protocol Error.
+                    // A new Source_Capabilities would end it unanswered and a
+                    // malformed answer is not trusted: both fail closed.
+                    use pd_protocol::pd_spr::{EPR_SOURCE_CAPABILITIES_KIND, EprChunk, epr_chunk};
+                    match epr_chunk(&buffer[..length], chunk) {
+                        Some(EprChunk::Next(next)) => self.epr_chunk = Some(next),
+                        Some(EprChunk::Last) => {}
+                        None if same_revision
+                            && header & header::KIND != EPR_SOURCE_CAPABILITIES_KIND
+                            && header & header::KIND != 1 =>
+                        {
+                            self.protocol_error()?;
+                            return Ok(length);
+                        }
+                        None => return Err(Error::Peer),
                     }
                 } else if let Some(query) = self
                     .query_until
@@ -1991,6 +2177,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
     ) -> Result<usbpd_traits::CableReport, Error<B::Error>> {
         use usbpd_traits::{CableReport, CableStatus};
         if self.cable_phase != CablePhase::Idle
+            || self.emarker.is_some()
             || next_id > 7
             || last_id.is_some_and(|id| id > 7)
             || !self.trace().contract_seen
@@ -2153,6 +2340,9 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
     /// The power-on register baseline the boot path checks: AUTO_CRC and the
     /// receiver off, MEAS_CC cleared. SWITCHES0 keeps both PDWN bits (Rd).
     async fn restore_baseline(&mut self) -> Result<Snapshot, Error<B::Error>> {
+        if self.emarker.is_some() {
+            self.checked(ConfigRegister::Control1, 0).await?;
+        }
         self.checked(ConfigRegister::Switches1, switches1::SPECREV_2_0)
             .await?;
         self.checked(ConfigRegister::Power, power::BANDGAP_WAKE)
@@ -2253,6 +2443,18 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             }
             self.delay.delay_ms(1).await;
         }
+    }
+    /// The caller's restart from the idle contract the stop path reached
+    /// (`Error::StopRequested`, `docs/SAFETY.md`): Hard Reset Signaling, after
+    /// which the Source cycles VBUS and VCONN and starts over as at attach
+    /// (section 6.8.3). `transition_to_default` follows, as for any sent one.
+    pub async fn restart(&mut self) -> Result<(), Error<B::Error>> {
+        if self.stopped() {
+            return Err(Error::Stopped);
+        }
+        self.lifecycle = Lifecycle::Halted;
+        self.arm_hard_reset();
+        self.send_hard_reset().await
     }
     /// PE_SNK_Transition_to_default (section 9.2.4.9) after Hard Reset Signaling
     /// was sent or received: reset the FUSB302 PD logic (section 7.1.3, the

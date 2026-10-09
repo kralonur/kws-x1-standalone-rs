@@ -385,6 +385,11 @@ const BACKLIGHT_PERIOD: u16 = 1875;
 /// Compare at 60% of [`BACKLIGHT_PERIOD`]: the retained backlight level.
 const BACKLIGHT_COMPARE: u16 = 1125;
 
+/// Reset cause flags other than power-on, the reset pin and "multiple"
+/// (bits 2 to 13, `render::RESET_FLAGS`). Nothing clears the flags, so any
+/// of these means the MCU reset without losing power since it powered up.
+const RESET_WITHOUT_POWER_LOSS: u16 = 0x3ffc;
+
 /// The reset cause flags, read only: nothing here clears them.
 fn reset_flags() -> u16 {
     // SAFETY: a read of a status register that no other code accesses.
@@ -500,6 +505,9 @@ async fn button_task(
     inputs: [InputPin; 4],
     mut store: settings_store::Store,
     saved: firmware_core::settings::Settings,
+    // The 5 A cable test was asked for: open its page, which runs it or says
+    // why it did not.
+    charger_page: bool,
 ) {
     // `pd-boot-diagnostic`: open on the PD page so the state before a
     // source Hard Reset is on screen (docs/SAFETY.md).
@@ -514,6 +522,8 @@ async fn button_task(
     let fatal = false;
     let mut navigation = if cfg!(feature = "pd-boot-diagnostic") || fatal {
         button_logic::Navigation::new(Page::detail(Detail::Pd), saved)
+    } else if charger_page {
+        button_logic::Navigation::new(Page::detail(Detail::Charger), saved)
     } else {
         button_logic::Navigation::new(Page::Overview, saved)
     };
@@ -533,12 +543,14 @@ async fn button_task(
         let observation = latest_observation();
         navigation.set_selectable(observation.spr.is_some() && observation.capabilities.is_some());
         navigation.set_passthrough(observation.pc13_high == Some(true));
+        navigation.set_cable_test(observation.listen.is_some(), observation.cable_test);
         if let Some((_, view)) = DETAIL_VIEW.try_get() {
             navigation.set_list_end(view.end);
         }
         let (input, command) = navigation.update(raw);
-        // Save once a value is no longer being changed.
-        if !input.page.editing() {
+        // Save once a value is no longer being changed, and before a restart
+        // (a scrolling list counts as editing) so the next boot sees it.
+        if !input.page.editing() || command == Some(firmware_core::buttons::PdCommand::Restart) {
             store.save(input.settings);
         }
         // The PD session drains these between transactions; a full queue
@@ -944,6 +956,22 @@ async fn main(spawner: Spawner) {
     // token is always free (`SpawnError::Busy` needs a second instance).
     const ONE_SPAWN: &str = "each task is spawned once into its one-slot pool";
 
+    // A restart into the 5 A cable test (`PdCommand::Restart`) left this in
+    // the saved settings; it lasts one boot. It is cleared here, before any
+    // task: the flash write masks interrupts, which must not happen in the PD
+    // session's start window, when the charger asks the cable question.
+    let (mut store, saved) = settings_store::Store::open();
+    let mut settings = saved.unwrap_or_default();
+    // The test runs only on a boot after a power-up (the restart's power
+    // cycle), with its request verifiably cleared first. A reset during that
+    // clear, or any other reset without power loss, cannot repeat it: that
+    // boot runs normally and the button task clears the request once up.
+    let requested = settings.cable_test;
+    settings.cable_test = false;
+    let powered_up = reset_flags() & RESET_WITHOUT_POWER_LOSS == 0;
+    let cable_test = requested && powered_up && store.save(settings);
+    let cable_test_skipped = requested && !cable_test;
+
     let backlight_pwm;
     let button_inputs;
     let tilt_input;
@@ -1058,7 +1086,9 @@ async fn main(spawner: Spawner) {
         // the charger sends its offer once, at most tFirstSourceCap (250 ms in
         // the USB PD timing table) after VBUS, and the meter boots from that
         // same VBUS.
-        spawner.spawn(pd_task::run(pd_input, pc13_input).expect(ONE_SPAWN));
+        spawner.spawn(
+            pd_task::run(pd_input, pc13_input, cable_test, cable_test_skipped).expect(ONE_SPAWN),
+        );
         backlight_pwm = backlight.0;
         if !panel::init(backlight.1).await {
             // Backlight is already on, so a lit blank screen means the panel
@@ -1071,7 +1101,6 @@ async fn main(spawner: Spawner) {
 
     spawner.spawn(pulse_task().expect(ONE_SPAWN));
     spawner.spawn(tilt_task(tilt_input).expect(ONE_SPAWN));
-    let (store, saved) = settings_store::Store::open();
-    spawner.spawn(button_task(button_inputs, store, saved.unwrap_or_default()).expect(ONE_SPAWN));
+    spawner.spawn(button_task(button_inputs, store, settings, requested).expect(ONE_SPAWN));
     spawner.spawn(meter_task(backlight_pwm).expect(ONE_SPAWN));
 }

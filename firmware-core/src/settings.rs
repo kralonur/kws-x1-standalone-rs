@@ -26,6 +26,9 @@ pub struct Settings {
     /// Index into [`BRIGHTNESS_PERCENT`].
     pub brightness: u8,
     pub rotation: Rotation,
+    /// Start the next boot in the 5 A cable test. Set just before the meter
+    /// restarts itself into the test; that boot clears it.
+    pub cable_test: bool,
 }
 
 impl Default for Settings {
@@ -33,6 +36,7 @@ impl Default for Settings {
         Self {
             brightness: DEFAULT_BRIGHTNESS,
             rotation: Rotation::Auto,
+            cable_test: false,
         }
     }
 }
@@ -68,19 +72,22 @@ impl Settings {
         BRIGHTNESS_PERCENT[usize::from(self.brightness) % BRIGHTNESS_PERCENT.len()]
     }
 
-    /// Pack into one word: tag in bits 31..24, rotation in 15..8, brightness
-    /// in 7..0.
+    /// Pack into one word: tag in bits 31..24, the cable test in 16,
+    /// rotation in 15..8, brightness in 7..0.
     pub fn encode(&self) -> u32 {
         let rotation = Rotation::ALL
             .iter()
             .position(|r| *r == self.rotation)
             .unwrap_or(0) as u32;
-        RECORD_TAG << 24 | rotation << 8 | u32::from(self.brightness)
+        RECORD_TAG << 24
+            | u32::from(self.cable_test) << 16
+            | rotation << 8
+            | u32::from(self.brightness)
     }
 
     /// Unpack a word from [`Self::encode`]; anything else is `None`.
     pub fn decode(word: u32) -> Option<Self> {
-        if word >> 24 != RECORD_TAG || word >> 16 & 0xff != 0 {
+        if word >> 24 != RECORD_TAG || word >> 16 & 0xff > 1 {
             return None;
         }
         let brightness = word as u8;
@@ -88,6 +95,7 @@ impl Settings {
         (usize::from(brightness) < BRIGHTNESS_PERCENT.len()).then_some(Self {
             brightness,
             rotation,
+            cable_test: word >> 16 & 1 != 0,
         })
     }
 }

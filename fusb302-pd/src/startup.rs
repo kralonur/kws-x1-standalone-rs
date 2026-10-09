@@ -104,6 +104,20 @@ pub struct Listen {
     /// cable plug (SOP' or SOP''), counted from the RX FIFO after its window.
     pub partner: [u8; 2],
     pub cable: [u8; 2],
+    /// The CC (1 or 2) above the MDAC level while the other is not: the
+    /// source powers VCONN there, so it talks on the other one and the
+    /// listen is skipped (`vconn_line`).
+    pub vconn: Option<u8>,
+}
+
+/// The CC carrying VCONN: with the caller's MDAC at 2.1 V (above the 2.04 V
+/// vRd-3.0 maximum, USB Type-C Table 4-36), a quiet CC whose comparator is
+/// set is not an Rd line. Deciding here, as the source firmware did from its
+/// CC voltages, skips the listen windows, in which nothing acknowledges the
+/// source's early SOP' Discover Identity requests.
+fn vconn_line(cc: [u8; 2]) -> Option<u8> {
+    let high = cc.map(|status| status & (status0::COMP | status0::ACTIVITY) == status0::COMP);
+    only_one(high)
 }
 
 /// Largest FIFO frame the listen counts: token, header, seven data objects
@@ -191,7 +205,14 @@ impl Diagnostic {
         delay.delay_ms(10).await;
         let cc2 = read(bus, register::STATUS0).await?;
         let listen = if cc1 & status0::BC_LVL != 0 && cc2 & status0::BC_LVL != 0 {
-            Some(listen(bus, delay).await?)
+            Some(match vconn_line([cc1, cc2]) {
+                Some(vconn) => Listen {
+                    traffic: Some(3 - vconn),
+                    vconn: Some(vconn),
+                    ..Listen::default()
+                },
+                None => listen(bus, delay).await?,
+            })
         } else {
             None
         };

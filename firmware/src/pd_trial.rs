@@ -11,7 +11,7 @@ struct SharedBus;
 pub static LOCK_WAIT_MAX: AtomicU32 = AtomicU32::new(0);
 pub static TRANSFER_MAX: AtomicU32 = AtomicU32::new(0);
 pub static DELAY_OVER_MAX: AtomicU32 = AtomicU32::new(0);
-use core::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering as AtomicOrdering};
 
 fn note_max(max: &AtomicU32, since: embassy_time::Instant) -> embassy_time::Instant {
     let now = embassy_time::Instant::now();
@@ -147,6 +147,14 @@ fn detail_page() -> Option<u32> {
     (shown && page == Detail::Cable).then_some(u32::from(view.section))
 }
 
+/// `PdCommand::Restart` was received: the session stops at its next idle
+/// point and restarts the charger and the meter with a Hard Reset.
+static RESTART: AtomicBool = AtomicBool::new(false);
+
+fn restart_requested() -> bool {
+    RESTART.load(AtomicOrdering::Relaxed)
+}
+
 /// Applies the input task's requests. With `plug_in_charger` (both CCs
 /// carried Rp at startup) CC2 is the charger's own CC pin, not a cable's VCONN
 /// pin, so no cable query starts: it would drive VCONN into the charger.
@@ -155,20 +163,31 @@ fn control(
     selection: &firmware_core::pd_spr::Selection,
     store: Option<&dyn firmware_core::pd_svids::Store>,
     plug_in_charger: bool,
+    cable_test: bool,
 ) {
+    use firmware_core::buttons::PdCommand;
     while let Ok(command) = crate::PD_COMMANDS.try_receive() {
-        if !(plug_in_charger && command == firmware_core::buttons::PdCommand::QueryCable) {
-            selection.apply(command);
+        match command {
+            PdCommand::Restart => RESTART.store(true, AtomicOrdering::Relaxed),
+            PdCommand::QueryCable if plug_in_charger => {}
+            // The cable test only lists the offer: it keeps the boot's 5 V.
+            _ if cable_test && command != PdCommand::QueryEpr => {}
+            _ => selection.apply(command),
         }
+    }
+    // The cable test lists everything at once: ask for the EPR offer as soon
+    // as the contract allows; a later long OK asks again.
+    if cable_test && selection.epr_offer() == pd_spr::EprOffer::NotAsked {
+        selection.request_epr_offer();
     }
     if !plug_in_charger {
         pd::control_cable_selection(observation, selection, detail_page(), store);
     }
 }
 
-/// Back held (for the session's stop delay) ends the session.
+/// Back held (for the session's stop delay) or a restart ends the session.
 fn stop_requested() -> bool {
-    input().pressed & firmware_core::buttons::BACK != 0
+    input().pressed & firmware_core::buttons::BACK != 0 || restart_requested()
 }
 
 use firmware_core::pd_spr;
@@ -201,9 +220,10 @@ pub async fn run(observation: &mut pd::Observation, report: pd_cc::Report) {
     let mut error;
     {
         let plug_in_charger = observation.listen.is_some();
+        let cable_test = observation.cable_test;
         let control = |observation: &mut fusb302_pd::observation::Observation,
                        store: Option<&dyn firmware_core::pd_svids::Store>| {
-            control(observation, &selection, store, plug_in_charger)
+            control(observation, &selection, store, plug_in_charger, cable_test)
         };
         let identity_started = || selection.set_mode_cursor(None);
         let board_observation = *observation;
@@ -218,6 +238,7 @@ pub async fn run(observation: &mut pd::Observation, report: pd_cc::Report) {
             trace_cable: cfg!(feature = "cable-log"),
             stop_requested: Some(stop_requested),
             svids: Some(&crate::CABLE_SVID_STORE),
+            emarker: observation.cable_test,
         };
         let mut phy_observation = observation.phy;
         phy_observation.phase = pd::Phase::Negotiating;
@@ -273,6 +294,12 @@ pub async fn run(observation: &mut pd::Observation, report: pd_cc::Report) {
                 }
             }
             error = phy.take_error();
+            // The cable test's restart: from the stopped idle contract, a Hard
+            // Reset makes the charger start over as at attach (`docs/SAFETY.md`).
+            if restart_requested() && matches!(error, Some(pd_spr_phy::Error::StopRequested)) {
+                sent_hard_reset = true;
+                error = phy.restart().await.err();
+            }
             // PE_SNK_Transition_to_default (`docs/SAFETY.md`) when the
             // PHY saw Hard Reset Signaling and, for ours, the wrapper sent it.
             if phy.hard_reset_received() || (phy.hard_reset_sent() && sent_hard_reset) {

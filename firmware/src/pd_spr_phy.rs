@@ -4,6 +4,18 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use embedded_hal_async::i2c::I2c;
 pub use fusb302_pd::phy::{Clock, Config, Error, GatedBus, Waiter};
 
+/// ID Header VDO (USB PD Table 6.33): Passive Cable (bits 29:27 = 011b),
+/// USB Type-C plug (bits 22:21 = 11b), unassigned VID FFFFh (section 6.1.5).
+const EMARKER_ID_HEADER: u32 = 0x1860_ffff;
+/// Cert Stat VDO (Table 6.38): no XID.
+const EMARKER_CERT_STAT: u32 = 0;
+/// Product VDO (Table 6.39): PID 0, bcdDevice 0.
+const EMARKER_PRODUCT: u32 = 0;
+/// Passive Cable VDO (Table 6.41): USB Type-C to Type-C (bits 19:18 = 10b),
+/// under 10 ns latency (bits 16:13 = 0001b), 20 V maximum (bits 10:9 = 00b),
+/// 5 A (bits 6:5 = 10b), USB 2.0 only (bits 2:0 = 000b); not EPR capable.
+const EMARKER_CABLE: u32 = 0x0008_2040;
+
 pub struct BoardPlatform;
 static RX_IDLE: AtomicBool = AtomicBool::new(false);
 impl fusb302_pd::phy::Platform for BoardPlatform {
@@ -19,6 +31,15 @@ impl fusb302_pd::phy::Platform for BoardPlatform {
     const INSPECTION_SWITCHES0: u8 =
         fusb302_pd::register::switches0::VCONN_CC2 | fusb302_pd::register::switches0::MEAS_CC1;
     const ALLOW_STALE_SINK_TX_NG: bool = true;
+    // Owner-approved, as the source firmware did: with the meter's plug in the
+    // charger, the plug is the cable, and it answers as a 5 A passive cable so
+    // the charger offers its 5 A objects. Board rating: "4-30V 0-12A".
+    const EMARKER: Option<[u32; 4]> = Some([
+        EMARKER_ID_HEADER,
+        EMARKER_CERT_STAT,
+        EMARKER_PRODUCT,
+        EMARKER_CABLE,
+    ]);
     const VBUS_ADDRESS: u8 = 0x40;
     const VBUS_REGISTER: u8 = 2;
     fn voltage_mv(raw: u16) -> u32 {
