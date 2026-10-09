@@ -170,6 +170,8 @@ pub mod interruptb {
 pub mod interrupt {
     /// Transmit attempted during CC activity; not sent, the packet is received.
     pub const I_COLLISION: u8 = 0x02;
+    /// ACTIVITY changed: BMC transitions started or stopped on the measured CC.
+    pub const I_ACTIVITY: u8 = 0x40;
     /// CRC_CHK newly valid: an incoming packet's CRC was checked.
     pub const I_CRC_CHK: u8 = 0x10;
 }

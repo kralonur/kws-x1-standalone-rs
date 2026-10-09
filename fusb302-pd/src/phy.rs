@@ -345,11 +345,12 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         clock: &'a C,
         config: Config<'a, P::Limits>,
         observation: pd::Observation,
-        before: Snapshot,
-        cc: [u8; 2],
+        startup: crate::startup::Report,
     ) -> (Self, Result<(), Error<B::Error>>) {
         let mut session = Self::new(bus, delay, clock, config, observation);
-        let result = session.begin(before, cc).await;
+        let result = session
+            .begin(startup.after, startup.status, startup.traffic)
+            .await;
         (session, result)
     }
     fn new(
@@ -482,7 +483,14 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             .await
             .map_err(Error::Config)
     }
-    async fn begin(&mut self, before: Snapshot, cc: [u8; 2]) -> Result<(), Error<B::Error>> {
+    /// `traffic` breaks the tie when both CCs carry Rp: the CC the startup
+    /// listen heard BMC traffic on (`startup::Report::traffic`).
+    async fn begin(
+        &mut self,
+        before: Snapshot,
+        cc: [u8; 2],
+        traffic: Option<u8>,
+    ) -> Result<(), Error<B::Error>> {
         if self.observation.restore_unverified {
             self.unverified = true;
             return Err(Error::Stopped);
@@ -516,9 +524,10 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         if cc.iter().any(|status| status & status0::ACTIVITY != 0) {
             return Err(Error::Orientation);
         }
-        let selected = match (cc[0] & 3 != 0, cc[1] & 3 != 0) {
-            (true, false) => 1,
-            (false, true) => 2,
+        let selected = match (cc[0] & 3 != 0, cc[1] & 3 != 0, traffic) {
+            (true, false, _) => 1,
+            (false, true, _) => 2,
+            (true, true, Some(cc @ (1 | 2))) => cc,
             _ => return Err(Error::Orientation),
         };
         self.trace().tx_off_verified = true;

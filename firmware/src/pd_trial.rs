@@ -218,8 +218,7 @@ pub async fn run(observation: &mut pd::Observation, report: pd_cc::Report) {
             &clock,
             config,
             phy_observation,
-            report.after,
-            report.status,
+            report,
         )
         .await;
         if let Err(failure) = started {
