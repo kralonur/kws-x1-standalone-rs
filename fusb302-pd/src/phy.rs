@@ -2335,6 +2335,30 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         self.trace().tx_off_verified = true;
         Ok(after)
     }
+    /// End a session that never heard the Source (nothing received, nothing
+    /// sent), as on a port without PD: restore and verify the power-on
+    /// baseline, so the shared bus stays usable for the meter.
+    pub async fn finish_unheard(&mut self) -> Result<Snapshot, Error<B::Error>> {
+        if self.stopped()
+            || self.observation.rx_packets != 0
+            || self.trace().tx_written
+            || self.pending_tx.is_some()
+        {
+            return Err(Error::Stopped);
+        }
+        P::set_rx_idle(false);
+        self.lifecycle = Lifecycle::Finished;
+        let after = self.restore_baseline().await?;
+        let measure = self.byte(register::MEASURE).await?;
+        if measure != P::MEASURE {
+            return Err(Error::Config(pd_cc::Error::Verify {
+                register: 4,
+                value: measure,
+            }));
+        }
+        self.unverified = false;
+        Ok(after)
+    }
 }
 impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> {
     /// The power-on register baseline the boot path checks: AUTO_CRC and the

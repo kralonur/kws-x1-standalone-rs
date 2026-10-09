@@ -329,6 +329,14 @@ pub async fn run(observation: &mut pd::Observation, report: pd_cc::Report) {
                     error = Some(pd_spr_phy::Error::Completion);
                 }
             }
+            // A port without PD is a valid supply: put the PHY back at its
+            // checked baseline so the meter keeps the bus. Failure latches below.
+            if error.is_none() && phy.observation.phase == pd::Phase::NoCapabilities {
+                match phy.finish_unheard().await {
+                    Ok(after) => phy.observation.post_snapshot = Some(after),
+                    Err(failure) => error = Some(failure),
+                }
+            }
             if phy.observation.phase != pd::Phase::Contracted && !phy.stopped() {
                 phy.stop();
             }

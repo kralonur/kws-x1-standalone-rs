@@ -127,14 +127,15 @@ const RESET_FLAGS: [&[u8]; 15] = [
 /// received.
 pub fn system_lines(counters: Counters, latched: bool) -> [Lines; 2] {
     let mut rows = [[b' '; 24]; 8];
-    put(
-        &mut rows[0],
-        if latched {
-            b"I2C FAULT  BUS!"
-        } else {
-            b"I2C FAULT  OK"
-        },
-    );
+    // The latch also closes the bus without a failed transfer: after a PD
+    // session left the PHY unverified, or when the bus never started.
+    let transfer_failed = counters.errors != 0 || counters.step != 0;
+    let head: &[u8] = match (latched, transfer_failed) {
+        (false, _) => b"I2C FAULT  OK",
+        (true, true) => b"I2C FAULT  BUS!",
+        (true, false) => b"BUS LATCHED  NO I2C ERR",
+    };
+    put(&mut rows[0], head);
     put(&mut rows[1], b"STEP: 000000");
     decimal(&mut rows[1], 6, 6, counters.step);
     put(&mut rows[2], b"SR: 00000");
