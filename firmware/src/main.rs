@@ -794,6 +794,7 @@ async fn meter_task(mut backlight: embassy_hc32::pwm::TimerA4Pwm) {
                             &header,
                             detail,
                             core::iter::once(pd::lines(observation))
+                                .chain(pd::startup_lines(observation))
                                 .chain(pd::caps_lines(observation)),
                             top,
                             scrolling,

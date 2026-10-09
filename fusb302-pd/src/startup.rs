@@ -1,6 +1,7 @@
 //! Caller-baseline-gated FUSB startup measurements and passive release.
 use crate::config::{ConfigRegister, Error, write_checked};
-use crate::register::{self, interrupt, power, status0, switches0};
+use crate::pd_rx::{self, Sop};
+use crate::register::{self, control1, interrupt, power, status0, status1, switches0};
 use crate::snapshot::{self as pd, Snapshot};
 use embedded_hal_async::{delay::DelayNs, i2c::I2c};
 
@@ -86,12 +87,26 @@ fn check<E>(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Report {
     pub status: [u8; 2],
-    /// When both CCs carry Rp (the port's plug sits in the source's
-    /// receptacle, which drives Rp on both pins): the one CC (1 or 2) that
-    /// showed BMC activity while listening, if exactly one did.
-    pub traffic: Option<u8>,
+    /// Only when both CCs carry Rp (the port's plug sits in the source's
+    /// receptacle, which drives Rp on both pins): what listening heard.
+    pub listen: Option<Listen>,
     pub after: Snapshot,
 }
+
+/// What the receive-only listen on both CCs heard.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Listen {
+    /// The one CC (1 or 2) that showed BMC activity, if exactly one did.
+    pub traffic: Option<u8>,
+    /// CRC-valid packets addressed to the port partner (SOP) and to a cable
+    /// plug (SOP' or SOP''), counted from the RX FIFO after each window.
+    pub partner: u8,
+    pub cable: u8,
+}
+
+/// Largest FIFO frame the listen counts: token, header, seven data objects
+/// and CRC (USB PD section 6.2.1). Extended frames end the count.
+const MAX_FRAME: usize = 1 + 2 + 7 * 4 + 4;
 
 /// How long to listen on each CC for traffic: a source that gets no GoodCRC
 /// resends Source_Capabilities every tTypeCSendSourceCap (100-200 ms, USB PD
@@ -173,8 +188,8 @@ impl Diagnostic {
         .await?;
         delay.delay_ms(10).await;
         let cc2 = read(bus, register::STATUS0).await?;
-        let traffic = if cc1 & status0::BC_LVL != 0 && cc2 & status0::BC_LVL != 0 {
-            listen_for_traffic(bus, delay).await?
+        let listen = if cc1 & status0::BC_LVL != 0 && cc2 & status0::BC_LVL != 0 {
+            Some(listen(bus, delay).await?)
         } else {
             None
         };
@@ -201,20 +216,26 @@ impl Diagnostic {
         }
         Ok(Report {
             status: [cc1, cc2],
-            traffic,
+            listen,
             after,
         })
     }
 }
 
-/// Receive only, Rd kept on both CCs: listen on each CC for
-/// `TRAFFIC_LISTEN_MS` and return the one CC whose latched I_ACTIVITY was set.
-/// Reading INTERRUPT clears it, so each window starts clean.
-async fn listen_for_traffic<B: I2c, D: DelayNs>(
-    bus: &mut B,
-    delay: &mut D,
-) -> Result<Option<u8>, Error<B::Error>> {
+/// Receive only, Rd kept on both CCs and AUTO_CRC off (the baseline), so
+/// nothing is acknowledged: listen on each CC for `TRAFFIC_LISTEN_MS`, with
+/// SOP'/SOP'' reception on, note whose latched I_ACTIVITY was set (reading
+/// INTERRUPT clears it) and count the packets the FIFO holds. SOP'/SOP''
+/// reception is switched off again and the FIFO flushed before returning.
+async fn listen<B: I2c, D: DelayNs>(bus: &mut B, delay: &mut D) -> Result<Listen, Error<B::Error>> {
+    let mut heard = Listen::default();
     let mut active = [false; 2];
+    write_checked(
+        bus,
+        ConfigRegister::Control1,
+        control1::ENSOP1 | control1::ENSOP2,
+    )
+    .await?;
     for (seen, measure) in active
         .iter_mut()
         .zip([switches0::MEAS_CC1, switches0::MEAS_CC2])
@@ -225,15 +246,58 @@ async fn listen_for_traffic<B: I2c, D: DelayNs>(
             switches0::PDWN1 | switches0::PDWN2 | measure,
         )
         .await?;
+        write_checked(bus, ConfigRegister::Control1Flush, control1::RX_FLUSH).await?;
         read(bus, register::INTERRUPT).await?;
         delay.delay_ms(TRAFFIC_LISTEN_MS).await;
         *seen = read(bus, register::INTERRUPT).await? & interrupt::I_ACTIVITY != 0;
+        count_frames(bus, &mut heard).await?;
     }
-    Ok(match active {
+    write_checked(bus, ConfigRegister::Control1, 0).await?;
+    write_checked(bus, ConfigRegister::Control1Flush, control1::RX_FLUSH).await?;
+    heard.traffic = match active {
         [true, false] => Some(1),
         [false, true] => Some(2),
         _ => None,
-    })
+    };
+    Ok(heard)
+}
+
+/// Count the complete, CRC-valid frames in the RX FIFO by address. The first
+/// frame that does not decode (an extended or overrun one) ends the count;
+/// the caller flushes the rest.
+async fn count_frames<B: I2c>(bus: &mut B, heard: &mut Listen) -> Result<(), Error<B::Error>> {
+    let mut frame = [0; MAX_FRAME];
+    while read(bus, register::STATUS1).await? & status1::RX_EMPTY == 0 {
+        let mut prefix = [0; 3];
+        read_fifo(bus, &mut prefix).await?;
+        let Ok(length) = pd_rx::fifo_frame_len(&prefix) else {
+            return Ok(());
+        };
+        let Some(rest) = frame.get_mut(3..length) else {
+            return Ok(());
+        };
+        read_fifo(bus, rest).await?;
+        frame[..3].copy_from_slice(&prefix);
+        let Ok((decoded, _)) = pd_rx::decode(&frame[..length]) else {
+            return Ok(());
+        };
+        let count = match decoded.sop() {
+            Sop::Partner => &mut heard.partner,
+            Sop::Cable | Sop::CableDoublePrime => &mut heard.cable,
+            Sop::Debug | Sop::DebugDoublePrime => continue,
+        };
+        *count = count.saturating_add(1);
+    }
+    Ok(())
+}
+
+async fn read_fifo<B: I2c>(bus: &mut B, bytes: &mut [u8]) -> Result<(), Error<B::Error>> {
+    bus.write_read(pd::ADDRESS, &[register::FIFOS], bytes)
+        .await
+        .map_err(|source| Error::Bus {
+            register: register::FIFOS,
+            source,
+        })
 }
 async fn read<B: I2c>(bus: &mut B, register: u8) -> Result<u8, Error<B::Error>> {
     let mut value = [0];

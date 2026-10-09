@@ -349,7 +349,11 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
     ) -> (Self, Result<(), Error<B::Error>>) {
         let mut session = Self::new(bus, delay, clock, config, observation);
         let result = session
-            .begin(startup.after, startup.status, startup.traffic)
+            .begin(
+                startup.after,
+                startup.status,
+                startup.listen.and_then(|listen| listen.traffic),
+            )
             .await;
         (session, result)
     }

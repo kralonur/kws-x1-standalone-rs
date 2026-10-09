@@ -297,6 +297,7 @@ async fn sink_session(observation: &mut pd::Observation) -> Option<pd_cc::Report
     match pd_cc::diagnostic().run(bus, &mut delay, snapshot).await {
         Ok(report) => {
             observation.cc_status = Some(report.status);
+            observation.listen = report.listen;
             observation.post_snapshot = Some(report.after);
             Some(report)
         }

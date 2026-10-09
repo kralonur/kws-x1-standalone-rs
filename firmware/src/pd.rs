@@ -22,6 +22,9 @@ pub struct Observation {
     pub pc13_high: Option<bool>,
     pub sniff: Option<SniffObservation>,
     pub last_boot: Option<LastBoot>,
+    /// Sink startup: what the receive-only listen heard when both CCs carried
+    /// Rp (`fusb302_pd::startup::Listen`).
+    pub listen: Option<fusb302_pd::startup::Listen>,
 }
 impl core::ops::Deref for Observation {
     type Target = fusb302_pd::observation::Observation;
@@ -41,6 +44,7 @@ impl Observation {
             pc13_high: None,
             sniff: None,
             last_boot: None,
+            listen: None,
         }
     }
     /// Replace transport telemetry without dropping slider/sniffer/boot history.
@@ -577,6 +581,36 @@ fn sniff_lines(sniff: SniffObservation) -> [[u8; 24]; 8] {
     rows
 }
 
+/// Sink startup, after `lines`: both CC samples (STATUS0: BC_LVL in bits
+/// 1:0, ACTIVITY 0x40) and, when both carried Rp, the line the listen chose
+/// and the packets it heard for the partner (SOP) and for a cable (SOP'/'').
+pub fn startup_lines(observation: Observation) -> Option<[[u8; 24]; 8]> {
+    let cc = observation
+        .cc_status
+        .filter(|_| observation.sniff.is_none())?;
+    let mut rows = [[b' '; 24]; 8];
+    put(&mut rows[0], b"STARTUP");
+    put(&mut rows[1], b"CC1:-- CC2:--");
+    hex8(&mut rows[1], 4, cc[0]);
+    hex8(&mut rows[1], 11, cc[1]);
+    let Some(listen) = observation.listen else {
+        put(&mut rows[2], b"ONE CC WITH RP");
+        return Some(rows);
+    };
+    put(
+        &mut rows[2],
+        match listen.traffic {
+            Some(1) => b"BOTH RP: TRAFFIC ON CC1",
+            Some(_) => b"BOTH RP: TRAFFIC ON CC2",
+            None => b"BOTH RP: NO SINGLE LINE",
+        },
+    );
+    put(&mut rows[3], b"HEARD SOP:--- CABLE:---");
+    decimal3(&mut rows[3], 10, listen.partner.into());
+    decimal3(&mut rows[3], 20, listen.cable.into());
+    Some(rows)
+}
+
 /// Passthrough: the latest advertised Source_Capabilities, after `lines`,
 /// once one was captured. The charger sends it when the phone attaches, and
 /// the meter, powered from that same VBUS, is often still booting then.
@@ -779,17 +813,6 @@ fn spr_lines(observation: Observation, spr: SprObservation) -> [[u8; 24]; 8] {
         put(&mut rows[5], b"CHARGER BUSY: OVERRIDDEN");
     }
     put(&mut rows[6], b"POST S1:---- C3:----    ");
-    // Start refused (orientation or input voltage): both STATUS0 samples
-    // (BC_LVL in bits 1:0, ACTIVITY 0x40), e.g. Rp on both CCs with no
-    // traffic heard.
-    if observation.phase == Phase::Guarded
-        && let Some(cc) = observation.cc_status
-    {
-        rows[6] = [b' '; 24];
-        put(&mut rows[6], b"CC1:-- CC2:--");
-        hex8(&mut rows[6], 4, cc[0]);
-        hex8(&mut rows[6], 11, cc[1]);
-    }
     if observation.phase == Phase::Contracted
         && let Some(after) = observation.post_snapshot
     {
