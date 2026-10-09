@@ -60,7 +60,8 @@ const CORNER: Size = Size::new(5, 5);
 /// Gap between a number and its unit, in pixels.
 const UNIT_GAP: i32 = 3;
 
-/// One meter reading. `ma` is signed: negative when current flows back.
+/// One meter reading. `ma` is signed: negative when the charger is on the
+/// plug side and current flows from plug to receptacle.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Reading {
     pub mv: u32,
@@ -462,16 +463,13 @@ pub fn draw_meter<D: DrawTarget<Color = Rgb565>>(
 ) {
     draw_header(target, header, CYAN);
     let (volts, amps, power) = match meter.reading {
-        Some(reading) => {
-            let sign: &[u8] = if reading.ma < 0 { b"-" } else { b"" };
-            (
-                Label::new().hundredths(reading.mv),
-                Label::new()
-                    .push(sign)
-                    .hundredths(reading.ma.unsigned_abs()),
-                Label::new().watts(reading.mw()),
-            )
-        }
+        // The meter works in either direction (charger on the plug or on the
+        // receptacle), so the current is shown as a magnitude.
+        Some(reading) => (
+            Label::new().hundredths(reading.mv),
+            Label::new().hundredths(reading.ma.unsigned_abs()),
+            Label::new().watts(reading.mw()),
+        ),
         None => (
             Label::new().push(b"--.--"),
             Label::new().push(b"-.--"),
