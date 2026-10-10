@@ -3,6 +3,7 @@ name = "firmware-core"
 version = "0.1.0"
 edition = "2024"
 description = "Board policy, input handling and display geometry without hardware access."
+license = "MIT OR Apache-2.0"
 publish = false
 
 [lib]
