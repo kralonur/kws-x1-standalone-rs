@@ -939,11 +939,11 @@ mode.** The tool does not automatically reboot, retry or restore another image.
 Successful batch checksums alone are not a successful update. Investigation,
 retry or restoration needs separate approval of the exact image/hash.
 
-Linux operation and the x64 Windows GNU cross-build have been exercised; that
-Windows build flashed both project and original firmware. An initial project
-attempt failed final verification before a separately approved retry succeeded.
-Hardware operation with the Windows MSVC release build and macOS is not yet
-validated. See [the safety contract](docs/SAFETY.md) for the full limits.
+Linux flashing has passed final verification for both the generated project
+image and stock firmware; stock boot was confirmed. The x64 Windows GNU
+cross-build has also flashed project and stock firmware. Hardware operation with
+the Windows MSVC release build and macOS is not yet validated.
+See [the safety contract](docs/SAFETY.md) for the full limits.
 
 #### GitHub builds and releases
 
@@ -963,8 +963,8 @@ After committing and pushing the release source, use an unused version matching
 the flasher package version, for example:
 
 ```sh
-git tag flasher-v0.1.0
-git push origin flasher-v0.1.0
+git tag flasher-v0.1.1
+git push origin flasher-v0.1.1
 ```
 
 Only the final publishing job receives release-write permission. The actions

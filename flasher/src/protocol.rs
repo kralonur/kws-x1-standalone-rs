@@ -23,6 +23,11 @@ const ERROR_START: u8 = 240;
 const BATCH_CHUNKS: usize = 128;
 // Existing transport pacing and response deadlines, in milliseconds/seconds.
 const CHUNK_DELAY: Duration = Duration::from_millis(5);
+// Erase settle margin in milliseconds, exercised in successful Linux flashes.
+const ERASE_DELAY: Duration = Duration::from_millis(250);
+// Final programming settle margin in milliseconds before read-back verification,
+// exercised in successful Linux flashes of generated and stock images.
+const FINISH_DELAY: Duration = Duration::from_millis(1000);
 const DRAIN_TIMEOUT: Duration = Duration::from_millis(200);
 const DRAIN_LIMIT: usize = 64;
 const INFO_TIMEOUT: Duration = Duration::from_secs(2);
@@ -87,6 +92,14 @@ fn response(
             continue;
         };
         let code = report[HEADER.len()];
+        // Control responses checksum the command and arguments, excluding the header.
+        let checksum = report[HEADER.len()..CHUNK_BYTES - 1]
+            .iter()
+            .fold(0u8, |sum, byte| sum.wrapping_add(*byte));
+        ensure!(
+            checksum == report[CHUNK_BYTES - 1],
+            "{what}: invalid response checksum; stop without retry"
+        );
         ensure!(
             code < ERROR_START,
             "{what}: device reported error code {code}"
@@ -121,6 +134,7 @@ pub fn flash(plan: &Plan, device: &impl Transport) -> Result<()> {
     let arguments = [plan.sectors, CONTAINER_PREFIX[0], CONTAINER_PREFIX[1]];
     device.write(&packet(ERASE, &arguments)?)?;
     response(device, ERASE_TIMEOUT, &[SUCCESS], "erase")?;
+    thread::sleep(ERASE_DELAY);
     for (index, batch) in plan.payload.chunks(CHUNK_BYTES * BATCH_CHUNKS).enumerate() {
         let number = index + 1;
         device.write(&packet(
@@ -144,6 +158,7 @@ pub fn flash(plan: &Plan, device: &impl Transport) -> Result<()> {
         )?;
         tracing::info!(batch = number, "Batch written and checksum accepted");
     }
+    thread::sleep(FINISH_DELAY);
     device.write(&packet(FINISH, &[])?)?;
     let report = response(device, FINISH_TIMEOUT, &[SUCCESS, VERIFY_FAILED], "finish")?;
     ensure!(

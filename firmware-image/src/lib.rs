@@ -16,6 +16,12 @@
 
 /// Original content region plus checksum and trailer (`0x33420`).
 pub const PAYLOAD_LEN: usize = 0x33420;
+/// Bootloader HID payload bytes per report, excluding the report ID.
+pub const CHUNK_BYTES: usize = 64;
+/// Bootloader application erase sector size in bytes (8 KiB).
+pub const SECTOR_BYTES: u32 = 0x2000;
+/// Exclusive flash ceiling for application erasure, protecting higher storage.
+pub const ERASE_CEILING: u32 = 0x44000;
 /// Original length rounded up to a 64-byte chunk multiple, zero padded.
 /// This is a conservative tooling policy, not an acceptance guarantee or a proven
 /// universal bootloader requirement; see `docs/SAFETY.md`.
@@ -55,8 +61,8 @@ pub fn additive_checksum(content: &[u8]) -> u32 {
 /// This mirrors the host flasher (`chunks // 128 + 1`, 64-byte HID chunks) and is
 /// a host-side convention, not a documented bootloader rule.
 pub fn erase_sectors_for(payload_len: usize) -> u32 {
-    let chunks = payload_len.div_ceil(64);
-    (chunks / 128) as u32 + 1
+    let chunks = payload_len.div_ceil(CHUNK_BYTES);
+    (chunks / (SECTOR_BYTES as usize / CHUNK_BYTES)) as u32 + 1
 }
 
 fn check_content(content: &[u8]) -> Result<(), ImageError> {

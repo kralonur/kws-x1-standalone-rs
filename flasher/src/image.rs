@@ -3,10 +3,7 @@ use firmware_image::{self as image, APP_BASE, CONTAINER_PREFIX, MARKER_OFFSET};
 use sha2::{Digest, Sha256};
 use std::{fs, path::Path};
 
-// Existing HID chunk size and application erase limits from tools/package_app.py.
-pub const CHUNK_BYTES: usize = 64;
-pub const ERASE_CEILING: u32 = 0x44000;
-pub const SECTOR_BYTES: u32 = 0x2000;
+pub use firmware_image::{CHUNK_BYTES, ERASE_CEILING, SECTOR_BYTES};
 
 pub struct Plan {
     pub payload: Vec<u8>,
