@@ -876,10 +876,10 @@ It never opens USB hardware or flashes a device. Invalid applications, container
 or failed audits block publication. Generated release files live in the ignored
 `dist/` directory; it is build output, not source code.
 
-CI runs provide a `firmware` build artifact. Pushing an unused `firmware-v` tag
-creates a **draft** [GitHub Release](https://github.com/kralonur/kws-x1-standalone-rs/releases)
-with the prepared downloads after all checks pass. Drafts are visible only to
-users with repository write access, not as public release downloads. For example,
+CI runs provide a `firmware` build artifact, including packaging/audit JSON
+reports for build diagnostics. Pushing an unused `firmware-v` tag publishes a
+public [GitHub Release](https://github.com/kralonur/kws-x1-standalone-rs/releases)
+with the prepared downloads automatically after all checks pass. For example,
 after committing and pushing the source:
 
 ```sh
@@ -888,20 +888,18 @@ git push origin firmware-v0.1.0
 ```
 
 Use an independent version matching `firmware/Cargo.toml`. Downloads contain
-`firmware.X1C`, `SHA256SUMS`, packaging/audit JSON reports and the project licenses.
+`firmware.X1C`, `SHA256SUMS` and the project licenses. Packaging/audit JSON reports
+stay in CI artifacts; they are not release downloads and are not needed to flash.
 Verify `SHA256SUMS` (Linux:
 `sha256sum --check SHA256SUMS`; macOS: `shasum -a 256 --check SHA256SUMS`), or on
 Windows compare `Get-FileHash .\firmware.X1C -Algorithm SHA256` with its manifest
 entry. Use the lowercase image hash with the flasher commands below. A CI audit
 is structural validation, **not hardware or safety qualification**.
 
-Before publishing a draft, separately approve its exact `.X1C` and SHA-256 for
-hardware flashing, verify final bootloader acceptance and successful boot, and
-complete the relevant hardware checks. Record the tested image hash and results
-in the release notes, then manually publish the draft in GitHub Releases. The
-workflow intentionally does not turn a compile/audit pass into automatic public
-release approval. CI artifacts remain downloadable for offline review; an
-artifact or draft alone does not authorize device I/O.
+Publishing a release does not authorize device I/O or establish runtime safety.
+Before flashing, approve the exact `.X1C` and SHA-256, follow the flashing checks,
+and verify final bootloader acceptance and successful boot. Build reports are
+for offline diagnostics; users only need the image, its checksum and the flasher.
 
 Only the publishing job has release-write permission; actions are pinned to
 full commit hashes. Firmware tags do not trigger the flasher workflow, and

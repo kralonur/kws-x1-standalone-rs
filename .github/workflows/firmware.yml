@@ -55,8 +55,7 @@ jobs:
             --dry-run --image dist/firmware.X1C --confirm-sha256 "$image_sha256"
           cp LICENSE-MIT LICENSE-APACHE dist/
           cd dist
-          sha256sum firmware.X1C firmware-package.json firmware-audit.json \
-            LICENSE-MIT LICENSE-APACHE > SHA256SUMS
+          sha256sum firmware.X1C LICENSE-MIT LICENSE-APACHE > SHA256SUMS
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: firmware
@@ -79,10 +78,12 @@ jobs:
       - name: Verify firmware downloads
         working-directory: dist
         run: sha256sum --check SHA256SUMS
-      - name: Create draft firmware release for hardware qualification
+      - name: Publish firmware release
         working-directory: dist
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
-        # Keep unqualified firmware private until an operator approves publication.
-        run: gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes --draft ./*
+        run: |
+          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --verify-tag --generate-notes \
+            firmware.X1C SHA256SUMS LICENSE-MIT LICENSE-APACHE
