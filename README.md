@@ -15,6 +15,33 @@ is not affiliated with or endorsed by KOWSI.
 > chargers, cables or connected devices, or for any other loss. Sink mode can
 > put up to the charger's highest voltage on the meter's output.
 
+## Contents
+
+- [Download or build](#download-or-build)
+- [Related repositories](#related-repositories)
+- [Features](#features)
+- [Limitations](#limitations)
+- [Using the meter](#using-the-meter)
+  - [Buttons](#buttons)
+  - [Modes: sink or passthrough](#modes-sink-or-passthrough)
+  - [Ways to connect](#ways-to-connect)
+  - [Pages](#pages)
+  - [What is saved](#what-is-saved)
+- [Screens](#screens)
+  - [Sink mode](#sink-mode)
+  - [Passthrough mode](#passthrough-mode)
+- [Full charger offer and 5 A without a cable](#full-charger-offer-and-5-a-without-a-cable)
+- [Hand-test checklist](#hand-test-checklist)
+- [Safety](#safety)
+- [Layout](#layout)
+- [Hardware reference documents](#hardware-reference-documents)
+- [Build and validation](#build-and-validation)
+  - [Package and audit offline](#package-and-audit-offline)
+  - [Firmware builds and release downloads](#firmware-builds-and-release-downloads)
+  - [Flashing](#flashing)
+  - [Going back to stock](#going-back-to-stock)
+- [License](#license)
+
 ## Download or build
 
 You do not need to compile the firmware yourself. Download `firmware.X1C` and
