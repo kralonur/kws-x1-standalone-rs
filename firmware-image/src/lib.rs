@@ -1,19 +1,28 @@
 //! Application image trailer and container framing.
 //!
-//! The byte layout mirrors the preserved original container exactly:
+//! Generated layout accepted by the bootloader in a supervised Linux flash:
 //!
 //! ```text
 //! container := 0x00 0x0a ++ payload
-//! payload   := content[0x3340c] ++ checksum[4] ++ 0x80 ++ 0x00[15]
-//! checksum  := big-endian sum of content bytes, modulo 2^32
+//! payload   := application ++ zero_fill ++ descriptor[16] ++ checksum[4] ++ 0x80 ++ zeros[559]
+//! descriptor starts at 0x333fc; checksum starts at 0x3340c
+//! checksum  := big-endian sum of bytes before the checksum, modulo 2^32
 //! ```
 //!
-//! Bootloader checksum necessity has not been isolated experimentally. The original
-//! application never reads it; error 245 is handled during erase/preparation, not
-//! final verification. This crate reproduces the original layout instead of inventing one.
+//! The descriptor's fields are not decoded; no baseline application code or data
+//! is embedded. Acceptance of other application builds still requires validation.
 
 #![no_std]
 
+/// Observed 16-byte footer descriptor immediately before the checksum.
+/// Retained as protocol metadata; its individual fields have not been isolated.
+pub const DESCRIPTOR: [u8; 16] = [
+    0xcb, 0x6e, 0xda, 0x43, 0xc3, 0xfa, 0x35, 0x1c, 0x9f, 0x57, 0x6a, 0x3c, 0x01, 0x00, 0x00, 0x00,
+];
+/// Footer descriptor start, derived from the established checksum offset.
+pub const DESCRIPTOR_OFFSET: usize = CHECKSUM_OFFSET - DESCRIPTOR.len();
+/// Application ceiling protecting the descriptor; matches `firmware/memory.x`.
+pub const APP_LIMIT: usize = DESCRIPTOR_OFFSET;
 /// Original content region plus checksum and trailer (`0x33420`).
 pub const PAYLOAD_LEN: usize = 0x33420;
 /// Bootloader HID payload bytes per report, excluding the report ID.
@@ -22,21 +31,17 @@ pub const CHUNK_BYTES: usize = 64;
 pub const SECTOR_BYTES: u32 = 0x2000;
 /// Exclusive flash ceiling for application erasure, protecting higher storage.
 pub const ERASE_CEILING: u32 = 0x44000;
-/// Original length rounded up to a 64-byte chunk multiple, zero padded.
-/// This is a conservative tooling policy, not an acceptance guarantee or a proven
-/// universal bootloader requirement; see `docs/SAFETY.md`.
-pub const EXTENDED_PAYLOAD_LEN: usize = PAYLOAD_LEN.div_ceil(64) * 64;
+/// Extended payload length matching the hardware-qualified container (`0x33640` / 210,496 bytes).
+pub const EXTENDED_PAYLOAD_LEN: usize = 0x33640;
 /// Application base address in flash (`0x10000`), where the bootloader enters it.
 pub const APP_BASE: u32 = 0x10000;
 /// First byte after the application content: the stored checksum.
 pub const CHECKSUM_OFFSET: usize = 0x3340c;
-/// Byte holding the `0x80` marker, followed by fifteen zero bytes.
+/// Byte holding the `0x80` marker, followed by zero alignment bytes.
 pub const MARKER_OFFSET: usize = 0x33410;
 pub const MARKER: u8 = 0x80;
 /// Opaque container prefix; the host flasher passes it to bootloader command 107 unchanged.
 pub const CONTAINER_PREFIX: [u8; 2] = [0x00, 0x0a];
-/// Filler for unused content space between the application and the checksum.
-pub const FILLER: u8 = 0xff;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageError {
@@ -69,27 +74,24 @@ fn check_content(content: &[u8]) -> Result<(), ImageError> {
     if content.is_empty() {
         return Err(ImageError::EmptyContent);
     }
-    if content.len() > CHECKSUM_OFFSET {
+    if content.len() > APP_LIMIT {
         return Err(ImageError::ContentTooLarge { len: content.len() });
     }
     Ok(())
 }
 
-/// Write a full payload (content, filler, checksum, trailer, zero alignment) into `out`.
+/// Write a full payload (content, zero fill, descriptor, checksum and trailer) into `out`.
 pub fn build_payload(content: &[u8], out: &mut [u8]) -> Result<(), ImageError> {
     check_content(content)?;
     if out.len() != EXTENDED_PAYLOAD_LEN {
         return Err(ImageError::WrongBufferLength { len: out.len() });
     }
-    out.fill(FILLER);
+    out.fill(0);
     out[..content.len()].copy_from_slice(content);
+    out[DESCRIPTOR_OFFSET..CHECKSUM_OFFSET].copy_from_slice(&DESCRIPTOR);
     let checksum = additive_checksum(&out[..CHECKSUM_OFFSET]);
     out[CHECKSUM_OFFSET..CHECKSUM_OFFSET + 4].copy_from_slice(&checksum.to_be_bytes());
     out[MARKER_OFFSET] = MARKER;
-    // Marker, fifteen zero bytes, filler to the original length, then the zero
-    // alignment bytes required by tooling policy.
-    out[MARKER_OFFSET + 1..PAYLOAD_LEN].fill(0);
-    out[PAYLOAD_LEN..].fill(0);
     Ok(())
 }
 

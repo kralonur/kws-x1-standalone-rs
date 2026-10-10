@@ -15,6 +15,21 @@ is not affiliated with or endorsed by KOWSI.
 > chargers, cables or connected devices, or for any other loss. Sink mode can
 > put up to the charger's highest voltage on the meter's output.
 
+## Download or build
+
+You do not need to compile the firmware yourself. Download `firmware.X1C` and
+`SHA256SUMS` from a published **`firmware-v*` release**, and download the flasher
+for your OS from a **`flasher-v*` release**, both on
+[GitHub Releases](https://github.com/kralonur/kws-x1-standalone-rs/releases).
+Verify the checksums and follow [Flashing](#flashing). Downloaded firmware and
+flasher binaries need **no Rust or Python installation**.
+
+Prefer to compile it yourself? Follow [Build and validation](#build-and-validation)
+and [Package and audit offline](#package-and-audit-offline). If no firmware release
+is published yet, the [firmware workflow](https://github.com/kralonur/kws-x1-standalone-rs/actions/workflows/firmware.yml)
+provides build artifacts for signed-in GitHub users; these are development builds,
+not published releases.
+
 ## Related repositories
 
 These repositories form one firmware project. The firmware pins each library
@@ -40,7 +55,7 @@ This is **kws-x1-standalone-rs**.
 - **Another PD controller:** implement `usbpd-traits` for it and drive
   `pd-protocol` as `fusb302-pd` does.
 - **Board-specific and not portable as is:** the panel setup, the flash
-  layout, the bootloader image format and the tools in `tools/`.
+  layout, the bootloader image format and the `firmware-pack` validation policy.
 
 ## Features
 
@@ -84,8 +99,8 @@ What this firmware does **not** do, for now:
 - **About 6000 settings saves** in the device's lifetime (see
   [What is saved](#what-is-saved)).
 - **Flashing uses the Rust flasher on Windows, Linux or macOS** (see
-  [Flashing](#flashing)). Building a project image still needs a trusted original
-  firmware container as the packager's baseline.
+  [Flashing](#flashing)). Project `.X1C` images are generated directly from the
+  compiled application; no original firmware file is required.
 - **Not certified.** Compiling and hand-testing are not USB-IF or safety
   qualification.
 
@@ -706,15 +721,20 @@ crates.io patch is needed. `fusb302-pd` has no controller driver dependency: its
 register map, bit fields and FIFO tokens come directly from the data sheet below.
 
 - `firmware/`: startup, peripheral ownership, async tasks, meter/UI and PD routing.
-- `firmware-core/`: board limits, buttons, panel geometry and image framing.
+- `firmware-core/`: board limits, buttons and panel geometry.
+- `firmware-image/`: shared container layout, builder and checksum validation.
+- `firmware-pack/`: host-only Rust container generation and application auditing.
+- `flasher/`: host-only Rust USB flashing.
 - `fusb302-pd/`: checked controller configuration, FIFO transport, gated sink
   sessions and receive-only passthrough.
 
 The firmware starts at the existing bootloader's application entry. It does not
 use the original graphics bank and may grow into it; "standalone" does not mean
 a replacement bootloader or a self-contained whole-flash image. Legacy hybrid overlays, offline firmware
-experiments and historical test suites are not included. `tools/` provides the
-baseline-preserving packaging, audit and guarded flashing workflow.
+experiments and historical test suites are not included. `firmware-pack` reuses
+the shared `firmware-image` builder for standalone generation and offline auditing;
+`flasher` provides guarded USB flashing without imposing the project's vector
+policy on stock/custom firmware.
 
 ## Hardware reference documents
 
@@ -779,20 +799,20 @@ The ELF is `target/thumbv7em-none-eabihf/release/firmware`.
 
 ```sh
 cargo fmt --all -- --check
-cargo check --locked -p firmware-core -p fusb302-pd
-cargo check --locked --workspace --target thumbv7em-none-eabihf
-cargo clippy --locked --workspace --all-targets --target thumbv7em-none-eabihf -- -D warnings
+cargo check --locked --workspace --exclude firmware
+cargo check --locked -p firmware --target thumbv7em-none-eabihf
+cargo clippy --locked --workspace --exclude firmware --all-targets -- -D warnings
 cargo clippy --locked -p firmware --all-features --target thumbv7em-none-eabihf -- -D warnings
 cargo test --locked -p fusb302-pd --lib
 cargo test --locked -p firmware-core --lib
-python3 -m unittest discover -s tests -p test_image_cli.py
+cargo test --locked -p firmware-pack --test cli
 ```
 
 The libraries set `test = false` so `--all-targets` builds for the embedded
 target never compile host-only tests; run their unit tests on the host with an
 explicit `--lib`, as above.
 
-The new CLI regressions exercise image-preservation and preflight refusal paths
+The CLI regressions exercise standalone container generation and audit refusal paths
 with synthetic files. They never discover or open a device.
 
 Diagnostic features are opt-in: `pd-hold-diagnostic` holds Rd without a sink
@@ -803,34 +823,89 @@ so diagnostic images are not interchangeable with the normal build.
 
 ### Package and audit offline
 
-Requires Python 3 and `llvm-objcopy`. Supply a trusted, chunk-aligned baseline
-container and its **previously approved** SHA-256; there is no private archive
-path or default baseline. Do not substitute the hash of an arbitrary download.
-The packager refuses existing outputs rather than overwriting them. For the
-final dry-run below, extract the [downloaded flasher](#download-and-prerequisites)
-into `build/host-tools/` (create that directory first), or substitute the
-executable path from a local build.
+Uses current stable Rust and its bundled LLVM tools. The `firmware-pack` CLI
+generates `.X1C` directly from the built application, zero fill and a fixed
+16-byte footer descriptor. No baseline image, template file or download is
+required. `pack` refuses existing outputs rather than overwriting them;
+`audit` checks an exact hash-confirmed image against the built application.
+Both emit JSON reports to stdout and never access USB hardware.
 
 ```sh
-# Set BASELINE and BASELINE_SHA256 to the approved file and known hash first.
+rustup component add llvm-tools
 mkdir -p build
-llvm-objcopy -O binary target/thumbv7em-none-eabihf/release/firmware build/firmware.bin
-python3 tools/package_app.py \
-  --app build/firmware.bin --baseline "$BASELINE" \
-  --baseline-sha256 "$BASELINE_SHA256" --out build/firmware.X1C > build/package.json
+HOST=$(rustc -vV | awk '/^host:/ {print $2}')
+"$(rustc --print sysroot)/lib/rustlib/$HOST/bin/llvm-objcopy" \
+  -O binary target/thumbv7em-none-eabihf/release/firmware build/firmware.bin
+cargo run --release -p firmware-pack --locked -- pack \
+  --app build/firmware.bin --out build/firmware.X1C > build/package.json
 IMAGE_SHA256=$(sha256sum build/firmware.X1C | cut -d ' ' -f 1)
-python3 tools/check_image.py \
+cargo run --release -p firmware-pack --locked -- audit \
   --image build/firmware.X1C --confirm-sha256 "$IMAGE_SHA256" \
-  --app build/firmware.bin --baseline "$BASELINE" \
-  --baseline-sha256 "$BASELINE_SHA256" > build/audit.json
-./build/host-tools/flasher --dry-run \
-  --image build/firmware.X1C --confirm-sha256 "$IMAGE_SHA256"
+  --app build/firmware.bin > build/audit.json
+cargo run --release -p flasher --locked -- \
+  --dry-run --image build/firmware.X1C --confirm-sha256 "$IMAGE_SHA256"
 ```
 
-The audit verifies the built binary, vectors and that only application bytes
-and the checksum differ from the confirmed baseline. The firmware must fit in
-209920 bytes, below the container checksum; the linker and packager both
-enforce this, and an oversized build is refused.
+The container uses the layout implemented by `firmware-image::build_container`:
+the two-byte prefix, application bytes, zero fill, a 16-byte descriptor at
+payload offset `0x333fc`, a big-endian additive checksum at `0x3340c`, the
+`0x80` marker and 559 zero trailer bytes. The complete file is 210498 bytes
+(210496-byte payload, 3289 chunks, 26 sectors). The audit verifies its exact hash,
+application bytes and vectors, container structure, checksum, trailer and erase
+envelope. The application
+must fit in 209916 bytes (`0x333fc`); the linker and packager protect the
+reserved descriptor and refuse oversized builds.
+
+The generated container passed all 26 batch checks and final bootloader
+verification on Linux. The flasher waits for flash programming to settle before
+verification and checks response packet checksums. An offline audit is not runtime
+or safety qualification; neither an audit nor a matching hash authorizes flashing.
+
+### Firmware builds and release downloads
+
+`.github/workflows/firmware.yml` runs on pull requests, pushes to `main`, manual
+runs and **`firmware-v*` tags**, independently of flasher releases. It checks
+formatting, firmware Clippy (including diagnostics), and the offline packaging
+regressions, then builds normal release firmware **without diagnostic features**
+for `thumbv7em-none-eabihf` and extracts its application binary.
+
+Every run generates `.X1C` from that application, runs the offline image audit,
+and validates it with the Rust flasher's `--dry-run`. No original firmware file,
+download URL, firmware-specific repository variables or secrets are needed.
+It never opens USB hardware or flashes a device. Invalid applications, containers
+or failed audits block publication. Generated release files live in the ignored
+`dist/` directory; it is build output, not source code.
+
+CI runs provide a `firmware` build artifact. Pushing an unused `firmware-v` tag
+creates a **draft** [GitHub Release](https://github.com/kralonur/kws-x1-standalone-rs/releases)
+with the prepared downloads after all checks pass. Drafts are visible only to
+users with repository write access, not as public release downloads. For example,
+after committing and pushing the source:
+
+```sh
+git tag firmware-v0.1.0
+git push origin firmware-v0.1.0
+```
+
+Use an independent version matching `firmware/Cargo.toml`. Downloads contain
+`firmware.X1C`, `SHA256SUMS`, packaging/audit JSON reports and the project licenses.
+Verify `SHA256SUMS` (Linux:
+`sha256sum --check SHA256SUMS`; macOS: `shasum -a 256 --check SHA256SUMS`), or on
+Windows compare `Get-FileHash .\firmware.X1C -Algorithm SHA256` with its manifest
+entry. Use the lowercase image hash with the flasher commands below. A CI audit
+is structural validation, **not hardware or safety qualification**.
+
+Before publishing a draft, separately approve its exact `.X1C` and SHA-256 for
+hardware flashing, verify final bootloader acceptance and successful boot, and
+complete the relevant hardware checks. Record the tested image hash and results
+in the release notes, then manually publish the draft in GitHub Releases. The
+workflow intentionally does not turn a compile/audit pass into automatic public
+release approval. CI artifacts remain downloadable for offline review; an
+artifact or draft alone does not authorize device I/O.
+
+Only the publishing job has release-write permission; actions are pinned to
+full commit hashes. Firmware tags do not trigger the flasher workflow, and
+flasher tags do not trigger the firmware workflow.
 
 ### Flashing
 
@@ -872,10 +947,10 @@ You need:
   for USB ID `1105:000a`. An offline dry-run needs no USB permissions.
 - On Windows, the built-in HID driver; do not replace it with a libusb driver.
 
-The downloaded binary needs **no Rust or Python installation**, build tools or
-separate HIDAPI DLL. The Python tools above are only needed when packaging and
-auditing a project image from source. Release binaries are not certificate-signed
-or Apple-notarized; follow your OS's security policy when running downloaded code.
+The downloaded binary needs **no Rust installation**, build tools or separate
+HIDAPI DLL. Building and packaging from source uses Rust tooling, not a scripting
+runtime. Release binaries are not certificate-signed or Apple-notarized; follow
+your OS's security policy when running downloaded code.
 
 #### Validate, query and flash
 
@@ -925,7 +1000,7 @@ Before USB discovery it checks the exact image hash, container prefix, checksum,
 trailer and application erase limits. It keeps those validated bytes in memory.
 It accepts stock and custom application layouts, with **no hash deny list or
 project-specific vector checks**. Passing validation does not establish that an
-image is compatible or safe to run; previously flagged bad images can also pass.
+image is compatible or safe to run.
 
 After verifying bootloader mode, it erases only the application envelope,
 sends 64-byte HID reports in checksum-acknowledged batches, requests final
@@ -956,7 +1031,7 @@ are included in this release workflow.
 Regular CI and manually dispatched runs provide downloadable build artifacts.
 Pushing a `flasher-v` version tag publishes [GitHub Release downloads](https://github.com/kralonur/kws-x1-standalone-rs/releases)
 only after validation and every package job succeed. Flasher releases are
-independently versioned; future `firmware-v*` tags will not trigger this workflow.
+independently versioned; `firmware-v*` tags do not trigger this workflow.
 Each archive listed above gets a `.sha256` checksum file.
 
 After committing and pushing the release source, use an unused version matching

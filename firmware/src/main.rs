@@ -57,7 +57,7 @@ use render::{Canvas, Counters, Frame};
 /// stack pointer word, up to the end of the flash tool's application erase
 /// envelope.
 #[cfg(any(feature = "pd-boot-diagnostic", feature = "cable-log"))]
-const RETURN_RANGE: core::ops::Range<u32> = firmware_core::image::APP_BASE + 4..0x44000;
+const RETURN_RANGE: core::ops::Range<u32> = firmware_core::APP_BASE + 4..0x44000;
 /// BL encoding T1: first halfword 11110xxx_xxxxxxxx, second 11x1xxxx_xxxxxxxx
 /// (Armv7-M ARM A7.7.18).
 #[cfg(any(feature = "pd-boot-diagnostic", feature = "cable-log"))]
@@ -927,7 +927,7 @@ async fn main(spawner: Spawner) {
         for (icer, &mask) in nvic.icer.iter().zip(&IRQ_CLEAR_MASKS) {
             icer.write(mask);
         }
-        scb.vtor.write(firmware_core::image::APP_BASE);
+        scb.vtor.write(firmware_core::APP_BASE);
         core::arch::asm!("dsb", "isb", options(nostack, preserves_flags));
     }
 

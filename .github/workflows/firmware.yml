@@ -1,0 +1,88 @@
+name: firmware
+
+on:
+  push:
+    branches: [main]
+    tags: ['firmware-v[0-9]+.*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    # Bound compilation and offline packaging without the six-hour default.
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install current stable Rust and LLVM tools
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustup component add rustfmt clippy llvm-tools
+          rustup target add thumbv7em-none-eabihf
+      - name: Validate firmware and packaging tools
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy -p firmware --all-features --target thumbv7em-none-eabihf --locked -- -D warnings
+          cargo clippy -p firmware-pack --all-targets --locked -- -D warnings
+          cargo test -p firmware-pack --test cli --locked
+      - name: Build normal release firmware without diagnostic features
+        run: |
+          cargo build --release -p firmware --target thumbv7em-none-eabihf --locked
+          mkdir -p build
+          host=$(rustc -vV | awk '/^host:/ {print $2}')
+          "$(rustc --print sysroot)/lib/rustlib/$host/bin/llvm-objcopy" \
+            -O binary target/thumbv7em-none-eabihf/release/firmware build/firmware.bin
+      - name: Prepare and audit flashable firmware
+        run: |
+          mkdir -p dist
+          cargo run --release -p firmware-pack --locked -- pack \
+            --app build/firmware.bin --out dist/firmware.X1C \
+            > dist/firmware-package.json
+          image_sha256=$(sha256sum dist/firmware.X1C | cut -d ' ' -f 1)
+          cargo run --release -p firmware-pack --locked -- audit \
+            --image dist/firmware.X1C --confirm-sha256 "$image_sha256" \
+            --app build/firmware.bin > dist/firmware-audit.json
+          cargo run --release -p flasher --locked -- \
+            --dry-run --image dist/firmware.X1C --confirm-sha256 "$image_sha256"
+          cp LICENSE-MIT LICENSE-APACHE dist/
+          cd dist
+          sha256sum firmware.X1C firmware-package.json firmware-audit.json \
+            LICENSE-MIT LICENSE-APACHE > SHA256SUMS
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: firmware
+          if-no-files-found: error
+          path: dist/*
+
+  publish:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/firmware-v')
+    needs: build
+    runs-on: ubuntu-24.04
+    # Publish only prevalidated files; cap stalled API requests.
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: firmware
+          path: dist
+      - name: Verify firmware downloads
+        working-directory: dist
+        run: sha256sum --check SHA256SUMS
+      - name: Create draft firmware release for hardware qualification
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        # Keep unqualified firmware private until an operator approves publication.
+        run: gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes --draft ./*

@@ -125,14 +125,18 @@ startup initializes it before tasks run. The stack stays in SRAMH/SRAM1, leaving
 SRAM3 unused. The painted stack remains observable on the IRQ page.
 
 The application starts at `0x10000`. Release code plus initialized data must
-fit below the container checksum at `0x4340c` (209920 bytes, ending at
-`0x43400`), enforced by the FLASH length in `memory.x` and by the packager. The
-original firmware's graphics bank from `0x34000` is unused and may be
-overwritten. The container and its `0x44000` erase ceiling are unchanged, so an
-update writes the same range as before; packaging preserves every byte after the
-application except the checksum.
-Image framing uses the existing checksum and
-trailer convention; those alone do not authorize flashing.
+fit below the footer descriptor at `0x433fc` (209916 bytes), enforced by the
+FLASH length in `memory.x` and by the packager. This layout reserves 16 bytes
+before the checksum at `0x4340c`; it is not a measured bootloader size limit.
+Standalone packaging uses the established checksum/trailer offsets and
+`0x44000` erase ceiling. It generates the container directly from the built
+application, zero fill and the fixed descriptor. No copied baseline application
+code or data is embedded. The descriptor fields remain undecoded. The canonical
+payload length is `0x33640` (210,496 bytes, 3,289 chunks), producing the 26-sector
+erase range `[0x10000, 0x44000)`. Bootloader and settings regions remain outside
+that range. The generated layout passed batch checks and final bootloader
+verification on Linux. This result does not qualify every build's runtime
+behavior. Image framing and matching hashes do not authorize flashing.
 
 Normal firmware saves its settings (brightness, rotation) and does not program
 the diagnostic log. Both use the same append-only writer: blank words only, in
@@ -147,18 +151,22 @@ the programming routine runs from RAM with interrupts disabled, and error flags
 fail the write without retries. These sectors are outside the update erase
 range, so saved settings survive firmware updates.
 
-Packaging requires the exact approved baseline hash, validates the built
-application's vectors and size, preserves every byte outside the application
-and checksum, and never overwrites an existing output. The offline audit checks
-those properties again against the supplied binary and baseline.
+The Rust `firmware-pack` CLI takes only the built application, validates its
+vectors and size, generates the standalone layout using
+`firmware-image::build_container`, and exclusively creates a new output file.
+No original firmware or scripting runtime is required. Its offline audit checks
+the confirmed image hash, validates the supplied application, and requires the
+image to match the reconstructed canonical container byte-for-byte, including
+length, zero fill, descriptor, checksum, marker and zero trailer/alignment.
+The generated erase envelope is checked against the application ceiling.
+These checks do not establish bootloader acceptance or runtime safety.
 
 The Rust `flasher` is the sole host tool that accesses the device. It checks the
 exact candidate hash, container framing/checksum and erase ceiling before
 discovering hardware, and keeps the validated payload in memory rather than
 rereading the image after approval. It has no hash deny list, accepts stock/custom
-application layouts and zero-pads a partial final HID report. Previously flagged
-bad images are accepted if the remaining checks pass; neither acceptance nor
-padding establishes runtime safety. Bootloader mode is required before erase;
+application layouts and zero-pads a partial final HID report. Neither acceptance
+nor padding establishes runtime safety. Bootloader mode is required before erase;
 transport/verification errors stop without retries, restoration or reboot.
 Only successful verification permits the final reboot command.
 `--dry-run` never discovers/opens a device, and refuses combination with `--info`.
