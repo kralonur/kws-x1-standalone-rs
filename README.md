@@ -83,8 +83,9 @@ What this firmware does **not** do, for now:
 - **The chosen profile is not remembered:** every boot starts at 5 V.
 - **About 6000 settings saves** in the device's lifetime (see
   [What is saved](#what-is-saved)).
-- **Flashing needs Linux** (the tool uses hidraw) and a copy of the meter's
-  original firmware image as the baseline the packager builds on.
+- **Flashing uses the Rust flasher on Windows, Linux or macOS** (see
+  [Flashing](#flashing)). Building a project image still needs a trusted original
+  firmware container as the packager's baseline.
 - **Not certified.** Compiling and hand-testing are not USB-IF or safety
   qualification.
 
@@ -644,7 +645,7 @@ screen fails the run: note the code and the System page `LAST RESET:` first.
 Before flashing:
 
 1. The [build](#build-and-validation) checks and host tests pass, the image passes the offline
-   audit, and `flash_app.py --dry-run` accepts it.
+   audit, and `flasher --dry-run` accepts it.
 
 Passthrough (slider at passthrough, then power up):
 
@@ -805,7 +806,10 @@ so diagnostic images are not interchangeable with the normal build.
 Requires Python 3 and `llvm-objcopy`. Supply a trusted, chunk-aligned baseline
 container and its **previously approved** SHA-256; there is no private archive
 path or default baseline. Do not substitute the hash of an arbitrary download.
-The packager refuses existing outputs rather than overwriting them.
+The packager refuses existing outputs rather than overwriting them. For the
+final dry-run below, extract the [downloaded flasher](#download-and-prerequisites)
+into `build/host-tools/` (create that directory first), or substitute the
+executable path from a local build.
 
 ```sh
 # Set BASELINE and BASELINE_SHA256 to the approved file and known hash first.
@@ -819,7 +823,7 @@ python3 tools/check_image.py \
   --image build/firmware.X1C --confirm-sha256 "$IMAGE_SHA256" \
   --app build/firmware.bin --baseline "$BASELINE" \
   --baseline-sha256 "$BASELINE_SHA256" > build/audit.json
-python3 tools/flash_app.py --dry-run \
+./build/host-tools/flasher --dry-run \
   --image build/firmware.X1C --confirm-sha256 "$IMAGE_SHA256"
 ```
 
@@ -834,15 +838,166 @@ enforce this, and an oversized build is refused.
 meter into the computer. The meter then starts in its bootloader, ready to be
 flashed, instead of the firmware.
 
-`tools/flash_app.py` uses Linux hidraw and the existing bootloader protocol. It
-requires the exact image hash, valid firmware vectors, aligned payload, a safe
-erase envelope and bootloader mode; known-bad images are denied. There is no
-legacy stock-profile bypass. Ambiguous device discovery requires `--device`.
+The Rust `flasher` is the project's flashing tool. It uses
+[HIDAPI](https://docs.rs/hidapi/) to communicate with the existing USB bootloader.
 
-**Do not remove `--dry-run` without separate approval of the exact image and
-hash.** `--dry-run` does not discover or open hardware. `--info` does perform
-device I/O, needs separate authorization and cannot be combined with `--dry-run`.
-A failed write or verification stops without reboot, retry or restoration.
+#### Download and prerequisites
+
+Download the archive and its `.sha256` file from a **`flasher-v*` release** under
+[GitHub Releases](https://github.com/kralonur/kws-x1-standalone-rs/releases).
+Flasher releases are separate from firmware releases. Choose the archive for
+your OS and CPU:
+
+- Linux x64: `flasher-x86_64-unknown-linux-gnu.tar.gz` (glibc-based Linux; built on Ubuntu 22.04).
+- Windows x64: `flasher-x86_64-pc-windows-msvc.zip` (Windows 10/11).
+- macOS Intel: `flasher-x86_64-apple-darwin.tar.gz`.
+- macOS Apple Silicon: `flasher-aarch64-apple-darwin.tar.gz`.
+
+Verify the archive against its accompanying checksum before extracting it.
+On Linux use `sha256sum --check ARCHIVE.sha256`; on macOS use
+`shasum -a 256 --check ARCHIVE.sha256`, replacing `ARCHIVE` with the download's
+name. On Windows compare `Get-FileHash .\ARCHIVE.zip -Algorithm SHA256` with the
+hash in its `.sha256` file. Extract the archive using your OS's archive tool.
+If no flasher release has been published yet, [build from source](#build-from-source).
+
+You need:
+
+- The extracted `flasher` or `flasher.exe` and an independently approved `.X1C`
+  firmware container with its exact lowercase SHA-256. Flasher archives contain
+  **no firmware images**; raw `.bin` files are not accepted.
+- A data-capable USB connection; flashing requires the device in **Bootloader**
+  mode. Leave the output unloaded during the update.
+- On Linux, permission to access the HID device. If opening it is denied, use
+  `sudo` for the device-access command or configure a hidraw udev permission rule
+  for USB ID `1105:000a`. An offline dry-run needs no USB permissions.
+- On Windows, the built-in HID driver; do not replace it with a libusb driver.
+
+The downloaded binary needs **no Rust or Python installation**, build tools or
+separate HIDAPI DLL. The Python tools above are only needed when packaging and
+auditing a project image from source. Release binaries are not certificate-signed
+or Apple-notarized; follow your OS's security policy when running downloaded code.
+
+#### Validate, query and flash
+
+Open a terminal in the directory containing the extracted executable and your
+firmware. Replace `<approved-sha256>` with the independently approved image hash,
+not merely the hash of an arbitrary download. To inspect the local file's hash,
+use `sha256sum firmware.X1C` on Linux, `shasum -a 256 firmware.X1C` on macOS, or
+`Get-FileHash .\firmware.X1C -Algorithm SHA256` in PowerShell, then compare it with
+the approved value. PowerShell displays uppercase hashes; the confirmation
+argument must be lowercase.
+
+First validate offline; this does not discover or open hardware:
+
+```sh
+# Linux/macOS
+./flasher --dry-run --image firmware.X1C --confirm-sha256 "<approved-sha256>"
+```
+
+```powershell
+# Windows PowerShell
+.\flasher.exe --dry-run --image .\firmware.X1C --confirm-sha256 "<approved-sha256>"
+```
+
+After connecting in Bootloader mode, an optional mode query is `./flasher --info`
+on Linux/macOS or `.\flasher.exe --info` in PowerShell. **This performs device I/O**
+and needs separate authorization; mode `0` means bootloader. It cannot be combined with `--dry-run` or image arguments.
+
+**Only after approving the exact image and hash**, flash it:
+
+```sh
+# Linux/macOS: this writes the device
+./flasher --image firmware.X1C --confirm-sha256 "<approved-sha256>"
+```
+
+```powershell
+# Windows PowerShell: this writes the device
+.\flasher.exe --image .\firmware.X1C --confirm-sha256 "<approved-sha256>"
+```
+
+If multiple matching HID paths are found, use `--device "<HIDAPI-path>"` with one
+of the exact paths shown by the error. Paths are platform-dependent; the tool
+refuses an override that does not belong to the supported USB identity.
+
+#### What the flasher checks and does
+
+Before USB discovery it checks the exact image hash, container prefix, checksum,
+trailer and application erase limits. It keeps those validated bytes in memory.
+It accepts stock and custom application layouts, with **no hash deny list or
+project-specific vector checks**. Passing validation does not establish that an
+image is compatible or safe to run; previously flagged bad images can also pass.
+
+After verifying bootloader mode, it erases only the application envelope,
+sends 64-byte HID reports in checksum-acknowledged batches, requests final
+bootloader verification, and sends reboot **only after final acceptance**.
+A partial final report is zero-padded for transport without changing the image
+or its checksum. The bootloader and storage above the erase envelope are not
+written by this update sequence.
+
+**On a write or verification error, stop and leave the device in bootloader
+mode.** The tool does not automatically reboot, retry or restore another image.
+Successful batch checksums alone are not a successful update. Investigation,
+retry or restoration needs separate approval of the exact image/hash.
+
+Linux operation and the x64 Windows GNU cross-build have been exercised; that
+Windows build flashed both project and original firmware. An initial project
+attempt failed final verification before a separately approved retry succeeded.
+Hardware operation with the Windows MSVC release build and macOS is not yet
+validated. See [the safety contract](docs/SAFETY.md) for the full limits.
+
+#### GitHub builds and releases
+
+`.github/workflows/flasher.yml` validates pull requests, pushes to `main` and
+`flasher-v*` tags using current stable Rust. It builds the flasher natively on Linux,
+Windows and both macOS architectures, runs `--help` without hardware access,
+and packages the executable, README and licenses. No tests or firmware images
+are included in this release workflow.
+
+Regular CI and manually dispatched runs provide downloadable build artifacts.
+Pushing a `flasher-v` version tag publishes [GitHub Release downloads](https://github.com/kralonur/kws-x1-standalone-rs/releases)
+only after validation and every package job succeed. Flasher releases are
+independently versioned; future `firmware-v*` tags will not trigger this workflow.
+Each archive listed above gets a `.sha256` checksum file.
+
+After committing and pushing the release source, use an unused version matching
+the flasher package version, for example:
+
+```sh
+git tag flasher-v0.1.0
+git push origin flasher-v0.1.0
+```
+
+Only the final publishing job receives release-write permission. The actions
+are pinned to full commit hashes. Binaries are not certificate-signed or Apple
+notarized; packaging does not replace hardware validation.
+
+#### Build from source
+
+If you prefer a local build, install current stable Rust and run:
+
+```sh
+cargo build --release -p flasher --locked
+```
+
+The native executable is `target/release/flasher` or
+`target/release/flasher.exe`; use that path in the commands above. Native Windows
+MSVC builds need the C++ Build Tools; macOS builds need Xcode Command Line Tools.
+Linux uses native hidraw without libusb/libudev development packages. Windows
+and macOS statically compile HIDAPI's bundled C backend.
+
+To cross-compile the x64 Windows executable on Linux, install
+[Zig](https://ziglang.org/learn/getting-started/) and
+[cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild), then run:
+
+```sh
+rustup target add x86_64-pc-windows-gnu
+cargo zigbuild --release -p flasher --target x86_64-pc-windows-gnu --locked
+```
+
+The executable is `target/x86_64-pc-windows-gnu/release/flasher.exe`; copy it and
+the exact confirmed firmware container to Windows. No Rust installation or
+separate HIDAPI DLL is required on the destination. The shared `firmware-image`
+crate keeps the host flasher independent of the embedded runtime dependencies.
 
 ### Going back to stock
 
@@ -857,9 +1012,10 @@ Stock images can be found through
 project is not associated with its author, and the images are not distributed
 here.
 
-`tools/flash_app.py` refuses stock images on purpose, since it only accepts
-images this project built. Use the vendor's updater, or another flasher that
-speaks the same bootloader protocol.
+The Rust `flasher` accepts original firmware containers with the same hash,
+container and erase-limit checks described above. Use `--dry-run` first; actual
+stock flashing succeeded with the x64 Windows GNU cross-build.
+The vendor's updater is another option.
 
 ## License
 

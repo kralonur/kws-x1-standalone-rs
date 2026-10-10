@@ -1,0 +1,119 @@
+name: flasher
+
+on:
+  push:
+    branches: [main]
+    tags: ['flasher-v[0-9]+.*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    # Bound validation time without the default six-hour runner budget.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install current stable Rust
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustup component add rustfmt clippy
+          rustup target add thumbv7em-none-eabihf
+      - name: Check formatting, host packages and firmware
+        run: |
+          cargo fmt --all -- --check
+          cargo check --workspace --exclude firmware --locked
+          cargo clippy --workspace --exclude firmware --all-targets --locked -- -D warnings
+          cargo check -p firmware --target thumbv7em-none-eabihf --locked
+
+  package:
+    needs: check
+    env:
+      # Bundle the MSVC C runtime so the Windows download needs no VC++ installer.
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            exe: ''
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+            exe: .exe
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            exe: ''
+          - os: macos-15
+            target: aarch64-apple-darwin
+            exe: ''
+    runs-on: ${{ matrix.os }}
+    # Allow native release builds and archive creation, but cap stalled jobs.
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install current stable Rust
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+      - name: Build archives and SHA-256 checksums without publishing
+        id: package
+        uses: taiki-e/upload-rust-binary-action@f0d45ae91ee7b8ee928de7a9d04d893a08bcbec6 # v1.30.2
+        with:
+          bin: flasher
+          package: flasher
+          target: ${{ matrix.target }}
+          build-tool: cargo
+          locked: true
+          include: README.md,LICENSE-MIT,LICENSE-APACHE
+          checksum: sha256
+          dry-run: true
+          dry-run-intended: true
+      - name: Smoke-check executable without device I/O
+        env:
+          TARGET: ${{ matrix.target }}
+          EXE: ${{ matrix.exe }}
+        run: './target/"$TARGET"/release/flasher"$EXE" --help'
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: flasher-${{ matrix.target }}
+          if-no-files-found: error
+          path: |
+            ${{ steps.package.outputs.tar }}
+            ${{ steps.package.outputs.zip }}
+            ${{ steps.package.outputs.sha256 }}
+
+  publish:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/flasher-v')
+    needs: package
+    runs-on: ubuntu-24.04
+    # Publishing prebuilt files should not need a long-running runner.
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: flasher-*
+          merge-multiple: true
+          path: dist
+      - name: Verify archives
+        working-directory: dist
+        run: sha256sum --check ./*.sha256
+      - name: Create release with all flasher downloads
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes ./*

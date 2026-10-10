@@ -12,6 +12,8 @@
 //! application never reads it; error 245 is handled during erase/preparation, not
 //! final verification. This crate reproduces the original layout instead of inventing one.
 
+#![no_std]
+
 /// Original content region plus checksum and trailer (`0x33420`).
 pub const PAYLOAD_LEN: usize = 0x33420;
 /// Original length rounded up to a 64-byte chunk multiple, zero padded.

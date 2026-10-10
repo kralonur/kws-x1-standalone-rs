@@ -11,6 +11,7 @@ test = false
 bench = false
 
 [dependencies]
+firmware-image.workspace = true
 embassy-hc32.workspace = true
 fusb302-pd.workspace = true
 pd-protocol.workspace = true

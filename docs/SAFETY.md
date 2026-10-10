@@ -152,12 +152,15 @@ application's vectors and size, preserves every byte outside the application
 and checksum, and never overwrites an existing output. The offline audit checks
 those properties again against the supplied binary and baseline.
 
-The flashing tool checks the exact candidate hash, known-bad deny list, firmware
-vector layout, chunk alignment and erase ceiling before discovering hardware.
-It keeps the validated payload in memory rather than rereading the image after
-approval. There is no structural-profile bypass. Bootloader mode is required
-before erase; transport/verification errors stop without retries, restoration
-or reboot. Only successful verification permits the final reboot command.
+The Rust `flasher` is the sole host tool that accesses the device. It checks the
+exact candidate hash, container framing/checksum and erase ceiling before
+discovering hardware, and keeps the validated payload in memory rather than
+rereading the image after approval. It has no hash deny list, accepts stock/custom
+application layouts and zero-pads a partial final HID report. Previously flagged
+bad images are accepted if the remaining checks pass; neither acceptance nor
+padding establishes runtime safety. Bootloader mode is required before erase;
+transport/verification errors stop without retries, restoration or reboot.
+Only successful verification permits the final reboot command.
 `--dry-run` never discovers/opens a device, and refuses combination with `--info`.
 
 No flashing, probing or other device I/O is authorized by a build or migration.

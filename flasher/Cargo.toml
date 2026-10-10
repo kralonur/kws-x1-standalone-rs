@@ -1,0 +1,15 @@
+[package]
+name = "flasher"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+firmware-image = { workspace = true }
+# Use native hidraw on Linux and bundled C HIDAPI on Windows/macOS. The native
+# Windows backend can return zero on synchronous writes, defeating length checks.
+hidapi = { workspace = true, default-features = false, features = ["linux-native-basic-udev"] }
+sha2 = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

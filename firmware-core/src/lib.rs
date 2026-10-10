@@ -5,7 +5,7 @@
 
 pub mod buttons;
 pub mod clock;
-pub mod image;
+pub use firmware_image as image;
 pub mod latch;
 pub mod panel;
 pub mod settings;

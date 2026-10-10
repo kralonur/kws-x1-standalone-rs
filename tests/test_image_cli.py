@@ -1,4 +1,4 @@
-"""Offline CLI regressions for destructive image and dry-run failure modes.
+"""Offline CLI regressions for packaging and image-audit failure modes.
 
 These use synthetic files, never HID discovery or device access. The fixtures
 encode the established container/vector format independently of the tools.
@@ -78,11 +78,6 @@ class ImageCli(unittest.TestCase):
         self.assertEqual(image[n:CHECKSUM], prior[n:CHECKSUM])
         self.assertEqual(image[CHECKSUM + 4:], prior[CHECKSUM + 4:])
         self.assertEqual(self.audit().returncode, 0)
-        result = self.run_cli("flash_app.py", "--dry-run", "--image", self.output,
-                              "--confirm-sha256", digest(self.output.read_bytes()))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("26 sectors = 0x10000..0x44000", result.stdout)
-        self.assertIn("no device was opened", result.stdout)
 
     def test_unconfirmed_baseline_does_not_create_output(self):
         self.assertNotEqual(self.package("0" * 64).returncode, 0)
@@ -124,16 +119,6 @@ class ImageCli(unittest.TestCase):
         result = self.audit()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("outside the application/checksum", result.stderr)
-
-    def test_dry_run_refuses_info_and_unconfirmed_image(self):
-        result = self.run_cli("flash_app.py", "--info", "--dry-run")
-        self.assertEqual(result.returncode, 2)
-        self.assertIn("cannot be combined", result.stderr)
-        self.assertEqual(self.package().returncode, 0)
-        result = self.run_cli("flash_app.py", "--dry-run", "--image", self.output,
-                              "--confirm-sha256", "0" * 64)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("not the confirmed", result.stderr)
 
 
 if __name__ == "__main__":
