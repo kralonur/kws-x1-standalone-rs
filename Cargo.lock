@@ -46,9 +46,9 @@ checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
 name = "cc"
-version = "1.5.1"
+version = "1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f360145194ee8e21db5ee7f3fcd4fe52210864c75c985dae33218202c8bbe040"
+checksum = "f74872d07caf508b30a21f6836e7d7016a2eaf7d9ff4f48deaa58cd8a0407630"
 dependencies = [
  "find-msvc-tools",
  "shlex",
@@ -207,7 +207,7 @@ checksum = "dc2d050bdc5c21e0862a89256ed8029ae6c290a93aecefc73084b3002cdebb01"
 [[package]]
 name = "embassy-hc32"
 version = "0.1.0"
-source = "git+https://github.com/kralonur/hc32f460-embassy-rs?rev=8bad72945c4f91331c2e6fac3716271484292cd9#8bad72945c4f91331c2e6fac3716271484292cd9"
+source = "git+https://github.com/kralonur/hc32f460-embassy-rs?rev=80da2a6abee50e4207644acb84b14a4694e44e67#80da2a6abee50e4207644acb84b14a4694e44e67"
 dependencies = [
  "cortex-m",
  "critical-section",
@@ -450,7 +450,7 @@ dependencies = [
 [[package]]
 name = "hc32f460-pac"
 version = "0.1.0"
-source = "git+https://github.com/kralonur/hc32f460-embassy-rs?rev=8bad72945c4f91331c2e6fac3716271484292cd9#8bad72945c4f91331c2e6fac3716271484292cd9"
+source = "git+https://github.com/kralonur/hc32f460-embassy-rs?rev=80da2a6abee50e4207644acb84b14a4694e44e67#80da2a6abee50e4207644acb84b14a4694e44e67"
 dependencies = [
  "cortex-m",
  "cortex-m-rt",
@@ -491,9 +491,9 @@ checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 
 [[package]]
 name = "libc"
-version = "0.2.189"
+version = "0.2.190"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
+checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
 
 [[package]]
 name = "litrs"
@@ -608,7 +608,7 @@ checksum = "a513e167849a384b7f9b746e517604398518590a9142f4846a32e3c2a4de7b11"
 [[package]]
 name = "pd-protocol"
 version = "0.1.0"
-source = "git+https://github.com/kralonur/embedded-charging-protocols-rs?rev=a9885a8a1c49689bf825e5701580d6c0ca964e7f#a9885a8a1c49689bf825e5701580d6c0ca964e7f"
+source = "git+https://github.com/kralonur/embedded-charging-protocols-rs?rev=0796747706551713ff10620fce8c9617a98b5c78#0796747706551713ff10620fce8c9617a98b5c78"
 dependencies = [
  "usbpd",
  "usbpd-traits",
