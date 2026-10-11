@@ -9,7 +9,7 @@ use embedded_graphics::primitives::{
     Circle, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle, RoundedRectangle, StyledDrawable,
     Triangle,
 };
-use firmware_core::buttons::{Detail, Level, PpsFocus, QC2_VOLTAGES, QcOffer, SettingsFocus, Tab};
+use firmware_core::buttons::{Detail, Level, PpsFocus, Qc2Choice, QcOffer, SettingsFocus, Tab};
 use firmware_core::settings::{BRIGHTNESS_PERCENT, Item, QcFindings, Rotation, Settings};
 use u8g2_fonts::FontRenderer;
 use u8g2_fonts::fonts;
@@ -872,13 +872,10 @@ fn qc2_pill(status: Status, request: Voltage) -> Option<(Voltage, &'static str, 
     })
 }
 
-/// Baseline of the probe's verdict under the Quick Charge 2.0 rows.
-const QC2_PROBE_BASELINE: i32 = 116;
-
 /// Everything the Quick Charge 2.0 tab shows.
 pub struct Qc2 {
-    /// The voltage being chosen, while the choice is open.
-    pub preview: Option<Voltage>,
+    /// The row being chosen, while the choice is open.
+    pub preview: Option<Qc2Choice>,
     /// The voltage asked of the charger, kept while other tabs show.
     pub request: Option<Voltage>,
     pub mode: QcMode,
@@ -887,8 +884,9 @@ pub struct Qc2 {
 }
 
 /// The Quick Charge 2.0 tab, laid out as the fixed PD profiles: one row per
-/// voltage, the choice framed, the status on its row. Voltages the probe
-/// found the charger ignores are greyed out and cannot be chosen.
+/// voltage and an off row, the choice framed, the status on its row.
+/// Voltages the probe found the charger ignores are greyed out and cannot be
+/// chosen.
 pub fn draw_qc2<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'_>, page: &Qc2) {
     let &Qc2 {
         preview,
@@ -903,7 +901,12 @@ pub fn draw_qc2<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'
         return;
     }
     let pill = request.and_then(|request| qc2_pill(status, request));
-    for (row, voltage) in QC2_VOLTAGES.into_iter().enumerate() {
+    for (row, choice) in Qc2Choice::ALL.into_iter().enumerate() {
+        let selected = preview == Some(choice);
+        let Qc2Choice::Volts(voltage) = choice else {
+            selector_row(target, row, "OFF", WHITE, ["plain USB", ""], selected, None);
+            continue;
+        };
         let taken = qc.takes(voltage);
         let detail = match (taken, voltage, qc.report()) {
             // 20 V is Class B only (NCP4371 Table 4).
@@ -922,22 +925,9 @@ pub fn draw_qc2<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'
                 MUTED
             },
             [detail, ""],
-            preview == Some(voltage),
+            selected,
             pill.filter(|(at, ..)| *at == voltage)
                 .map(|(_, label, color)| (label, color)),
-        );
-    }
-    if let Some(report) = qc.report() {
-        let line = Label::new()
-            .push(b"probe: ")
-            .push(report_summary(report).as_str().as_bytes());
-        text(
-            target,
-            &PLAIN,
-            line.as_str(),
-            Point::new(LEFT, QC2_PROBE_BASELINE),
-            HorizontalAlignment::Left,
-            CYAN,
         );
     }
     let hint_text = match (preview, request) {
@@ -1131,18 +1121,6 @@ pub fn draw_qc3<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'
             Some(_) => qc_running_hint(status, "OK adjust    < > tabs"),
         },
     );
-}
-
-/// The probe's verdict: the version, then the class (Class A ends at 12 V,
-/// Class B adds 20 V).
-fn report_summary(report: Report) -> Label {
-    if !report.v9 && !report.steps {
-        return Label::new().push(b"5V ONLY");
-    }
-    let version: &[u8] = if report.steps { b"QC3 " } else { b"QC2 " };
-    Label::new()
-        .push(version)
-        .push(if report.v20 { b"B" } else { b"A" })
 }
 
 /// The Quick Charge 3.0 step range, from 3.6 V to the class maximum, e.g.

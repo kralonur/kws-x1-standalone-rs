@@ -230,9 +230,9 @@ pub enum Open {
     Pps(PpsFocus),
     /// The Quick Charge probe runs; `page` then opens with what it found.
     Probe(QcPage),
-    /// Left/Right preview Quick Charge 2.0 voltages the charger takes; OK
-    /// requests one.
-    Qc2(Voltage),
+    /// Left/Right preview the Quick Charge 2.0 voltages the charger takes,
+    /// and off; OK requests one.
+    Qc2(Qc2Choice),
     /// Left/Right move the Quick Charge 3.0 steps' target.
     Qc3,
     /// Left/Right scroll the list, shown from row `top`.
@@ -271,8 +271,8 @@ pub enum View {
         choosing: bool,
     },
     Pps(Option<PpsFocus>),
-    /// The previewed voltage, while choosing.
-    Qc2(Option<Voltage>),
+    /// The previewed row, while choosing.
+    Qc2(Option<Qc2Choice>),
     /// The Quick Charge probe runs, on either Quick Charge tab.
     Probe,
     /// Whether Left/Right move the target.
@@ -328,8 +328,10 @@ impl QcPage {
     fn open(self, input: &mut Input) -> Page {
         match (self, input.trigger) {
             _ if input.qc.report().is_none() => Page::Open(Open::Probe(self)),
-            (Self::Qc2, Some(QcTarget::Volts(voltage))) => Page::Open(Open::Qc2(voltage)),
-            (Self::Qc2, _) => Page::Open(Open::Qc2(Voltage::V5)),
+            (Self::Qc2, Some(QcTarget::Volts(voltage))) => {
+                Page::Open(Open::Qc2(Qc2Choice::Volts(voltage)))
+            }
+            (Self::Qc2, _) => Page::Open(Open::Qc2(Qc2Choice::Volts(Voltage::V5))),
             (Self::Qc3, _) if !input.qc.steps() => Page::Tabs(Tab::Qc3),
             (Self::Qc3, Some(QcTarget::Steps(_))) => Page::Open(Open::Qc3),
             (Self::Qc3, _) => {
@@ -340,8 +342,33 @@ impl QcPage {
     }
 }
 
-/// The Quick Charge 2.0 voltages, in Left/Right order.
-pub const QC2_VOLTAGES: [Voltage; 4] = [Voltage::V5, Voltage::V9, Voltage::V12, Voltage::V20];
+/// A row of the Quick Charge 2.0 choice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Qc2Choice {
+    Volts(Voltage),
+    /// Release D+/D−, so the charger returns to plain USB at 5 V; this also
+    /// ends Quick Charge 3.0 steps.
+    Off,
+}
+
+impl Qc2Choice {
+    /// The rows, in Left/Right order.
+    pub const ALL: [Self; 5] = [
+        Self::Volts(Voltage::V5),
+        Self::Volts(Voltage::V9),
+        Self::Volts(Voltage::V12),
+        Self::Volts(Voltage::V20),
+        Self::Off,
+    ];
+
+    /// What the trigger asks of the charger once this is chosen.
+    const fn target(self) -> Option<QcTarget> {
+        match self {
+            Self::Volts(voltage) => Some(QcTarget::Volts(voltage)),
+            Self::Off => None,
+        }
+    }
+}
 
 /// What this boot's probe found the charger takes; before a probe, nothing
 /// is ruled out.
@@ -915,10 +942,14 @@ impl Navigation {
             Page::Settings(SettingsFocus::Rotation) => input.settings.step_rotation(forward),
             Page::Open(Open::Fixed) => return Some(PdCommand::StepFixed(sign as i8)),
             Page::Open(Open::Qc2(preview)) => {
-                let index = QC2_VOLTAGES.iter().position(|v| v == preview).unwrap_or(0);
+                let all = Qc2Choice::ALL;
+                let index = all.iter().position(|row| row == preview).unwrap_or(0);
                 let qc = input.qc;
-                *preview =
-                    cycle_where(&QC2_VOLTAGES, index, forward, |v| qc.takes(v)).unwrap_or(*preview);
+                *preview = cycle_where(&all, index, forward, |row| match row {
+                    Qc2Choice::Volts(voltage) => qc.takes(voltage),
+                    Qc2Choice::Off => true,
+                })
+                .unwrap_or(*preview);
             }
             Page::Open(Open::Qc3) => {
                 let max = input.qc.steps_max();
@@ -978,7 +1009,7 @@ impl Navigation {
                 (Page::Tabs(Tab::Pps), Some(PdCommand::Confirm))
             }
             Page::Open(Open::Qc2(preview)) => {
-                input.trigger = Some(QcTarget::Volts(preview));
+                input.trigger = preview.target();
                 (Page::Tabs(Tab::Qc2), None)
             }
             page @ Page::Open(Open::Probe(_)) => (page, None),

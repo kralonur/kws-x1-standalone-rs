@@ -121,8 +121,8 @@ What this firmware does **not** do, for now:
   charger, on a USB-A port and on USB-C switched out of PD: fixed 9 and
   12 V, the 0.2 V steps and the probe. 20 V and Class B chargers are
   untested. The trigger drives D+/D− only once a Quick Charge screen
-  started it, and keeps them driven while other screens show, until the
-  switch back to PD, a PD contract or a restart.
+  started it, and keeps them driven while other screens show, until `OFF`
+  on the QC 2.0 screen, the switch back to PD, a PD contract or a restart.
 - **Sink only.** The meter never acts as a source: no power role swap, no
   data role swap, no VCONN swap, no Cable_Reset.
 - **Passthrough only listens.** It cannot change or inject anything between
@@ -214,8 +214,8 @@ point the way it flows (they follow the screen rotation).
 | **Lines** | D+, D-, CC1 and CC2 voltages | |
 | **PD Profiles** | the charger's fixed profiles, `ACTIVE` on the one in force; with PD off for Quick Charge only `QC MODE` | OK, Left/Right to choose, OK requests it, Back cancels; in `QC MODE` OK switches back to PD |
 | **PPS** | the charger's PPS ranges, the set voltage and current limit, the live output; `ACTIVE` or `NOT APPLIED`; with PD off for Quick Charge only `QC MODE` | OK, Left/Right voltage (20 mV, 100 mV held), OK, current limit (50 mA, 250 mA held), OK requests; in `QC MODE` OK switches back to PD |
-| **QC 2.0** | 5, 9, 12 and 20 V, those the charger ignored greyed out, the status on its row; under a PD contract only `PD MODE` | OK tests the charger, then opens at 5 V with the choice open (under a PD contract it first switches the charger out of PD); Left/Right choose, OK requests and closes the choice, Back closes it; the request stays in force on other screens |
-| **QC 3.0** | the step range, the set voltage, VBUS, D+ and D−; under a PD contract only `PD MODE` | OK tests the charger, then starts continuous mode at 5 V (under a PD contract it first switches the charger out of PD); Left/Right move it by 0.2 V (repeats held); OK or Back closes it; the steps stay in force on other screens |
+| **QC 2.0** | 5, 9, 12 and 20 V and `OFF`, the voltages the charger ignored greyed out, the status on its row; under a PD contract only `PD MODE` | OK tests the charger, then opens at 5 V with the choice open (under a PD contract it first switches the charger out of PD); Left/Right choose, OK requests and closes the choice, Back closes it; the request stays in force on other screens until `OFF` |
+| **QC 3.0** | the step range, the set voltage, VBUS, D+ and D−; under a PD contract only `PD MODE` | OK tests the charger, then starts continuous mode at 5 V (under a PD contract it first switches the charger out of PD); Left/Right move it by 0.2 V (repeats held); OK or Back closes it; the steps stay in force on other screens until `OFF` on QC 2.0 |
 | **PD Session** | sink: session state, CC levels and the charger's offer as received. Passthrough: CC pin, Rp level and the latest PD messages | OK to scroll |
 | **Charger** | the offer (`*` = needs a 5 A cable), the charger's identity, maker and peak ratings, power status and source info, the Quick Charge detection result | OK to scroll; hold OK: full scan (Quick Charge, PD, EPR, and the 5 A cable test with the plug in the charger) |
 | **Cable** | the cable's e-marker: identity, ratings, status and modes | OK to scroll; hold OK at fixed 5 V to read the e-marker |
@@ -367,19 +367,19 @@ After the test the choice opens at 5 V: Left/Right choose among the
 voltages the charger took, and OK requests one and closes the choice; Back
 closes it without a request. OK reopens it at the voltage in force. The
 request stays in force while other screens show, so the overview can watch
-it; choose 5 V to bring the output back down.
+it. `OFF` releases D+/D−, and the charger returns to plain USB at 5 V.
 
 Quick Charge never confirms a request, so the meter watches VBUS: a request
 whose output has not moved halfway after 610 ms (the charger's 60 ms filter
 plus PD's 550 ms supply transition limit) shows `IGNORED`.
 
-- **Rows**: 5, 9, 12 and 20 V. Before the test 20 V reads `Class B only`;
-  after it a voltage the charger ignored is greyed out with `charger ignored
-  it` (`needs Class B` on 20 V) and cannot be chosen. The choice is framed.
+- **Rows**: 5, 9, 12 and 20 V, then `OFF` (`plain USB`). Before the test
+  20 V reads `Class B only`; after it a voltage the charger ignored is greyed
+  out with `charger ignored it` (`needs Class B` on 20 V) and cannot be
+  chosen. The choice is framed. The charger page lists the test's full
+  result.
 - **Status pill** on the row it concerns: `WAIT` (handshake), `SETTING`
   (waiting for VBUS), `ACTIVE`, `IGNORED`, `NO DCP` or `NO QC`.
-- **`probe:`**: the test's result, `QC3 B`, `QC2 A`, `5V ONLY` and so on
-  (Class A ends at 12 V, Class B adds 20 V).
 
 #### 6. QC 3.0
 
@@ -389,7 +389,8 @@ QC 2.0 screen does. OK runs the same test the first time, then starts Quick
 Charge 3.0 continuous mode at 5 V; Left/Right then move the output by 0.2 V
 (held, they repeat), from 3.6 V up to 12 V (20 V on a Class B charger), one
 step per 100 ms scan. OK or Back stops adjusting; the output stays where
-the steps put it while other screens show. OK reopens it there.
+the steps put it while other screens show. OK reopens it there, and `OFF`
+on the QC 2.0 screen ends the steps.
 A charger that ignored the steps in the test shows `NO QC 3.0`.
 
 - **Step range** (top): what the test found, else
