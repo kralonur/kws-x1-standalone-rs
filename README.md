@@ -136,9 +136,11 @@ What this firmware does **not** do, for now:
 - **No energy or charge counting** (no mAh or Wh), no timer, no graphs, no
   recording, and no USB data connection to a computer or app.
 - **No calibration setting.** The measurement uses a fixed sensor calibration.
-  The line voltages use the reference manual's nominal internal reference
-  (about 1.15 V, no tolerance given) and have not been checked against a
-  multimeter.
+  The line voltages use an internal reference of 1083 mV, the stock
+  firmware's value, rather than the reference manual's "about 1.1 V"
+  (1100 mV, RM 16.3.2). A multimeter check on one unit matched it (D+ and D−
+  within 5 mV from 0.55 to 3.23 V), but the manual gives no tolerance, so
+  another unit may read a few percent off. CC1 and CC2 were not checked.
 - **The chosen profile is not remembered:** every boot starts at 5 V.
 - **About 6000 settings saves** in the device's lifetime (see
   [What is saved](#what-is-saved)).
@@ -289,8 +291,9 @@ reference, independently of the bus sensor and the PD controller.
   in use carries the Type-C pull-up/pull-down level; a cable's VCONN shows on
   the other one.
 - `-.--`: no reading yet, or the last ADC scan failed.
-- **`uncalibrated`** (hint row): the values use the reference manual's
-  nominal internal reference and have not been compared against a multimeter.
+- **`approximate`** (hint row): the internal reference was measured on one
+  unit, and another unit's may differ by a few percent (see
+  [Limitations](#limitations)).
 
 The lines are sampled only while this screen or a Quick Charge screen is
 shown, or while Quick Charge runs.

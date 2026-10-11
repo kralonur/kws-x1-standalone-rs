@@ -799,7 +799,7 @@ pub fn draw_lines<D: DrawTarget<Color = Rgb565>>(
             (CC2_CARD, MAGENTA_TINT, MAGENTA, "CC2", value(|l| l.cc2_mv)),
         ],
     );
-    hint(target, header, "uncalibrated    < > tabs");
+    hint(target, header, "approximate    < > tabs");
 }
 
 /// How the PD side of the port stands, for the Quick Charge hints.

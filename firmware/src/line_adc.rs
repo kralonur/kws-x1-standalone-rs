@@ -1,5 +1,5 @@
 //! D+, D−, CC1 and CC2 line voltages, measured by ADC2 against the internal
-//! reference (RM 5.3.8). ADC2 is independent of the INA226 bus monitor and
+//! reference (RM 16.3.2). ADC2 is independent of the INA226 bus monitor and
 //! the PD controller; nothing here drives the lines.
 
 use embassy_hc32::adc::{
@@ -8,8 +8,8 @@ use embassy_hc32::adc::{
 use embassy_hc32::gpio::Port;
 use embassy_time::Duration;
 
-/// The four line voltages in mV. Not calibrated against a meter: the
-/// reference value is the manual's nominal one.
+/// The four line voltages in mV, scaled by the measured reference
+/// ([`REFERENCE_MV`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LineVoltages {
     pub dp_mv: u16,
@@ -37,10 +37,13 @@ const AVERAGE: Average = Average::Four;
 /// is a wide bound.
 const SCAN_TIMEOUT: Duration = Duration::from_millis(3);
 
-/// Internal reference in mV: "approximately 1.15V" (RM 5.3.8; RM 16.3.2
-/// says about 1.1 V). The manual gives no tolerance and no per-chip
-/// calibration value, so readings are approximate.
-const REFERENCE_MV: u32 = 1150;
+/// Internal reference in mV. The manual gives about 1100 mV (RM 16.3.2),
+/// with no tolerance and no per-chip calibration value. The stock firmware
+/// uses 1083 mV, which a multimeter check on one unit matched: D+ and D−
+/// driven at 0.55-3.23 V fit a gain-only scale (no offset) of 1083.7 mV,
+/// every point then within 5 mV. Other units' references may differ by a
+/// few percent.
+const REFERENCE_MV: u32 = 1083;
 /// Software scale of each line: the CC inputs read half the line voltage
 /// (the source firmware doubles them), D+/D− are direct.
 const CC_SCALE: u32 = 2;
