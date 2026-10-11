@@ -9,9 +9,7 @@ use embedded_graphics::primitives::{
     Circle, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle, RoundedRectangle, StyledDrawable,
     Triangle,
 };
-use firmware_core::buttons::{
-    Detail, Level, PpsFocus, QC2_VOLTAGES, Qc2Focus, QcOffer, SettingsFocus, Tab,
-};
+use firmware_core::buttons::{Detail, Level, PpsFocus, QC2_VOLTAGES, QcOffer, SettingsFocus, Tab};
 use firmware_core::settings::{BRIGHTNESS_PERCENT, Item, QcFindings, Rotation, Settings};
 use u8g2_fonts::FontRenderer;
 use u8g2_fonts::fonts;
@@ -812,8 +810,8 @@ pub enum QcMode {
     /// A PD contract holds the charger, which then ignores Quick Charge; OK
     /// restarts it into a silent boot.
     Pd,
-    /// This boot keeps PD silent (`NextBoot::silent`); Back on the stopped
-    /// page restarts the charger into PD.
+    /// This boot keeps PD silent (`NextBoot::silent`); OK on a PD tab
+    /// restarts the charger into PD.
     Silent,
 }
 
@@ -825,7 +823,7 @@ fn pd_mode<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'_>) {
 }
 
 /// A PD tab while this boot keeps PD silent for Quick Charge: only how to
-/// switch back.
+/// switch back, as [`pd_mode`] switches to Quick Charge.
 fn qc_mode<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'_>) {
     notice(
         target,
@@ -833,26 +831,38 @@ fn qc_mode<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'_>) {
         "PD is off while Quick Charge runs",
         ORANGE,
     );
-    hint(target, header, "BACK on a stopped QC tab: PD");
+    hint(target, header, "OK switch back to PD");
 }
 
-/// Hint on a stopped Quick Charge tab: the probe comes first while this
-/// boot has none, else `start`.
-fn qc_start_hint(mode: QcMode, qc: QcOffer, start: &'static str) -> &'static str {
-    match (mode, qc.report()) {
-        (_, None) => "OK test the charger, up to 20V",
-        (QcMode::Silent, Some(_)) => "OK start    BACK back to PD",
-        (_, Some(_)) => start,
+/// Hint on a Quick Charge tab with nothing of its own running: the probe
+/// comes first while this boot has none, else `start`.
+fn qc_start_hint(qc: QcOffer, start: &'static str) -> &'static str {
+    match qc.report() {
+        None => "OK test the charger, up to 20V",
+        Some(_) => start,
+    }
+}
+
+/// Hint on a Quick Charge tab while its request runs, before `running`
+/// once the charger follows.
+fn qc_running_hint(status: Status, running: &'static str) -> &'static str {
+    match status {
+        Status::Entering => "handshake    < > tabs",
+        Status::Failed(Failure::NotDcp) => "D+ D- not shorted    OK change",
+        Status::Failed(Failure::NoEntry) => "D- stayed high    OK change",
+        Status::Active(_, Some(Outcome::Waiting)) => "waiting for VBUS    < > tabs",
+        Status::Active(_, Some(Outcome::Ignored)) => "charger kept its output    OK change",
+        _ => running,
     }
 }
 
 /// The status pill on the Quick Charge 2.0 tab: on the voltage it reports,
 /// or on the request while entering or after a failed entry.
-fn qc2_pill(status: Status, request: Option<Voltage>) -> Option<(Voltage, &'static str, Rgb565)> {
+fn qc2_pill(status: Status, request: Voltage) -> Option<(Voltage, &'static str, Rgb565)> {
     Some(match status {
-        Status::Entering => (request?, "WAIT", ORANGE),
-        Status::Failed(Failure::NotDcp) => (request?, "NO DCP", MAGENTA),
-        Status::Failed(Failure::NoEntry) => (request?, "NO QC", MAGENTA),
+        Status::Entering => (request, "WAIT", ORANGE),
+        Status::Failed(Failure::NotDcp) => (request, "NO DCP", MAGENTA),
+        Status::Failed(Failure::NoEntry) => (request, "NO QC", MAGENTA),
         Status::Active(voltage, Some(Outcome::Waiting)) => (voltage, "SETTING", ORANGE),
         Status::Active(voltage, Some(Outcome::Ignored)) => (voltage, "IGNORED", MAGENTA),
         Status::Active(voltage, _) => (voltage, "ACTIVE", GREEN),
@@ -867,8 +877,10 @@ const QC2_PROBE_BASELINE: i32 = 116;
 
 /// Everything the Quick Charge 2.0 tab shows.
 pub struct Qc2 {
-    /// The running trigger; `None` while stopped.
-    pub focus: Option<Qc2Focus>,
+    /// The voltage being chosen, while the choice is open.
+    pub preview: Option<Voltage>,
+    /// The voltage asked of the charger, kept while other tabs show.
+    pub request: Option<Voltage>,
     pub mode: QcMode,
     pub status: Status,
     pub qc: QcOffer,
@@ -879,21 +891,18 @@ pub struct Qc2 {
 /// found the charger ignores are greyed out and cannot be chosen.
 pub fn draw_qc2<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'_>, page: &Qc2) {
     let &Qc2 {
-        focus,
+        preview,
+        request,
         mode,
         status,
         qc,
     } = page;
     draw_header(target, header);
-    if focus.is_none() && mode == QcMode::Pd {
+    if mode == QcMode::Pd {
         pd_mode(target, header);
         return;
     }
-    let preview = match focus {
-        Some(Qc2Focus::Choosing { preview, .. }) => Some(preview),
-        _ => None,
-    };
-    let pill = qc2_pill(status, focus.map(Qc2Focus::request));
+    let pill = request.and_then(|request| qc2_pill(status, request));
     for (row, voltage) in QC2_VOLTAGES.into_iter().enumerate() {
         let taken = qc.takes(voltage);
         let detail = match (taken, voltage, qc.report()) {
@@ -931,15 +940,10 @@ pub fn draw_qc2<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'
             CYAN,
         );
     }
-    let hint_text = match (focus, status) {
-        (None, _) => qc_start_hint(mode, qc, "OK choose a voltage    < > tabs"),
-        (Some(Qc2Focus::Choosing { .. }), _) => "< > choose  OK request  BACK cancel",
-        (_, Status::Entering) => "handshake    BACK stop",
-        (_, Status::Failed(Failure::NotDcp)) => "D+ D- not shorted    BACK",
-        (_, Status::Failed(Failure::NoEntry)) => "D- stayed high    BACK",
-        (_, Status::Active(_, Some(Outcome::Waiting))) => "waiting for VBUS    BACK stop",
-        (_, Status::Active(_, Some(Outcome::Ignored))) => "charger kept its output",
-        _ => "OK change    BACK stop",
+    let hint_text = match (preview, request) {
+        (Some(_), _) => "< > choose  OK request  BACK cancel",
+        (None, None) => qc_start_hint(qc, "OK choose a voltage    < > tabs"),
+        (None, Some(_)) => qc_running_hint(status, "OK change    < > tabs"),
     };
     hint(target, header, hint_text);
 }
@@ -994,8 +998,10 @@ pub fn draw_probe<D: DrawTarget<Color = Rgb565>>(
 
 /// Everything the Quick Charge 3.0 tab shows.
 pub struct Qc3 {
-    /// The output the steps aim for in mV, while the trigger runs.
+    /// The output the steps aim for in mV, kept while other tabs show.
     pub target_mv: Option<u16>,
+    /// Left/Right move the target.
+    pub adjusting: bool,
     pub mode: QcMode,
     pub status: Status,
     pub qc: QcOffer,
@@ -1008,6 +1014,7 @@ pub struct Qc3 {
 pub fn draw_qc3<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'_>, page: &Qc3) {
     let &Qc3 {
         target_mv,
+        adjusting,
         mode,
         status,
         qc,
@@ -1015,7 +1022,7 @@ pub fn draw_qc3<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'
         reading,
     } = page;
     draw_header(target, header);
-    if target_mv.is_none() && mode == QcMode::Pd {
+    if mode == QcMode::Pd {
         pd_mode(target, header);
         return;
     }
@@ -1059,8 +1066,8 @@ pub fn draw_qc3<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'
     card(
         target,
         PPS_VOLTS,
-        if target_mv.is_some() { RULE } else { BLACK },
-        Some(if target_mv.is_some() { YELLOW } else { RULE }),
+        if adjusting { RULE } else { BLACK },
+        Some(if adjusting { YELLOW } else { RULE }),
     );
     card_label(target, PPS_VOLTS, "SET VOLTAGE", YELLOW);
     value_with_unit(
@@ -1069,9 +1076,9 @@ pub fn draw_qc3<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'
         &set,
         "V",
         PPS_VOLTS.top_left + PPS_VALUE,
-        if target_mv.is_some() { WHITE } else { YELLOW },
+        if adjusting { WHITE } else { YELLOW },
     );
-    if target_mv.is_some() {
+    if adjusting {
         arrows(target, PPS_VOLTS, YELLOW);
     }
     card(target, PPS_AMPS, BLACK, Some(RULE));
@@ -1118,12 +1125,10 @@ pub fn draw_qc3<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'
     hint(
         target,
         header,
-        match (target_mv, status) {
-            (None, _) => qc_start_hint(mode, qc, "OK start at 5V    < > tabs"),
-            (_, Status::Entering) => "handshake    BACK stop",
-            (_, Status::Failed(Failure::NotDcp)) => "D+ D- not shorted    BACK",
-            (_, Status::Failed(Failure::NoEntry)) => "D- stayed high    BACK",
-            _ => "< > 0.2V    BACK stop",
+        match target_mv {
+            _ if adjusting => "< > 0.2V    OK done",
+            None => qc_start_hint(qc, "OK start at 5V    < > tabs"),
+            Some(_) => qc_running_hint(status, "OK adjust    < > tabs"),
         },
     );
 }

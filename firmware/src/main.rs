@@ -524,29 +524,26 @@ async fn tilt_task(input: InputPin) {
     }
 }
 
-/// Scan the line voltages at the meter's read pace while the lines or
-/// Quick Charge page is shown, ADC2 idle otherwise, and step the Quick Charge
-/// trigger toward what that page asks for. Stopped, or on any other page, it
-/// releases D+/D−.
+/// Scan the line voltages at the meter's read pace while the lines or a
+/// Quick Charge tab is shown or the trigger runs, ADC2 idle otherwise, and
+/// step the Quick Charge trigger toward the request in force, whichever tab
+/// is shown. Without one it releases D+/D−.
 #[embassy_executor::task]
 async fn line_task(mut adc: line_adc::LineAdc, mut trigger: qc_drive::Trigger) {
     let lines_sender = LINE_VOLTAGES.sender();
     let status_sender = QC_STATUS.sender();
     loop {
-        let view = BUTTON_STATE.try_get().map(|input| input.page.view());
-        let lines = if view.is_some_and(View::shows_lines) {
-            let lines = adc.read().await;
-            lines_sender.send(lines);
-            lines
-        } else {
-            None
-        };
-        let request = match view {
-            Some(View::Qc2(focus)) => focus.map(|focus| QcTarget::Volts(focus.request())),
-            Some(View::Probe) => Some(QcTarget::Detect),
-            Some(View::Qc3(mv)) => mv.map(QcTarget::Steps),
-            _ => None,
-        };
+        let input = BUTTON_STATE.try_get();
+        let request = input.and_then(button_logic::Input::qc_request);
+        // The trigger watches D− during its handshake.
+        let lines =
+            if request.is_some() || input.is_some_and(|input| input.page.view().shows_lines()) {
+                let lines = adc.read().await;
+                lines_sender.send(lines);
+                lines
+            } else {
+                None
+            };
         // The trigger judges requests by the output, read here rather than
         // at the meter page's frame pace.
         let vbus_mv = match request {
@@ -919,14 +916,15 @@ async fn meter_task(
                     render::clear(frame);
                     ui::draw_lines(&mut Canvas(frame), &header, lines);
                 }
-                View::Qc2(focus) => {
+                View::Qc2(preview) => {
                     let mode = qc_mode(latest_observation());
                     render::clear(frame);
                     ui::draw_qc2(
                         &mut Canvas(frame),
                         &header,
                         &ui::Qc2 {
-                            focus,
+                            preview,
+                            request: input.trigger.and_then(QcTarget::volts),
                             mode,
                             status: qc_status,
                             qc: input.qc,
@@ -937,14 +935,15 @@ async fn meter_task(
                     render::clear(frame);
                     ui::draw_probe(&mut Canvas(frame), &header, qc_status);
                 }
-                View::Qc3(target_mv) => {
+                View::Qc3 { adjusting } => {
                     let mode = qc_mode(latest_observation());
                     render::clear(frame);
                     ui::draw_qc3(
                         &mut Canvas(frame),
                         &header,
                         &ui::Qc3 {
-                            target_mv,
+                            target_mv: input.trigger.and_then(QcTarget::steps),
+                            adjusting,
                             mode,
                             status: qc_status,
                             qc: input.qc,

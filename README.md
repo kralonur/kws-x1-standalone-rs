@@ -120,8 +120,9 @@ What this firmware does **not** do, for now:
 - **Quick Charge partly tested.** Tested on one Quick Charge 3.0 Class A
   charger, on a USB-A port and on USB-C switched out of PD: fixed 9 and
   12 V, the 0.2 V steps and the probe. 20 V and Class B chargers are
-  untested. The trigger drives D+/D− only while it runs on the Quick Charge
-  page and releases them when it stops.
+  untested. The trigger drives D+/D− only once a Quick Charge screen
+  started it, and keeps them driven while other screens show, until the
+  switch back to PD, a PD contract or a restart.
 - **Sink only.** The meter never acts as a source: no power role swap, no
   data role swap, no VCONN swap, no Cable_Reset.
 - **Passthrough only listens.** It cannot change or inject anything between
@@ -153,7 +154,7 @@ What this firmware does **not** do, for now:
 
 | Button | Short press | Hold |
 | ------ | ----------- | ---- |
-| Left / Right | previous / next group, or tab once in a group's tabs; on a framed value, change it; while scrolling, scroll | repeats on PPS values and while scrolling |
+| Left / Right | previous / next group, or tab once in a group's tabs; on a framed value, change it; while scrolling, scroll | repeats on PPS and QC 3.0 values and while scrolling |
 | OK | go into the group's tabs; on a tab, select, confirm, scroll or start (see each page) | 0.5 s: page action (cable query, full charger scan) |
 | Back | up one level: cancel the edit or scroll, leave the tabs; from a group, back to the overview; on the overview, open the settings | – |
 
@@ -209,10 +210,10 @@ point the way it flows (they follow the screen rotation).
 | ---- | ----- | ------- |
 | **Overview** | voltage, current, power; the highest of each since boot (`MAX`); protocol (`USB`, `TYPE-C`, `PD 2.0`, `PD 3.0`, `PPS`) with the CC pin and contract; flow chevrons; a heartbeat dot | Back: settings |
 | **Lines** | D+, D-, CC1 and CC2 voltages | |
-| **PD Profiles** | the charger's fixed profiles, `ACTIVE` on the one in force | OK, Left/Right to choose, OK requests it, Back cancels |
-| **PPS** | the charger's PPS ranges, the set voltage and current limit, the live output; `ACTIVE` or `NOT APPLIED` | OK, Left/Right voltage (20 mV, 100 mV held), OK, current limit (50 mA, 250 mA held), OK requests |
-| **QC 2.0** | 5, 9, 12 and 20 V, those the charger ignored greyed out, the status on its row; under a PD contract only `PD MODE` | OK tests the charger, then opens at 5 V with the choice open (under a PD contract it first switches the charger out of PD); Left/Right choose, OK requests; OK again reopens the choice; Back closes it, then stops, then switches back to PD |
-| **QC 3.0** | the step range, the set voltage, VBUS, D+ and D−; under a PD contract only `PD MODE` | OK tests the charger, then starts continuous mode at 5 V (under a PD contract it first switches the charger out of PD); Left/Right move it by 0.2 V (repeats held); Back stops, then switches back to PD |
+| **PD Profiles** | the charger's fixed profiles, `ACTIVE` on the one in force; with PD off for Quick Charge only `QC MODE` | OK, Left/Right to choose, OK requests it, Back cancels; in `QC MODE` OK switches back to PD |
+| **PPS** | the charger's PPS ranges, the set voltage and current limit, the live output; `ACTIVE` or `NOT APPLIED`; with PD off for Quick Charge only `QC MODE` | OK, Left/Right voltage (20 mV, 100 mV held), OK, current limit (50 mA, 250 mA held), OK requests; in `QC MODE` OK switches back to PD |
+| **QC 2.0** | 5, 9, 12 and 20 V, those the charger ignored greyed out, the status on its row; under a PD contract only `PD MODE` | OK tests the charger, then opens at 5 V with the choice open (under a PD contract it first switches the charger out of PD); Left/Right choose, OK requests and closes the choice, Back closes it; the request stays in force on other screens |
+| **QC 3.0** | the step range, the set voltage, VBUS, D+ and D−; under a PD contract only `PD MODE` | OK tests the charger, then starts continuous mode at 5 V (under a PD contract it first switches the charger out of PD); Left/Right move it by 0.2 V (repeats held); OK or Back closes it; the steps stay in force on other screens |
 | **PD Session** | sink: session state, CC levels and the charger's offer as received. Passthrough: CC pin, Rp level and the latest PD messages | OK to scroll |
 | **Charger** | the offer (`*` = needs a 5 A cable), the charger's identity, maker and peak ratings, power status and source info, the Quick Charge detection result | OK to scroll; hold OK: full scan (Quick Charge, PD, EPR, and the 5 A cable test with the plug in the charger) |
 | **Cable** | the cable's e-marker: identity, ratings, status and modes | OK to scroll; hold OK at fixed 5 V to read the e-marker |
@@ -291,7 +292,8 @@ reference, independently of the bus sensor and the PD controller.
 - **`uncalibrated`** (hint row): the values use the reference manual's
   nominal internal reference and have not been compared against a multimeter.
 
-The lines are sampled only while this screen is shown.
+The lines are sampled only while this screen or a Quick Charge screen is
+shown, or while Quick Charge runs.
 
 #### 3. PD Profiles
 
@@ -307,7 +309,7 @@ This is the **PD Profiles** screen (tab `PD PROFILES` in Trigger): the charger's
   fixed profiles.
 - **`QC MODE` / `PD is off while Quick Charge runs`**: this boot keeps PD
   silent for Quick Charge, so there is no offer; the PPS screen shows the
-  same. Back on a stopped Quick Charge screen switches back to PD.
+  same. OK (`OK switch back to PD`) switches back to PD.
 - **Hint row**: `OK select a profile    < > tabs`, then while choosing
   `< > choose  OK request  BACK cancel`. Before the charger's offer arrives it
   reads `waiting for the charger    < > tabs`.
@@ -343,8 +345,8 @@ Profiles and PPS screens stay in use. OK (`OK switch to QC, tests up to
 with PD silent (Rd held, nothing acknowledged), so the charger falls back to
 non-PD 5 V and takes Quick Charge. The charger may restart one or two more
 times before it settles. The meter comes back on the Quick Charge screen it
-left and tests the charger at once. Back on the stopped screen switches back
-the same way, into PD. The meter stops saving the switch once the charger
+left and tests the charger at once. OK on the PD Profiles or PPS screen
+switches back the same way, into PD. The meter stops saving the switch once the charger
 had 10 s to settle, so the next plug-in starts with PD again.
 
 **The test** (`TESTING THE CHARGER`) runs the first time Quick Charge starts
@@ -359,9 +361,10 @@ in `NO CHARGING PORT` (D+ and D− are not shorted) or `NO QUICK CHARGE` (D−
 never went low) when the charger has no Quick Charge.
 
 After the test the choice opens at 5 V: Left/Right choose among the
-voltages the charger took, and OK requests one. OK again reopens the
-choice; Back closes it, and Back again releases D+/D−, so the charger
-returns to 5 V. While the trigger runs, Left/Right do not leave the screen.
+voltages the charger took, and OK requests one and closes the choice; Back
+closes it without a request. OK reopens it at the voltage in force. The
+request stays in force while other screens show, so the overview can watch
+it; choose 5 V to bring the output back down.
 
 Quick Charge never confirms a request, so the meter watches VBUS: a request
 whose output has not moved halfway after 610 ms (the charger's 60 ms filter
@@ -382,13 +385,14 @@ screen. Under a PD contract it shows only `PD MODE`, and switches as the
 QC 2.0 screen does. OK runs the same test the first time, then starts Quick
 Charge 3.0 continuous mode at 5 V; Left/Right then move the output by 0.2 V
 (held, they repeat), from 3.6 V up to 12 V (20 V on a Class B charger), one
-step per 100 ms scan. Back releases D+/D− and the charger returns to 5 V.
+step per 100 ms scan. OK or Back stops adjusting; the output stays where
+the steps put it while other screens show. OK reopens it there.
 A charger that ignored the steps in the test shows `NO QC 3.0`.
 
 - **Step range** (top): what the test found, else
   `3.6-12V by 0.2V  Class A` and `3.6-20V by 0.2V  Class B`.
 - **`SET VOLTAGE`**: the output the steps aim for, framed with arrows while
-  the trigger runs.
+  Left/Right move it.
 - **`VBUS`**: the live bus voltage.
 - **`D+ … D- …`**: the lines as measured, to check the driven levels.
 - **State** (bottom right): `WAIT`, `STEPPING`, `ACTIVE` (the steps reached

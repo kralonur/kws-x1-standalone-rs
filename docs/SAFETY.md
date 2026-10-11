@@ -62,8 +62,8 @@ boot that lasted the source's whole PD window (nCapsCount Source_Capabilities
 at most tTypeCSendSourceCap apart, 10 s) saves the next boot as normal again,
 so only the charger's own restarts, not a later plug-in, stay silent.
 
-A silent boot is left by a user action (Back on the stopped Quick Charge
-page, or the scan's end) with `restart_unheard`: a session starts on the
+A silent boot is left by a user action (OK on the PD profiles or PPS page,
+or the scan's end) with `restart_unheard`: a session starts on the
 boot's checked startup and sends Hard Reset Signaling at once, which the
 source, having given up on PD, still answers by starting over as at attach.
 The PHY refuses it once anything was received. The checked

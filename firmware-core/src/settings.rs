@@ -35,7 +35,7 @@ pub enum NextBoot {
     CableTest,
     /// PD silent: the sink holds Rd but never acknowledges the charger, so a
     /// USB-C charger falls back to its non-PD mode, where it takes Quick
-    /// Charge requests. Kept until the Quick Charge page leaves it; `steps`
+    /// Charge requests. Kept until OK on a PD tab leaves it; `steps`
     /// reopens the Quick Charge 3.0 tab rather than 2.0.
     QuickCharge { steps: bool },
     /// The full charger scan's first part: PD silent, the Quick Charge probe

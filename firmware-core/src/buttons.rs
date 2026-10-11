@@ -165,9 +165,9 @@ pub enum Tab {
     Fixed,
     /// PPS voltage and current selector.
     Pps,
-    /// Quick Charge 2.0 fixed voltages and the probe, stopped.
+    /// Quick Charge 2.0 fixed voltages and the probe.
     Qc2,
-    /// Quick Charge 3.0 continuous mode, stopped.
+    /// Quick Charge 3.0 continuous mode.
     Qc3,
     /// A detail list shown from row `top`.
     Detail { page: Detail, top: u16 },
@@ -230,10 +230,11 @@ pub enum Open {
     Pps(PpsFocus),
     /// The Quick Charge probe runs; `page` then opens with what it found.
     Probe(QcPage),
-    /// The Quick Charge 2.0 trigger runs.
-    Qc2(Qc2Focus),
-    /// Quick Charge 3.0 steps toward this output in mV; Left/Right move it.
-    Qc3(u16),
+    /// Left/Right preview Quick Charge 2.0 voltages the charger takes; OK
+    /// requests one.
+    Qc2(Voltage),
+    /// Left/Right move the Quick Charge 3.0 steps' target.
+    Qc3,
     /// Left/Right scroll the list, shown from row `top`.
     Detail { page: Detail, top: u16 },
 }
@@ -246,7 +247,7 @@ impl Open {
             Self::Pps(_) => Tab::Pps,
             Self::Probe(page) => page.tab(),
             Self::Qc2(_) => Tab::Qc2,
-            Self::Qc3(_) => Tab::Qc3,
+            Self::Qc3 => Tab::Qc3,
             Self::Detail { page, top } => Tab::Detail { page, top },
         }
     }
@@ -270,11 +271,14 @@ pub enum View {
         choosing: bool,
     },
     Pps(Option<PpsFocus>),
-    Qc2(Option<Qc2Focus>),
+    /// The previewed voltage, while choosing.
+    Qc2(Option<Voltage>),
     /// The Quick Charge probe runs, on either Quick Charge tab.
     Probe,
-    /// The Quick Charge 3.0 target in mV while it runs.
-    Qc3(Option<u16>),
+    /// Whether Left/Right move the target.
+    Qc3 {
+        adjusting: bool,
+    },
     Detail {
         page: Detail,
         top: u16,
@@ -284,9 +288,9 @@ pub enum View {
 }
 
 impl View {
-    /// A Quick Charge tab, which drives D+/D− and reads them back.
+    /// A Quick Charge tab, which shows the trigger and D+/D−.
     pub const fn quick_charge(self) -> bool {
-        matches!(self, Self::Qc2(_) | Self::Qc3(_) | Self::Probe)
+        matches!(self, Self::Qc2(_) | Self::Qc3 { .. } | Self::Probe)
     }
 
     /// The line voltages are shown here.
@@ -317,48 +321,27 @@ impl QcPage {
         }
     }
 
-    /// Start Quick Charge on this stopped tab: the probe first, unless this
-    /// boot already ran it (`qc`); a charger without steps leaves Quick
-    /// Charge 3.0 stopped. Both versions enter at 5 V.
-    fn start(self, qc: QcOffer) -> Page {
-        match self {
-            _ if qc.report().is_none() => Page::Open(Open::Probe(self)),
-            Self::Qc2 => Page::Open(Open::Qc2(Qc2Focus::Choosing {
-                request: Voltage::V5,
-                preview: Voltage::V5,
-            })),
-            Self::Qc3 if qc.steps() => Page::Open(Open::Qc3(Voltage::V5.millivolts())),
-            Self::Qc3 => Page::Tabs(Tab::Qc3),
+    /// Open this tab: the probe first, unless this boot already ran it.
+    /// Quick Charge 2.0 opens its choice at the voltage in force, else 5 V;
+    /// Quick Charge 3.0 steps from where they are, else from 5 V, and stays
+    /// closed on a charger without steps.
+    fn open(self, input: &mut Input) -> Page {
+        match (self, input.trigger) {
+            _ if input.qc.report().is_none() => Page::Open(Open::Probe(self)),
+            (Self::Qc2, Some(QcTarget::Volts(voltage))) => Page::Open(Open::Qc2(voltage)),
+            (Self::Qc2, _) => Page::Open(Open::Qc2(Voltage::V5)),
+            (Self::Qc3, _) if !input.qc.steps() => Page::Tabs(Tab::Qc3),
+            (Self::Qc3, Some(QcTarget::Steps(_))) => Page::Open(Open::Qc3),
+            (Self::Qc3, _) => {
+                input.trigger = Some(QcTarget::Steps(Voltage::V5.millivolts()));
+                Page::Open(Open::Qc3)
+            }
         }
     }
 }
 
 /// The Quick Charge 2.0 voltages, in Left/Right order.
 pub const QC2_VOLTAGES: [Voltage; 4] = [Voltage::V5, Voltage::V9, Voltage::V12, Voltage::V20];
-
-/// The running Quick Charge 2.0 trigger: it opens at 5 V with the choice
-/// open, and OK requests the choice; OK again reopens it, Back closes it,
-/// then stops. Left/Right offer only what the probe found the charger takes.
-/// Under a PD contract the charger ignores Quick Charge, so OK on a stopped
-/// Quick Charge tab first restarts it into a silent PD boot
-/// (`NextBoot::QuickCharge`), which runs the probe; Back on the stopped tab
-/// there restarts it into PD again.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Qc2Focus {
-    /// This is asked of the charger.
-    Requested(Voltage),
-    /// Left/Right choose `preview` while `request` stays in force.
-    Choosing { request: Voltage, preview: Voltage },
-}
-
-impl Qc2Focus {
-    /// What is asked of the charger.
-    pub const fn request(self) -> Voltage {
-        match self {
-            Self::Requested(request) | Self::Choosing { request, .. } => request,
-        }
-    }
-}
 
 /// What this boot's probe found the charger takes; before a probe, nothing
 /// is ruled out.
@@ -405,6 +388,24 @@ pub enum QcTarget {
     Steps(u16),
     /// Try each request in turn and report which the charger followed.
     Detect,
+}
+
+impl QcTarget {
+    /// The Quick Charge 2.0 voltage asked for, if this is one.
+    pub const fn volts(self) -> Option<Voltage> {
+        match self {
+            Self::Volts(voltage) => Some(voltage),
+            _ => None,
+        }
+    }
+
+    /// The Quick Charge 3.0 steps' target in mV, if this is one.
+    pub const fn steps(self) -> Option<u16> {
+        match self {
+            Self::Steps(mv) => Some(mv),
+            _ => None,
+        }
+    }
 }
 
 /// The settings page cursor, and whether its value is being changed.
@@ -522,7 +523,7 @@ impl Page {
                 Tab::Fixed => View::Fixed { choosing: false },
                 Tab::Pps => View::Pps(None),
                 Tab::Qc2 => View::Qc2(None),
-                Tab::Qc3 => View::Qc3(None),
+                Tab::Qc3 => View::Qc3 { adjusting: false },
                 Tab::Detail { page, top } => View::Detail {
                     page,
                     top,
@@ -533,8 +534,8 @@ impl Page {
                 Open::Fixed => View::Fixed { choosing: true },
                 Open::Pps(focus) => View::Pps(Some(focus)),
                 Open::Probe(_) => View::Probe,
-                Open::Qc2(focus) => View::Qc2(Some(focus)),
-                Open::Qc3(mv) => View::Qc3(Some(mv)),
+                Open::Qc2(preview) => View::Qc2(Some(preview)),
+                Open::Qc3 => View::Qc3 { adjusting: true },
                 Open::Detail { page, top } => View::Detail {
                     page,
                     top,
@@ -565,12 +566,8 @@ impl Page {
     pub fn editing(self) -> bool {
         matches!(
             self,
-            Self::Open(
-                Open::Fixed
-                    | Open::Pps(_)
-                    | Open::Qc2(Qc2Focus::Choosing { .. })
-                    | Open::Detail { .. }
-            ) | Self::Settings(SettingsFocus::Brightness | SettingsFocus::Rotation)
+            Self::Open(Open::Fixed | Open::Pps(_) | Open::Qc2(_) | Open::Qc3 | Open::Detail { .. })
+                | Self::Settings(SettingsFocus::Brightness | SettingsFocus::Rotation)
         )
     }
 }
@@ -610,6 +607,21 @@ pub struct Input {
     /// when this changes.
     pub peaks_reset: u8,
     pub qc: QcOffer,
+    /// What the Quick Charge trigger asks of the charger, kept while other
+    /// tabs show; `None` leaves D+/D− undriven. A PD contract (the charger
+    /// then ignores Quick Charge), passthrough or a restart clears it.
+    pub trigger: Option<QcTarget>,
+}
+
+impl Input {
+    /// What the Quick Charge trigger asks of the charger now: the probe
+    /// while it is shown, else the request in force.
+    pub fn qc_request(self) -> Option<QcTarget> {
+        match self.page {
+            Page::Open(Open::Probe(_)) => Some(QcTarget::Detect),
+            _ => self.trigger,
+        }
+    }
 }
 
 /// Navigation and settings, owned by the input task rather than the renderer,
@@ -658,6 +670,9 @@ impl Navigation {
     /// PD and PPS pages only show the offer, and an open selection closes.
     pub fn set_selectable(&mut self, selectable: bool) {
         self.selectable = selectable;
+        if selectable {
+            self.input.trigger = None;
+        }
         if let Page::Open(open @ (Open::Fixed | Open::Pps(_))) = self.input.page
             && !selectable
         {
@@ -669,6 +684,9 @@ impl Navigation {
     /// use closes to the overview.
     pub fn set_passthrough(&mut self, passthrough: bool) {
         self.input.passthrough = passthrough;
+        if passthrough {
+            self.input.trigger = None;
+        }
         if let Some(tab) = self.input.page.tab()
             && !tab.available(passthrough)
         {
@@ -707,7 +725,7 @@ impl Navigation {
         if let Page::Open(Open::Probe(page)) = self.input.page
             && !self.scanning()
         {
-            self.input.page = page.start(self.input.qc);
+            self.input.page = page.open(&mut self.input);
         }
     }
 
@@ -774,7 +792,7 @@ impl Navigation {
                 && (self.held - REPEAT_DELAY_SAMPLES).is_multiple_of(REPEAT_SAMPLES)
                 && matches!(
                     self.input.page,
-                    Page::Open(Open::Pps(_) | Open::Qc3(_) | Open::Detail { .. })
+                    Page::Open(Open::Pps(_) | Open::Qc3 | Open::Detail { .. })
                 )
             {
                 self.repeated = true;
@@ -801,15 +819,9 @@ impl Navigation {
             self.ok_long = false;
         }
         if rising & BACK != 0 {
-            let leave_silent = self.scanning()
-                || (self.silent
-                    && matches!(
-                        self.input.page,
-                        Page::Groups(Tab::Qc2 | Tab::Qc3) | Page::Tabs(Tab::Qc2 | Tab::Qc3)
-                    ));
             if self.cable_test && self.input.page.is_charger() {
                 command = Some(PdCommand::Restart);
-            } else if leave_silent {
+            } else if self.scanning() {
                 self.input.settings.next_boot = NextBoot::Normal;
                 command = Some(PdCommand::Restart);
             } else {
@@ -834,6 +846,11 @@ impl Navigation {
         }
         if self.silent {
             command = command.filter(|c| *c == PdCommand::Restart);
+        }
+        // A restart starts from 5 V, which a charger still holding a Quick
+        // Charge request never returns to: release D+/D− first.
+        if command == Some(PdCommand::Restart) {
+            self.input.trigger = None;
         }
         (self.input, command)
     }
@@ -872,9 +889,6 @@ impl Navigation {
             Page::Groups(_) | Page::Settings(SettingsFocus::Row(_)) => Page::default(),
             Page::Settings(focus) => Page::Settings(SettingsFocus::Row(focus.row())),
             Page::Tabs(tab) => Page::Groups(tab),
-            Page::Open(Open::Qc2(Qc2Focus::Choosing { request, .. })) => {
-                Page::Open(Open::Qc2(Qc2Focus::Requested(request)))
-            }
             Page::Open(open) => Page::Tabs(open.tab()),
         };
     }
@@ -900,22 +914,24 @@ impl Navigation {
             Page::Settings(SettingsFocus::Brightness) => input.settings.step_brightness(forward),
             Page::Settings(SettingsFocus::Rotation) => input.settings.step_rotation(forward),
             Page::Open(Open::Fixed) => return Some(PdCommand::StepFixed(sign as i8)),
-            Page::Open(Open::Qc2(Qc2Focus::Choosing { preview, .. })) => {
+            Page::Open(Open::Qc2(preview)) => {
                 let index = QC2_VOLTAGES.iter().position(|v| v == preview).unwrap_or(0);
                 let qc = input.qc;
                 *preview =
                     cycle_where(&QC2_VOLTAGES, index, forward, |v| qc.takes(v)).unwrap_or(*preview);
             }
-            Page::Open(Open::Qc3(mv)) => {
+            Page::Open(Open::Qc3) => {
                 let max = input.qc.steps_max();
-                *mv = if forward {
-                    mv.saturating_add(STEP_MV).min(max.millivolts())
-                } else {
-                    mv.saturating_sub(STEP_MV).max(MIN_MV)
-                };
+                if let Some(QcTarget::Steps(mv)) = &mut input.trigger {
+                    *mv = if forward {
+                        mv.saturating_add(STEP_MV).min(max.millivolts())
+                    } else {
+                        mv.saturating_sub(STEP_MV).max(MIN_MV)
+                    };
+                }
             }
-            // A fixed request or the probe holds until OK or Back.
-            Page::Open(Open::Qc2(Qc2Focus::Requested(_)) | Open::Probe(_)) => {}
+            // The probe runs until it ends or Back.
+            Page::Open(Open::Probe(_)) => {}
             Page::Open(Open::Pps(PpsFocus::Voltage)) => {
                 let step = if repeat { PPS_MV_REPEAT } else { PPS_MV_STEP };
                 return Some(PdCommand::PpsVoltage(sign * step));
@@ -933,14 +949,19 @@ impl Navigation {
         let (page, command) = match input.page {
             Page::Groups(tab) => (Page::Tabs(tab), None),
             page @ Page::Tabs(Tab::Overview | Tab::Lines) => (page, None),
+            // Quick Charge holds the charger: restart into PD.
+            page @ Page::Tabs(Tab::Fixed | Tab::Pps) if self.silent => {
+                input.settings.next_boot = NextBoot::Normal;
+                (page, Some(PdCommand::Restart))
+            }
             page @ Page::Tabs(Tab::Fixed | Tab::Pps) if !self.selectable => (page, None),
             Page::Tabs(Tab::Fixed) => (Page::Open(Open::Fixed), Some(PdCommand::StepFixed(0))),
             Page::Tabs(Tab::Pps) => (
                 Page::Open(Open::Pps(PpsFocus::Voltage)),
                 Some(PdCommand::PpsVoltage(0)),
             ),
-            Page::Tabs(Tab::Qc2) if !self.selectable => (QcPage::Qc2.start(input.qc), None),
-            Page::Tabs(Tab::Qc3) if !self.selectable => (QcPage::Qc3.start(input.qc), None),
+            Page::Tabs(Tab::Qc2) if !self.selectable => (QcPage::Qc2.open(input), None),
+            Page::Tabs(Tab::Qc3) if !self.selectable => (QcPage::Qc3.open(input), None),
             // A PD contract hides Quick Charge: restart into a silent boot.
             page @ Page::Tabs(tab @ (Tab::Qc2 | Tab::Qc3)) => {
                 input.settings.next_boot = NextBoot::QuickCharge {
@@ -956,18 +977,12 @@ impl Navigation {
             Page::Open(Open::Pps(PpsFocus::Current)) => {
                 (Page::Tabs(Tab::Pps), Some(PdCommand::Confirm))
             }
-            Page::Open(Open::Qc2(focus)) => (
-                Page::Open(Open::Qc2(match focus {
-                    Qc2Focus::Requested(request) => Qc2Focus::Choosing {
-                        request,
-                        preview: request,
-                    },
-                    Qc2Focus::Choosing { preview, .. } => Qc2Focus::Requested(preview),
-                })),
-                None,
-            ),
-            page @ Page::Open(Open::Qc3(_) | Open::Probe(_)) => (page, None),
-            Page::Open(open @ Open::Detail { .. }) => (Page::Tabs(open.tab()), None),
+            Page::Open(Open::Qc2(preview)) => {
+                input.trigger = Some(QcTarget::Volts(preview));
+                (Page::Tabs(Tab::Qc2), None)
+            }
+            page @ Page::Open(Open::Probe(_)) => (page, None),
+            Page::Open(open @ (Open::Qc3 | Open::Detail { .. })) => (Page::Tabs(open.tab()), None),
             Page::Settings(SettingsFocus::Row(item)) => (
                 Page::Settings(match item {
                     Item::Brightness => SettingsFocus::Brightness,
