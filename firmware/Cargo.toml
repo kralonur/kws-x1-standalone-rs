@@ -25,7 +25,7 @@ cable-log = []
 cortex-m = { workspace = true, features = ["critical-section-single-core"] }
 # The IRQ page measures stack use from cortex-m-rt's painted stack.
 cortex-m-rt = { workspace = true, features = ["paint-stack"] }
-embassy-executor = { workspace = true, features = ["platform-cortex-m", "executor-thread"] }
+embassy-executor = { workspace = true, features = ["platform-cortex-m", "executor-thread", "executor-interrupt"] }
 embassy-hc32.workspace = true
 embassy-sync.workspace = true
 embassy-time = { workspace = true, features = ["tick-hz-1_000"] }

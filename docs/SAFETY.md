@@ -9,6 +9,14 @@ transfer and bus-failure latch remain in place. Unexpected configuration, bus
 errors, uncertain traffic and cancellation fail closed, without blind cleanup
 writes, retries or a fresh receiver over an unknown FIFO boundary.
 
+The PD session runs on its own interrupt-mode executor, above the thread-mode
+tasks, so a frame draw cannot delay a reply past the source's
+SenderResponseTimer (a draw measured up to 42 ms; the timer is at least 27 ms).
+Its idle receive polls pause `IDLE_POLL_MS` (4 ms) so it does not starve them in
+turn: polling every 1 ms took 79% of the CPU, 4 ms about 20%.
+Everything it shares with the other tasks is behind a critical-section mutex, a
+channel or an atomic.
+
 Controller configuration is checked against the supplied baseline and read back
 after writes. Interrupt registers are read-clear, never written. FIFO reads are
 consuming operations, not a recoverable stream: the receiver marks itself halted

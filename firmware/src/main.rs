@@ -31,7 +31,7 @@ mod ui;
 use core::ptr::addr_of_mut;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use embassy_executor::Spawner;
+use embassy_executor::{InterruptExecutor, Spawner};
 use embassy_hc32::gpio::{self, AlternateMode, AlternatePin, InputPin, Port};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
@@ -295,6 +295,15 @@ const SWI_LINE: embassy_hc32::intc::Line = line(8);
 /// timing never starves; bus and tilt wakes rank ahead of the PD alert and self-test.
 const BUS_PRIORITY: u8 = 8;
 const PD_PRIORITY: u8 = 9;
+/// The PD session's executor: above thread mode, so a frame draw (measured
+/// at up to 42 ms, uninterrupted) cannot hold back a reply past the source's
+/// SenderResponseTimer (at least 27 ms, USB PD Table 7.9), which a source
+/// answers with a Hard Reset; below the bus and PD alert wakes it waits on.
+const PD_EXECUTOR_PRIORITY: u8 = 10;
+/// NVIC line pended only by `PD_EXECUTOR`: startup clears every `SEL`, and
+/// nothing routes an event to it.
+const PD_EXECUTOR_LINE: interrupt = interrupt::INT031;
+static PD_EXECUTOR: InterruptExecutor = InterruptExecutor::new();
 
 /// PB12 / EIRQ12: acknowledge/latch/wake only. No I2C or PHY service in ISR.
 #[cortex_m_rt::interrupt]
@@ -311,6 +320,13 @@ fn INT013() {
     if embassy_hc32::exti::on_interrupt(TILT_EIRQ) {
         EIRQ_COUNT.fetch_add(1, Ordering::Relaxed);
     }
+}
+
+/// Runs the PD session's executor; see [`PD_EXECUTOR_PRIORITY`].
+#[cortex_m_rt::interrupt]
+fn INT031() {
+    // SAFETY: the handler of `PD_EXECUTOR_LINE`, unmasked only by `start`.
+    unsafe { PD_EXECUTOR.on_interrupt() }
 }
 
 /// Software interrupt channel 8 (self-test that `SEL`/`IER`/NVIC dispatch work).
@@ -1085,8 +1101,14 @@ async fn main(spawner: Spawner) {
         // The PD task starts before the panel's sleep-out wait: in passthrough
         // the charger sends its offer once, at most tFirstSourceCap (250 ms in
         // the USB PD timing table) after VBUS, and the meter boots from that
-        // same VBUS.
-        spawner.spawn(
+        // same VBUS. It runs on `PD_EXECUTOR`, whose priority is set before
+        // `start` unmasks its line, as `InterruptExecutor::start` requires.
+        // SAFETY: only this line's priority byte is written, while it is masked.
+        cortex_m::Peripherals::steal().NVIC.set_priority(
+            PD_EXECUTOR_LINE,
+            PD_EXECUTOR_PRIORITY << (u8::BITS as u8 - hc32f460_pac::NVIC_PRIO_BITS),
+        );
+        PD_EXECUTOR.start(PD_EXECUTOR_LINE).spawn(
             pd_task::run(pd_input, pc13_input, cable_test, cable_test_skipped).expect(ONE_SPAWN),
         );
         backlight_pwm = backlight.0;

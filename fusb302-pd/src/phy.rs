@@ -55,8 +55,15 @@ pub trait Platform {
     ) -> impl core::future::Future<Output = Result<u16, Error<B::Error>>>;
 }
 
-// Covers the 10-second window at 1 ms/poll, with handshake margin.
-const POLL_BUDGET: u16 = 16_384;
+/// Pause between idle receive polls, in ms. One poll held the CPU for about
+/// 0.8 ms (a 79% PD executor load measured at a 1 ms pause, with the screen
+/// starved), so this keeps the load near a sixth while a received message is
+/// still handled within about 5 ms, inside the 15 ms tReceiverResponse and
+/// the source's SenderResponseTimer (at least 27 ms, USB PD Table 7.9).
+pub const IDLE_POLL_MS: u32 = 4;
+// Pre-contract poll limit: 16 384 polls covered the 10-second window at 1 ms
+// per poll, with handshake margin; scaled to the idle poll pause.
+const POLL_BUDGET: u16 = 16_384 / IDLE_POLL_MS as u16;
 // Software bound on waiting for SinkTxOK before the AMS start is Deferred. Longer
 // than tSinkTx max (20 ms, Table 7.9): a Source that asserts SinkTxNG to start
 // its own AMS is normally seen as a received Message first. Not a spec timer.
@@ -176,7 +183,7 @@ pub trait Waiter {
         self.delay_ns(ms * 1_000_000)
     }
     fn wait_event(&mut self) -> impl core::future::Future<Output = ()> {
-        self.delay_ms(1)
+        self.delay_ms(IDLE_POLL_MS)
     }
 }
 impl<T: DelayNs> Waiter for T {
