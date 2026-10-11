@@ -22,6 +22,7 @@ mod pd_cc;
 mod pd_spr_phy;
 mod pd_task;
 mod pd_trial;
+mod qc_drive;
 
 mod pd_service;
 mod pd_sniff;
@@ -43,11 +44,11 @@ use bus::{
     ASYNC_READS, BUS_LATCH, I2C_ERRORS, I2C_FAULT_STEP, I2C_IRQ_COUNT, I2C_LAST_CR1, I2C_LAST_CR4,
     I2C_LAST_SR, I2C3, bus_failed, read_meter, write_meter, write_sensor,
 };
-use button_logic::{Detail, Page};
+use button_logic::{Detail, Page, QcFocus, QcTarget};
 use embassy_time::{Instant, Timer};
 use embedded_graphics::pixelcolor::{Rgb565, RgbColor};
 use firmware_core::buttons as button_logic;
-use firmware_core::settings::Rotation;
+use firmware_core::settings::{NextBoot, QcFindings, Rotation};
 use hc32f460_pac::interrupt;
 use panel::Orientation;
 #[cfg(not(any(feature = "pd-boot-diagnostic", feature = "cable-log")))]
@@ -278,6 +279,8 @@ static ORIENTATION: Watch<CriticalSectionRawMutex, Orientation, 1> = Watch::new(
 /// the lines page is shown; `meter_task` draws them.
 static LINE_VOLTAGES: Watch<CriticalSectionRawMutex, Option<line_adc::LineVoltages>, 1> =
     Watch::new();
+/// Quick Charge trigger state: `line_task` sends it, `meter_task` draws it.
+static QC_STATUS: Watch<CriticalSectionRawMutex, qc_drive::Status, 1> = Watch::new();
 /// Completed 180-degree flips, shown next to the raw edge count.
 static TILT_FLIPS: AtomicU32 = AtomicU32::new(0);
 
@@ -521,18 +524,37 @@ async fn tilt_task(input: InputPin) {
     }
 }
 
-/// Scan the line voltages at the meter's read pace while the lines page is
-/// shown; ADC2 stays idle otherwise.
+/// Scan the line voltages at the meter's read pace while the lines or
+/// Quick Charge page is shown, ADC2 idle otherwise, and step the Quick Charge
+/// trigger toward what that page asks for. Any other page releases D+/D−.
 #[embassy_executor::task]
-async fn line_task(mut adc: line_adc::LineAdc) {
-    let sender = LINE_VOLTAGES.sender();
+async fn line_task(mut adc: line_adc::LineAdc, mut trigger: qc_drive::Trigger) {
+    let lines_sender = LINE_VOLTAGES.sender();
+    let status_sender = QC_STATUS.sender();
     loop {
-        if BUTTON_STATE
-            .try_get()
-            .is_some_and(|input| input.page == Page::Lines)
-        {
-            sender.send(adc.read().await);
-        }
+        let page = BUTTON_STATE.try_get().map(|input| input.page);
+        let lines = if matches!(page, Some(Page::Lines | Page::Qc(_))) {
+            let lines = adc.read().await;
+            lines_sender.send(lines);
+            lines
+        } else {
+            None
+        };
+        let request = match page {
+            Some(Page::Qc(focus)) => focus.request(),
+            _ => None,
+        };
+        // The trigger judges requests by the output, read here rather than
+        // at the meter page's frame pace.
+        let vbus_mv = match request {
+            Some(_) => read_meter(ina226::BUS_VOLTAGE)
+                .await
+                .filter(|_| !bus_failed())
+                .map(|raw| u16::try_from(ina226::bus_millivolts(raw)).unwrap_or(u16::MAX)),
+            None => None,
+        };
+        let now_ms = Instant::now().as_millis();
+        status_sender.send(trigger.update(now_ms, request, lines.map(|l| l.dm_mv), vbus_mv));
         Timer::after(METER_READ_PERIOD).await;
     }
 }
@@ -552,9 +574,10 @@ async fn button_task(
     inputs: [InputPin; 4],
     mut store: settings_store::Store,
     saved: firmware_core::settings::Settings,
-    // The 5 A cable test was asked for: open its page, which runs it or says
-    // why it did not.
-    charger_page: bool,
+    // What the previous boot asked this one to be: the cable test and the
+    // scan's PD part open the charger page (which says why a test did not
+    // run), the silent boots the Quick Charge page.
+    requested: NextBoot,
 ) {
     // `pd-boot-diagnostic`: open on the PD page so the state before a
     // source Hard Reset is on screen (docs/SAFETY.md).
@@ -569,12 +592,17 @@ async fn button_task(
     let fatal = false;
     let mut navigation = if cfg!(feature = "pd-boot-diagnostic") || fatal {
         button_logic::Navigation::new(Page::detail(Detail::Pd), saved)
-    } else if charger_page {
+    } else if matches!(requested, NextBoot::CableTest | NextBoot::ScanPd) {
         button_logic::Navigation::new(Page::detail(Detail::Charger), saved)
+    } else if requested == NextBoot::QuickCharge {
+        button_logic::Navigation::new(Page::Qc(QcFocus::Off), saved)
+    } else if matches!(requested, NextBoot::ScanQuickCharge { .. }) {
+        button_logic::Navigation::new(Page::Qc(QcFocus::Requested(QcTarget::Detect)), saved)
     } else {
         button_logic::Navigation::new(Page::Overview, saved)
     };
     let input_sender = BUTTON_STATE.sender();
+    let mut qc_updates = QC_STATUS.anon_receiver();
     let mut previous = Instant::now();
     loop {
         let now = Instant::now();
@@ -591,10 +619,23 @@ async fn button_task(
         navigation.set_selectable(observation.spr.is_some() && observation.capabilities.is_some());
         navigation.set_passthrough(observation.pc13_high == Some(true));
         navigation.set_cable_test(observation.listen.is_some(), observation.cable_test);
+        navigation.set_silent(observation.quick_charge, observation.silent_settled);
         if let Some((_, view)) = DETAIL_VIEW.try_get() {
             navigation.set_list_end(view.end);
         }
+        // The scan's Quick Charge part ends with the probe's result.
+        let scan_end = match qc_updates.try_get() {
+            Some(qc_drive::Status::Detected(report)) => {
+                navigation.set_qc_class_b(report.v20);
+                navigation.finish_scan(QcFindings::Detected(report))
+            }
+            Some(qc_drive::Status::Failed(failure)) => {
+                navigation.finish_scan(QcFindings::Failed(failure))
+            }
+            _ => None,
+        };
         let (input, command) = navigation.update(raw);
+        let command = scan_end.or(command);
         // Save once a value is no longer being changed, and before a restart
         // (a scrolling list counts as editing) so the next boot sees it.
         if !input.page.editing() || command == Some(firmware_core::buttons::PdCommand::Restart) {
@@ -654,13 +695,28 @@ fn reading(raw_v: Option<u16>, raw_i: Option<u16>) -> Option<ui::Reading> {
     })
 }
 
+/// How the PD side of the port stands for Quick Charge.
+fn qc_mode(observation: pd::Observation) -> ui::QcMode {
+    if observation.quick_charge {
+        ui::QcMode::Silent
+    } else if observation.spr.is_some() && observation.capabilities.is_some() {
+        ui::QcMode::Pd
+    } else {
+        ui::QcMode::Plain
+    }
+}
+
 /// Backlight compare for a settings level, inside `1..BACKLIGHT_PERIOD`.
 fn backlight_compare(settings: firmware_core::settings::Settings) -> u16 {
     (u32::from(BACKLIGHT_PERIOD) * u32::from(settings.brightness_percent()) / 100) as u16
 }
 
 #[embassy_executor::task]
-async fn meter_task(mut backlight: embassy_hc32::pwm::TimerA4Pwm) {
+async fn meter_task(
+    mut backlight: embassy_hc32::pwm::TimerA4Pwm,
+    // The full scan's Quick Charge result, carried into its PD part.
+    mut qc_findings: Option<QcFindings>,
+) {
     let fb = framebuffer();
     let mut input_updates = BUTTON_STATE.anon_receiver();
     let mut input = button_logic::Input::default();
@@ -671,6 +727,8 @@ async fn meter_task(mut backlight: embassy_hc32::pwm::TimerA4Pwm) {
     let mut last_raw_i: Option<u16> = None;
     let mut line_updates = LINE_VOLTAGES.anon_receiver();
     let mut lines = None;
+    let mut qc_updates = QC_STATUS.anon_receiver();
+    let mut qc_status = qc_drive::Status::Off;
     // Peaks follow the meter page's reads; a settings or meter page reset
     // request clears them.
     let mut peaks = ui::Peaks::default();
@@ -738,7 +796,10 @@ async fn meter_task(mut backlight: embassy_hc32::pwm::TimerA4Pwm) {
         let mut changed = false;
         // Pages showing live values read the meter; the PD details page reads
         // only the bus voltage, as before.
-        let reads_current = matches!(page, Page::Overview | Page::Fixed { .. } | Page::Pps(_));
+        let reads_current = matches!(
+            page,
+            Page::Overview | Page::Fixed { .. } | Page::Pps(_) | Page::Qc(_)
+        );
         let pd_details = matches!(
             page,
             Page::Detail {
@@ -770,7 +831,16 @@ async fn meter_task(mut backlight: embassy_hc32::pwm::TimerA4Pwm) {
 
         if let Some(update) = line_updates.try_changed() {
             lines = update;
-            changed |= page == Page::Lines;
+            changed |= matches!(page, Page::Lines | Page::Qc(_));
+        }
+        if let Some(update) = qc_updates.try_changed() {
+            qc_status = update;
+            qc_findings = match update {
+                qc_drive::Status::Detected(report) => Some(QcFindings::Detected(report)),
+                qc_drive::Status::Failed(failure) => Some(QcFindings::Failed(failure)),
+                _ => qc_findings,
+            };
+            changed |= matches!(page, Page::Qc(_));
         }
 
         let secs = now.as_secs() as u32;
@@ -820,6 +890,19 @@ async fn meter_task(mut backlight: embassy_hc32::pwm::TimerA4Pwm) {
                 Page::Lines => {
                     render::clear(frame);
                     ui::draw_lines(&mut Canvas(frame), &header("LINES"), lines);
+                }
+                Page::Qc(focus) => {
+                    let mode = qc_mode(latest_observation());
+                    render::clear(frame);
+                    ui::draw_qc(
+                        &mut Canvas(frame),
+                        &header("QUICK CHARGE"),
+                        focus,
+                        mode,
+                        qc_status,
+                        lines,
+                        reading(last_raw_v, last_raw_i),
+                    );
                 }
                 Page::Fixed { choosing } => {
                     render::clear(frame);
@@ -876,15 +959,29 @@ async fn meter_task(mut backlight: embassy_hc32::pwm::TimerA4Pwm) {
                             top,
                             scrolling,
                         ),
-                        Detail::Charger => ui::draw_detail(
-                            canvas,
-                            &header,
-                            detail,
-                            (0..pd::partner_sections(observation))
-                                .map(|section| pd::partner_lines(observation, section)),
-                            top,
-                            scrolling,
-                        ),
+                        Detail::Charger => {
+                            // The PD offer, Quick Charge, then the rest of
+                            // what the charger said.
+                            let partner = pd::partner_sections(observation);
+                            let offer = partner.min(pd::CAPABILITY_SECTIONS);
+                            let mode = qc_mode(observation);
+                            ui::draw_detail(
+                                canvas,
+                                &header,
+                                detail,
+                                (0..offer)
+                                    .map(|section| pd::partner_lines(observation, section))
+                                    .chain((0..ui::qc_charger_sections(qc_findings)).map(
+                                        |section| ui::qc_charger_lines(qc_findings, mode, section),
+                                    ))
+                                    .chain(
+                                        (offer..partner)
+                                            .map(|section| pd::partner_lines(observation, section)),
+                                    ),
+                                top,
+                                scrolling,
+                            )
+                        }
                         Detail::Cable => ui::draw_detail(
                             canvas,
                             &header,
@@ -1014,24 +1111,36 @@ async fn main(spawner: Spawner) {
     // token is always free (`SpawnError::Busy` needs a second instance).
     const ONE_SPAWN: &str = "each task is spawned once into its one-slot pool";
 
-    // A restart into the 5 A cable test (`PdCommand::Restart`) left this in
-    // the saved settings; it lasts one boot. It is cleared here, before any
-    // task: the flash write masks interrupts, which must not happen in the PD
-    // session's start window, when the charger asks the cable question.
+    // A restart (`PdCommand::Restart`) left the mode of this boot in the
+    // saved settings. One-boot modes and the carried Quick Charge result are
+    // cleared here, before any task: the flash write masks interrupts, which
+    // must not happen in the PD session's start window, when the charger
+    // asks the cable question.
     let (mut store, saved) = settings_store::Store::open();
     let mut settings = saved.unwrap_or_default();
-    // The test runs only on a boot after a power-up (the restart's power
+    let requested = settings.next_boot;
+    let qc_findings = settings.qc_findings.take();
+    if requested.one_boot() {
+        settings.next_boot = NextBoot::Normal;
+    }
+    let cleared = store.save(settings);
+    // The cable test runs only on a boot after a power-up (the restart's power
     // cycle), with its request verifiably cleared first. A reset during that
     // clear, or any other reset without power loss, cannot repeat it: that
     // boot runs normally and the button task clears the request once up.
-    let requested = settings.cable_test;
-    settings.cable_test = false;
+    // The silent modes stay until left: a charger may restart the meter
+    // before it gives up on PD.
     let powered_up = reset_flags() & RESET_WITHOUT_POWER_LOSS == 0;
-    let cable_test = requested && powered_up && store.save(settings);
-    let cable_test_skipped = requested && !cable_test;
+    let boot = match requested {
+        NextBoot::CableTest if !(powered_up && cleared) => NextBoot::Normal,
+        NextBoot::ScanPd if !cleared => NextBoot::Normal,
+        requested => requested,
+    };
+    let cable_test_skipped = requested == NextBoot::CableTest && boot != NextBoot::CableTest;
 
     let backlight_pwm;
     let line_adc;
+    let qc_trigger;
     let button_inputs;
     let tilt_input;
     let pd_input;
@@ -1052,6 +1161,9 @@ async fn main(spawner: Spawner) {
         pc13_input = InputPin::new_pull_up(Port::C, 13);
         // PA6, PA7, PB0 and PB1 become analog inputs owned by ADC2.
         line_adc = line_adc::LineAdc::new(hc32f460_pac::Adc2::steal()).await;
+        // PB3, PB4, PB8 and PB9 (free after the JTAG release) drive D+/D−
+        // only for the Quick Charge page.
+        qc_trigger = qc_drive::Trigger::new();
 
         // The INTC is not reset by a jump into this image, so a bootloader or an
         // earlier image can leave `SEL` entries mapped; `register` then refuses
@@ -1158,9 +1270,9 @@ async fn main(spawner: Spawner) {
             PD_EXECUTOR_LINE,
             PD_EXECUTOR_PRIORITY << (u8::BITS as u8 - hc32f460_pac::NVIC_PRIO_BITS),
         );
-        PD_EXECUTOR.start(PD_EXECUTOR_LINE).spawn(
-            pd_task::run(pd_input, pc13_input, cable_test, cable_test_skipped).expect(ONE_SPAWN),
-        );
+        PD_EXECUTOR
+            .start(PD_EXECUTOR_LINE)
+            .spawn(pd_task::run(pd_input, pc13_input, boot, cable_test_skipped).expect(ONE_SPAWN));
         backlight_pwm = backlight.0;
         if !panel::init(backlight.1).await {
             // Backlight is already on, so a lit blank screen means the panel
@@ -1173,7 +1285,7 @@ async fn main(spawner: Spawner) {
 
     spawner.spawn(pulse_task().expect(ONE_SPAWN));
     spawner.spawn(tilt_task(tilt_input).expect(ONE_SPAWN));
-    spawner.spawn(line_task(line_adc).expect(ONE_SPAWN));
+    spawner.spawn(line_task(line_adc, qc_trigger).expect(ONE_SPAWN));
     spawner.spawn(button_task(button_inputs, store, settings, requested).expect(ONE_SPAWN));
-    spawner.spawn(meter_task(backlight_pwm).expect(ONE_SPAWN));
+    spawner.spawn(meter_task(backlight_pwm, qc_findings).expect(ONE_SPAWN));
 }

@@ -158,12 +158,14 @@ fn restart_requested() -> bool {
 /// Applies the input task's requests. With `plug_in_charger` (both CCs
 /// carried Rp at startup) CC2 is the charger's own CC pin, not a cable's VCONN
 /// pin, so no cable query starts: it would drive VCONN into the charger.
+/// `list_all` (the cable test, the full scan) asks for the EPR offer unasked.
 fn control(
     observation: &mut fusb302_pd::observation::Observation,
     selection: &firmware_core::pd_spr::Selection,
     store: Option<&dyn firmware_core::pd_svids::Store>,
     plug_in_charger: bool,
     cable_test: bool,
+    list_all: bool,
 ) {
     use firmware_core::buttons::PdCommand;
     while let Ok(command) = crate::PD_COMMANDS.try_receive() {
@@ -175,9 +177,9 @@ fn control(
             _ => selection.apply(command),
         }
     }
-    // The cable test lists everything at once: ask for the EPR offer as soon
-    // as the contract allows; a later long OK asks again.
-    if cable_test && selection.epr_offer() == pd_spr::EprOffer::NotAsked {
+    // These boots list everything at once: ask for the EPR offer as soon as
+    // the contract allows; a later long OK asks again.
+    if list_all && selection.epr_offer() == pd_spr::EprOffer::NotAsked {
         selection.request_epr_offer();
     }
     if !plug_in_charger {
@@ -221,9 +223,17 @@ pub async fn run(observation: &mut pd::Observation, report: pd_cc::Report) {
     {
         let plug_in_charger = observation.listen.is_some();
         let cable_test = observation.cable_test;
+        let list_all = cable_test || observation.scan_pd;
         let control = |observation: &mut fusb302_pd::observation::Observation,
                        store: Option<&dyn firmware_core::pd_svids::Store>| {
-            control(observation, &selection, store, plug_in_charger, cable_test)
+            control(
+                observation,
+                &selection,
+                store,
+                plug_in_charger,
+                cable_test,
+                list_all,
+            )
         };
         let identity_started = || selection.set_mode_cursor(None);
         let board_observation = *observation;
@@ -357,6 +367,67 @@ pub async fn run(observation: &mut pd::Observation, report: pd_cc::Report) {
         BUS_LATCH.fail();
     }
 }
+
+/// Leave a silent boot (`docs/SAFETY.md`): start a session on the boot's
+/// checked startup and send Hard Reset Signaling at once, so the charger,
+/// which gave up on PD, starts over as at attach. The checked transition to
+/// default and an MCU reset follow; on VBUS power the meter loses power
+/// first. Returns only after a failure, recorded in `observation`: `true`
+/// when VBUS was outside the start window, before anything was written.
+pub async fn restart_unheard(observation: &mut pd::Observation, report: pd_cc::Report) -> bool {
+    let mut bus = SharedBus;
+    let clock = Clock;
+    let mut delay = TimedDelay;
+    let board_observation = *observation;
+    let publish = |phy| crate::store_observation(board_observation.with_phy(phy));
+    let config = pd_spr_phy::Config {
+        persistent: false,
+        selection: None,
+        control: None,
+        identity_started: None,
+        publish: Some(&publish),
+        trace_steps: false,
+        trace_cable: false,
+        stop_requested: None,
+        svids: None,
+        emarker: false,
+    };
+    let (mut phy, started) = pd_spr_phy::Session::start(
+        &mut bus,
+        &mut delay,
+        &clock,
+        config,
+        observation.phy,
+        report,
+    )
+    .await;
+    let mut error = started.err();
+    if error.is_none() {
+        error = phy.restart_unheard().await.err();
+    }
+    if error.is_none() && phy.hard_reset_sent() {
+        match phy.transition_to_default().await {
+            Ok(()) => cortex_m::peripheral::SCB::sys_reset(),
+            Err(failure) => error = Some(failure),
+        }
+    }
+    if !phy.stopped() {
+        phy.stop();
+    }
+    *observation = observation.with_phy(phy.observation);
+    observation.restore_unverified = phy.unverified();
+    observation.failed_register = phy.register().unwrap_or(0);
+    let error = error.or_else(|| phy.take_error());
+    let settling = matches!(error, Some(pd_spr_phy::Error::InputVoltage { .. }));
+    if let Some(failure) = error {
+        failure_report(observation, failure);
+    }
+    if observation.restore_unverified {
+        BUS_LATCH.fail();
+    }
+    settling && !observation.restore_unverified
+}
+
 fn failure_report(
     observation: &mut pd::Observation,
     failure: pd_spr_phy::Error<embassy_hc32::i2c::Error>,

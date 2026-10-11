@@ -1,7 +1,7 @@
 //! Graphical pages: overview, line voltages, PD profile and PPS selectors,
-//! settings and the scrolling detail lists, drawn with `embedded-graphics`
-//! primitives and `u8g2-fonts` text on any RGB565 target. The renderer
-//! gathers the values; nothing here touches hardware.
+//! Quick Charge trigger, settings and the scrolling detail lists, drawn with
+//! `embedded-graphics` primitives and `u8g2-fonts` text on any RGB565 target.
+//! The renderer gathers the values; nothing here touches hardware.
 
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
@@ -9,13 +9,17 @@ use embedded_graphics::primitives::{
     Circle, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle, RoundedRectangle, StyledDrawable,
     Triangle,
 };
-use firmware_core::buttons::{Detail, PpsFocus, SettingsFocus};
-use firmware_core::settings::{BRIGHTNESS_PERCENT, Item, Rotation, Settings};
+use firmware_core::buttons::{Detail, PpsFocus, QcFocus, QcTarget, SettingsFocus};
+use firmware_core::settings::{BRIGHTNESS_PERCENT, Item, QcFindings, Rotation, Settings};
 use u8g2_fonts::FontRenderer;
 use u8g2_fonts::fonts;
 use u8g2_fonts::types::{FontColor, HorizontalAlignment, VerticalPosition};
 
 use crate::line_adc::LineVoltages;
+use crate::qc_drive::Status;
+use qc_protocol::detect::{Outcome, Report, Stage};
+use qc_protocol::qc2::{Failure, Voltage};
+use qc_protocol::qc3::{MIN_MV, STEP_MV};
 
 /// Voltage and current: Inconsolata Bold 19 px, numerals only.
 const READING: FontRenderer =
@@ -618,25 +622,26 @@ const DM_CARD: Rectangle = AMPS_CARD;
 const CC1_CARD: Rectangle = Rectangle::new(Point::new(4, 70), Size::new(114, 41));
 const CC2_CARD: Rectangle = Rectangle::new(Point::new(122, 70), Size::new(114, 41));
 
-/// The line voltage page. `lines` is `None` before the first scan and after
-/// a failed one.
-pub fn draw_lines<D: DrawTarget<Color = Rgb565>>(
-    target: &mut D,
-    header: &Header<'_>,
-    lines: Option<LineVoltages>,
-) {
-    draw_header(target, header, YELLOW);
-    let value = |mv: fn(&LineVoltages) -> u16| match lines {
-        Some(lines) => Label::new().hundredths(u32::from(mv(&lines))),
+/// A reading in volts from mV, or a blank one before the first.
+fn volts_or_blank(mv: Option<u32>) -> Label {
+    match mv {
+        Some(mv) => Label::new().hundredths(mv),
         None => Label::new().push(b"-.--"),
-    };
-    let cards = [
-        (DP_CARD, YELLOW_TINT, YELLOW, "D+", value(|l| l.dp_mv)),
-        (DM_CARD, CYAN_TINT, CYAN, "D-", value(|l| l.dm_mv)),
-        (CC1_CARD, GREEN_TINT, GREEN, "CC1", value(|l| l.cc1_mv)),
-        (CC2_CARD, MAGENTA_TINT, MAGENTA, "CC2", value(|l| l.cc2_mv)),
-    ];
-    for (area, tint, color, label, value) in &cards {
+    }
+}
+
+/// One line's voltage from a scan, blank without one.
+fn line_volts(lines: Option<LineVoltages>, mv: fn(&LineVoltages) -> u16) -> Label {
+    volts_or_blank(lines.map(|l| u32::from(mv(&l))))
+}
+
+/// Tinted cards each showing a reading in volts: area, tint, accent, label
+/// and value.
+fn volt_cards<D: DrawTarget<Color = Rgb565>>(
+    target: &mut D,
+    cards: &[(Rectangle, Rgb565, Rgb565, &str, Label)],
+) {
+    for (area, tint, color, label, value) in cards {
         card(target, *area, *tint, None);
         card_label(target, *area, label, *color);
         value_with_unit(
@@ -648,7 +653,384 @@ pub fn draw_lines<D: DrawTarget<Color = Rgb565>>(
             *color,
         );
     }
+}
+
+/// The line voltage page. `lines` is `None` before the first scan and after
+/// a failed one.
+pub fn draw_lines<D: DrawTarget<Color = Rgb565>>(
+    target: &mut D,
+    header: &Header<'_>,
+    lines: Option<LineVoltages>,
+) {
+    draw_header(target, header, YELLOW);
+    let value = |mv| line_volts(lines, mv);
+    volt_cards(
+        target,
+        &[
+            (DP_CARD, YELLOW_TINT, YELLOW, "D+", value(|l| l.dp_mv)),
+            (DM_CARD, CYAN_TINT, CYAN, "D-", value(|l| l.dm_mv)),
+            (CC1_CARD, GREEN_TINT, GREEN, "CC1", value(|l| l.cc1_mv)),
+            (CC2_CARD, MAGENTA_TINT, MAGENTA, "CC2", value(|l| l.cc2_mv)),
+        ],
+    );
     hint(target, "uncalibrated    < > pages");
+}
+
+/// Quick Charge cards: D+/D− read back on top, VBUS and the request below.
+const QC_VBUS_CARD: Rectangle = CC1_CARD;
+const QC_REQUEST_CARD: Rectangle = CC2_CARD;
+
+/// How the PD side of the port stands, for the Quick Charge hints.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QcMode {
+    /// No PD contract: requests reach the charger.
+    Plain,
+    /// A PD contract holds the charger, which then ignores Quick Charge; OK
+    /// restarts it into a silent boot.
+    Pd,
+    /// This boot keeps PD silent (`NextBoot::silent`); Back on the stopped
+    /// page restarts the charger into PD.
+    Silent,
+}
+
+/// The Quick Charge trigger: the driven lines as measured, the bus voltage
+/// and the request, or the voltage being chosen.
+pub fn draw_qc<D: DrawTarget<Color = Rgb565>>(
+    target: &mut D,
+    header: &Header<'_>,
+    focus: QcFocus,
+    mode: QcMode,
+    status: Status,
+    lines: Option<LineVoltages>,
+    reading: Option<Reading>,
+) {
+    draw_header(target, header, ORANGE);
+    volt_cards(
+        target,
+        &[
+            (
+                DP_CARD,
+                YELLOW_TINT,
+                YELLOW,
+                "D+",
+                line_volts(lines, |l| l.dp_mv),
+            ),
+            (
+                DM_CARD,
+                CYAN_TINT,
+                CYAN,
+                "D-",
+                line_volts(lines, |l| l.dm_mv),
+            ),
+            (
+                QC_VBUS_CARD,
+                GREEN_TINT,
+                GREEN,
+                "VBUS",
+                volts_or_blank(reading.map(|r| r.mv)),
+            ),
+        ],
+    );
+
+    let fail = || Label::new().push(b"FAIL");
+    let volts = |voltage: Voltage| Label::new().volts(voltage.millivolts());
+    let findings;
+    let (label, value, color, hint_text) = match (focus, status) {
+        (QcFocus::Choosing { preview, .. }, _) => (
+            "CHOOSE",
+            match preview {
+                QcTarget::Volts(voltage) => volts(voltage),
+                QcTarget::Steps(_) => Label::new().push(b"QC3"),
+                QcTarget::Detect => Label::new().push(b"DETECT"),
+            },
+            ORANGE,
+            match preview {
+                QcTarget::Volts(_) => "< > choose  OK request  BACK cancel",
+                QcTarget::Steps(_) => "OK 0.2V steps from 5V (QC3)",
+                // The probe puts up to 20 V on the output port.
+                QcTarget::Detect => "OK tests 9-20V on the output",
+            },
+        ),
+        (_, Status::Off) => (
+            "REQUEST",
+            Label::new().push(b"OFF"),
+            MUTED,
+            match mode {
+                QcMode::Plain => "OK start 5V    < > pages",
+                QcMode::Pd => "OK switch the charger to QC",
+                QcMode::Silent => "OK start 5V    BACK back to PD",
+            },
+        ),
+        (_, Status::Entering) => (
+            "REQUEST",
+            Label::new().push(b"WAIT"),
+            ORANGE,
+            "handshake    BACK stop",
+        ),
+        (_, Status::Failed(Failure::NotDcp)) => {
+            ("NO DCP", fail(), MAGENTA, "D+ D- not shorted    BACK")
+        }
+        (_, Status::Failed(Failure::NoEntry)) => {
+            ("NO QC", fail(), MAGENTA, "D- stayed high    BACK")
+        }
+        (_, Status::Active(voltage, Some(Outcome::Waiting))) => (
+            "SETTING",
+            volts(voltage),
+            ORANGE,
+            "waiting for VBUS    BACK stop",
+        ),
+        (_, Status::Active(voltage, Some(Outcome::Ignored))) => (
+            "IGNORED",
+            volts(voltage),
+            MAGENTA,
+            if voltage == Voltage::V20 {
+                "20V needs a Class B charger"
+            } else {
+                "charger kept its output"
+            },
+        ),
+        (_, Status::Active(voltage, _)) => {
+            ("ACTIVE", volts(voltage), GREEN, "OK change    BACK stop")
+        }
+        (_, Status::Stepping(mv)) => (
+            "QC3",
+            Label::new().volts(mv),
+            GREEN,
+            "< > 0.2V    OK change    BACK stop",
+        ),
+        (_, Status::Detecting(stage)) => (
+            "DETECT",
+            match stage {
+                Stage::Fixed(voltage) => volts(voltage),
+                Stage::Back => volts(Voltage::V5),
+                Stage::Continuous => Label::new().push(b"QC3"),
+                Stage::StepUp(sent) => Label::new()
+                    .push(b"+")
+                    .hundredths(u32::from(sent) * u32::from(STEP_MV))
+                    .push(b"V"),
+            },
+            ORANGE,
+            "testing each request    BACK stop",
+        ),
+        (_, Status::Detected(report)) => {
+            findings = report_line(report);
+            ("DETECTED", report_summary(report), GREEN, findings.as_str())
+        }
+    };
+    let border = matches!(focus, QcFocus::Choosing { .. }).then_some(ORANGE);
+    card(target, QC_REQUEST_CARD, RULE, border);
+    card_label(target, QC_REQUEST_CARD, label, color);
+    mixed_value(
+        target,
+        &value,
+        QC_REQUEST_CARD.top_left + Point::new(6, CARD_VALUE),
+        color,
+    );
+    hint(target, hint_text);
+}
+
+/// A card value whose leading number uses the reading font and whose rest
+/// (a unit or words, e.g. "V", "QC3 A", "OFF") uses the bold font: the
+/// reading font has numerals only, and drops letters.
+fn mixed_value<D: DrawTarget<Color = Rgb565>>(
+    target: &mut D,
+    value: &Label,
+    position: Point,
+    color: Rgb565,
+) {
+    let value = value.as_str();
+    let (number, rest) = value.split_at(
+        value
+            .find(|c: char| c.is_ascii_alphabetic())
+            .unwrap_or(value.len()),
+    );
+    let mut x = position.x;
+    if !number.is_empty() {
+        x = text(
+            target,
+            &READING,
+            number,
+            position,
+            HorizontalAlignment::Left,
+            color,
+        ) + UNIT_GAP;
+    }
+    text(
+        target,
+        &BOLD,
+        rest,
+        Point::new(x, position.y),
+        HorizontalAlignment::Left,
+        color,
+    );
+}
+
+/// The probe's verdict: the version, then the class (Class A ends at 12 V,
+/// Class B adds 20 V).
+fn report_summary(report: Report) -> Label {
+    if !report.v9 && !report.steps {
+        return Label::new().push(b"5V ONLY");
+    }
+    let version: &[u8] = if report.steps { b"QC3 " } else { b"QC2 " };
+    Label::new()
+        .push(version)
+        .push(if report.v20 { b"B" } else { b"A" })
+}
+
+/// What the charger offers, from the probe: the fixed voltages it took, and
+/// for Quick Charge 3.0 the step range.
+fn report_line(report: Report) -> Label {
+    match step_range(report) {
+        Some(range) => fixed_volts(report)
+            .push(b", ")
+            .push(range.as_str().as_bytes()),
+        None => fixed_volts(report).push(b" fixed only"),
+    }
+}
+
+/// The fixed voltages the charger took, e.g. "5 9 12V".
+fn fixed_volts(report: Report) -> Label {
+    let fixed: [(bool, &[u8]); 3] = [
+        (report.v9, b" 9"),
+        (report.v12, b" 12"),
+        (report.v20, b" 20"),
+    ];
+    let mut line = Label::new().push(b"5");
+    for (taken, volts) in fixed {
+        if taken {
+            line = line.push(volts);
+        }
+    }
+    line.push(b"V")
+}
+
+/// The Quick Charge 3.0 step range, from 3.6 V to the class maximum, e.g.
+/// "3.6-12V by 0.2V"; `None` without steps.
+fn step_range(report: Report) -> Option<Label> {
+    Some(
+        step_span(report)?
+            .push(b" by ")
+            .push(step_size().as_str().as_bytes()),
+    )
+}
+
+/// From 3.6 V to the class maximum, e.g. "3.6-12V"; `None` without steps.
+fn step_span(report: Report) -> Option<Label> {
+    if !report.steps {
+        return None;
+    }
+    let max = if report.v20 {
+        Voltage::V20
+    } else {
+        Voltage::V12
+    };
+    Some(
+        Label::new()
+            .fixed(u32::from(MIN_MV) / 100, 1)
+            .push(b"-")
+            .fixed(u32::from(max.millivolts()) / 1000, 0)
+            .push(b"V"),
+    )
+}
+
+/// "0.2V", the Quick Charge 3.0 step.
+fn step_size() -> Label {
+    Label::new().fixed(u32::from(STEP_MV) / 100, 1).push(b"V")
+}
+
+/// Sections of the charger page's Quick Charge part: Quick Charge 2.0 and
+/// 3.0 apart after a probe, one otherwise.
+pub fn qc_charger_sections(findings: Option<QcFindings>) -> u32 {
+    if matches!(findings, Some(QcFindings::Detected(_))) {
+        2
+    } else {
+        1
+    }
+}
+
+/// Section `section` of [`qc_charger_sections`]: what each Quick Charge
+/// version took in the last probe, or how to get one.
+pub fn qc_charger_lines(findings: Option<QcFindings>, mode: QcMode, section: u32) -> Lines {
+    let mut rows = [[b' '; 24]; 8];
+    let mut row = 0;
+    let mut line = |text: &[u8]| {
+        for (cell, &byte) in rows[row].iter_mut().zip(text) {
+            *cell = byte.to_ascii_uppercase();
+        }
+        row += 1;
+    };
+    match findings {
+        Some(QcFindings::Detected(report)) if section == 0 => {
+            line(b"QUICK CHARGE 2.0");
+            if !report.v9 {
+                line(b"NOT SUPPORTED");
+                return rows;
+            }
+            line(if report.v20 {
+                b"CLASS B, UP TO 20V"
+            } else {
+                b"CLASS A, UP TO 12V"
+            });
+            let fixed: [(&[u8], bool); 4] = [
+                (b"5V ", true),
+                (b"9V ", report.v9),
+                (b"12V", report.v12),
+                (b"20V", report.v20),
+            ];
+            for (volts, taken) in fixed {
+                let answer: &[u8] = if taken { b"  YES" } else { b"  NO" };
+                line(Label::new().push(volts).push(answer).as_str().as_bytes());
+            }
+        }
+        Some(QcFindings::Detected(report)) => {
+            line(b"QUICK CHARGE 3.0");
+            match step_span(report) {
+                Some(span) => {
+                    line(b"SUPPORTED");
+                    line(
+                        Label::new()
+                            .push(b"RANGE ")
+                            .push(span.as_str().as_bytes())
+                            .as_str()
+                            .as_bytes(),
+                    );
+                    line(
+                        Label::new()
+                            .push(b"STEP ")
+                            .push(step_size().as_str().as_bytes())
+                            .as_str()
+                            .as_bytes(),
+                    );
+                }
+                None => {
+                    line(b"NOT SUPPORTED");
+                    line(b"NO 0.2V STEPS");
+                }
+            }
+        }
+        Some(QcFindings::Failed(Failure::NotDcp)) => {
+            line(b"QUICK CHARGE");
+            line(b"NOT A CHARGING PORT");
+            line(b"D+ D- NOT SHORTED");
+        }
+        Some(QcFindings::Failed(Failure::NoEntry)) => {
+            line(b"QUICK CHARGE");
+            line(b"NO QUICK CHARGE");
+            line(b"D- STAYED HIGH");
+        }
+        None if mode == QcMode::Pd => {
+            line(b"QUICK CHARGE");
+            line(b"NOT SCANNED YET");
+            line(b"HOLD OK: FULL SCAN");
+            line(b"(QC, PD AND EPR)");
+        }
+        None => {
+            line(b"QUICK CHARGE");
+            line(b"NOT TESTED YET");
+            line(b"HOLD OK: DETECT");
+        }
+    }
+    rows
 }
 
 /// Centred notice for a selector page with nothing to select.

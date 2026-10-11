@@ -371,7 +371,7 @@ checksum = "dc2d050bdc5c21e0862a89256ed8029ae6c290a93aecefc73084b3002cdebb01"
 [[package]]
 name = "embassy-hc32"
 version = "0.1.0"
-source = "git+https://github.com/kralonur/hc32f460-embassy-rs?rev=795d26db6c572d2b57a0b675e28041a119863421#795d26db6c572d2b57a0b675e28041a119863421"
+source = "git+https://github.com/kralonur/hc32f460-embassy-rs?rev=a61525380066778cf8fa0062ebf1a61d2842c270#a61525380066778cf8fa0062ebf1a61d2842c270"
 dependencies = [
  "cortex-m",
  "critical-section",
@@ -536,6 +536,7 @@ dependencies = [
  "fusb302-pd",
  "hc32f460-pac",
  "panic-halt",
+ "qc-protocol",
  "u8g2-fonts",
 ]
 
@@ -546,6 +547,7 @@ dependencies = [
  "embassy-hc32",
  "fusb302-pd",
  "pd-protocol",
+ "qc-protocol",
  "usbpd",
  "usbpd-traits",
 ]
@@ -673,7 +675,7 @@ dependencies = [
 [[package]]
 name = "hc32f460-pac"
 version = "0.1.0"
-source = "git+https://github.com/kralonur/hc32f460-embassy-rs?rev=795d26db6c572d2b57a0b675e28041a119863421#795d26db6c572d2b57a0b675e28041a119863421"
+source = "git+https://github.com/kralonur/hc32f460-embassy-rs?rev=a61525380066778cf8fa0062ebf1a61d2842c270#a61525380066778cf8fa0062ebf1a61d2842c270"
 dependencies = [
  "cortex-m",
  "cortex-m-rt",
@@ -897,7 +899,7 @@ checksum = "a513e167849a384b7f9b746e517604398518590a9142f4846a32e3c2a4de7b11"
 [[package]]
 name = "pd-protocol"
 version = "0.1.0"
-source = "git+https://github.com/kralonur/embedded-charging-protocols-rs?rev=0796747706551713ff10620fce8c9617a98b5c78#0796747706551713ff10620fce8c9617a98b5c78"
+source = "git+https://github.com/kralonur/embedded-charging-protocols-rs?rev=a0e48562c3c5462472cbcb0914af17c6eb847657#a0e48562c3c5462472cbcb0914af17c6eb847657"
 dependencies = [
  "usbpd",
  "usbpd-traits",
@@ -944,6 +946,11 @@ checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
 ]
+
+[[package]]
+name = "qc-protocol"
+version = "0.1.0"
+source = "git+https://github.com/kralonur/embedded-charging-protocols-rs?rev=a0e48562c3c5462472cbcb0914af17c6eb847657#a0e48562c3c5462472cbcb0914af17c6eb847657"
 
 [[package]]
 name = "quote"

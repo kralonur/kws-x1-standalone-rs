@@ -359,6 +359,8 @@ pub struct Session<'a, B: I2c, D, C, P: Platform> {
     // Hard Reset Signaling written / received (I_HARDRST): the session is over.
     hard_reset_sent: bool,
     hard_reset_received: bool,
+    /// `restart_unheard` opened the Hard Reset gate for a Source never heard.
+    unheard_restart: bool,
     // I_SOFTRST must match a received SOP Soft_Reset (or our own Soft_Reset TX).
     polls: u32,
     softrst_flag_at: Option<u32>,
@@ -449,6 +451,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             hard_reset_error_at: None,
             hard_reset_sent: false,
             hard_reset_received: false,
+            unheard_restart: false,
             polls: 0,
             softrst_flag_at: None,
             softrst_frame_at: None,
@@ -2422,8 +2425,8 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             self.reset,
             Some(ResetStep::AcceptPartner | ResetStep::WaitCapsAfterReset)
         );
-        if !self.config.persistent
-            || (self.trace().peer_revision.is_none() && !startup_reset)
+        if !(self.config.persistent || self.unheard_restart)
+            || (self.trace().peer_revision.is_none() && !startup_reset && !self.unheard_restart)
             || self.pending_tx.is_some()
             || self.cable_phase != CablePhase::Idle
             || !(self.hard_reset_armed || timed_out)
@@ -2484,6 +2487,23 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             return Err(Error::Stopped);
         }
         self.lifecycle = Lifecycle::Halted;
+        self.arm_hard_reset();
+        self.send_hard_reset().await
+    }
+    /// The caller's restart of a Source it never answered, right after
+    /// `start` (`docs/SAFETY.md`): a Source whose Source_Capabilities went
+    /// unacknowledged stops PD and then answers only Hard Reset Signaling,
+    /// after which it starts over as at attach (section 6.8.3). Refused once
+    /// anything was received. `transition_to_default` follows.
+    pub async fn restart_unheard(&mut self) -> Result<(), Error<B::Error>> {
+        if self.stopped() {
+            return Err(Error::Stopped);
+        }
+        if self.observation.rx_packets != 0 || self.trace().peer_revision.is_some() {
+            return Err(Error::Request);
+        }
+        self.lifecycle = Lifecycle::Halted;
+        self.unheard_restart = true;
         self.arm_hard_reset();
         self.send_hard_reset().await
     }

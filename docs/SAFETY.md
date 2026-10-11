@@ -47,6 +47,43 @@ from a verified baseline and then listens without GoodCRC, transmission or
 reset signaling. A changed configuration or any transmit evidence halts it.
 The hold diagnostic keeps Rd but does not start the policy engine.
 
+The silent boots (saved as the next boot's mode, kept until left) stop the
+sink the same way after the CC check: verified baseline, Rd on, automatic
+GoodCRC off, nothing transmitted. A source whose Source_Capabilities are never
+acknowledged stops PD after nCapsCount tries and stays at 5 V, where a USB-C
+charger may take Quick Charge requests on D+/D−. Under a PD contract the
+Quick Charge page's OK, and the charger page's long OK (the full scan),
+enter one through the cable test's Hard Reset restart. After that Hard Reset
+a source that hears nothing within NoResponseTimer (4.5-5.5 s) may send up to
+nHardResetCount (2) more, then recover by detaching (USB PD R3.2 source
+policy engine; the Linux TCPM source does the same). Each costs the
+VBUS-powered meter a boot, and each boot stays silent. A Quick Charge
+boot that lasted the source's whole PD window (nCapsCount Source_Capabilities
+at most tTypeCSendSourceCap apart, 10 s) saves the next boot as normal again,
+so only the charger's own restarts, not a later plug-in, stay silent.
+
+A silent boot is left by a user action (Back on the stopped Quick Charge
+page, or the scan's end) with `restart_unheard`: a session starts on the
+boot's checked startup and sends Hard Reset Signaling at once, which the
+source, having given up on PD, still answers by starting over as at attach.
+The PHY refuses it once anything was received. The checked
+transition-to-default follows. A start refused only because VBUS is still
+outside its window is retried each read period; nothing was written then.
+If the source does not answer, the meter stays at 5 V and a replug brings PD
+back. The full scan's Quick Charge part runs the probe, saves its result and
+the PD part as the next boot, and leaves this way; its PD part (or, with the
+plug in the charger, the cable test) also asks for the EPR offer and shows
+the carried result once.
+
+The Quick Charge 3.0 steps on its page go up to 12 V, or 20 V after a
+probe found Class B, and enter and leave continuous mode through a 5 V
+request. The Quick Charge probe runs only when chosen on its page or in the
+full scan. It requests continuous mode and its steps first, then 5 V, 9, 12
+and up to 20 V, so the load behind the meter must be rated for it, and it
+ends on a 5 V request. Its Quick Charge 3.0 step pulse is a 1 ms busy wait,
+which only an interrupt can lengthen: its levels also code a fixed request,
+which a charger takes after 20 ms at the earliest.
+
 The sink selects the CC that alone carries Rp. When both do (the meter's plug
 sits in the charger's receptacle, which drives Rp on both pins), it listens
 300 ms on each CC, Rd kept and nothing transmitted, and uses the one CC with
@@ -61,9 +98,9 @@ its CC voltages, so the session can acknowledge the charger's early SOP'
 Discover Identity requests.
 
 SOP Soft_Reset is independently gated in policy and PHY. Hard Reset is allowed
-only in validated mandatory cases and the user-started cable test restart
-below, never the optional SinkWaitCapTimer case and never as generic fault
-recovery. There is no Cable_Reset or power-role swap.
+only in validated mandatory cases, the user-started cable test restart below
+and leaving a silent boot (above), never the optional SinkWaitCapTimer case
+and never as generic fault recovery. There is no Cable_Reset or power-role swap.
 After sent/received Hard Reset, the checked transition-to-default restores the
 baseline without changing Rd, observes VBUS below vSafe0V and back at vSafe5V,
 then restarts the MCU. Because the meter is VBUS-powered, it may lose power first.
@@ -102,18 +139,19 @@ Ready and is asked again after the cooldown, at most three unsent attempts.
 **The board also retains a nonstandard cable identity** (`EMARKER` in
 `pd_spr_phy`), as the source firmware did. Only when the meter's own plug sits
 in the charger's receptacle (Rp on both CCs at startup) and the boot runs the
-user-started 5 A cable test is SOP' reception on. The test starts and ends
-with a long OK / Back on the charger page. The meter saves a one-boot flag,
-ends the session at its idle contract (the stop path, held 1 s), and sends
-Hard Reset Signaling through the PHY's own Hard Reset gate (`Session::restart`):
-the charger cycles VBUS and VCONN and starts over as at attach, and the
-checked transition-to-default follows. Releasing Rd did not make the charger
-detach, so it is not used. The test runs only on a boot after a power-up (no reset cause flag other
-than power-on, reset pin or multiple), once its flag was cleared and read
-back before any task starts; any other boot runs normally and clears the
-flag later, so neither a reset during the clear nor a later one can repeat
-the test. The test boot stays on the charger page at its
-5 V contract: navigation keeps that page and passes only the EPR offer request
+user-started 5 A cable test is SOP' reception on. The test is the last part
+of the full scan (a long OK on the charger page, above) and ends with Back on
+the charger page. Entering the scan and ending the test, the meter saves the
+next boot's mode, ends the session at its idle contract (the stop path, held
+1 s), and sends Hard Reset Signaling through the PHY's own Hard Reset gate
+(`Session::restart`): the charger cycles VBUS and VCONN and starts over as at
+attach, and the checked transition-to-default follows. Releasing Rd did not
+make the charger detach, so it is not used. The test runs only on a boot
+after a power-up (no reset cause flag other than power-on, reset pin or
+multiple), once its mode was cleared and read back before any task starts;
+any other boot runs normally and clears the mode later, so neither a reset
+during the clear nor a later one can repeat the test. The test boot stays on
+the charger page at its 5 V contract: navigation keeps that page and passes only the EPR offer request
 and the restart, and the PD session drops any other command. While the test runs:
 that plug is then the cable between charger and meter (board rating 4-30 V,
 0-12 A). A SOP' Discover Identity from the charger is acknowledged by the

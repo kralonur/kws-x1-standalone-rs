@@ -4,7 +4,9 @@
 use core::sync::atomic::Ordering;
 
 use embassy_hc32::gpio::InputPin;
-use embassy_time::{Instant, Timer};
+use embassy_time::{Duration, Instant, Timer};
+use firmware_core::buttons::PdCommand;
+use firmware_core::settings::NextBoot;
 
 use crate::bus::{BUS_LATCH, I2C3, bus_failed, note_bus_failure};
 use crate::{
@@ -20,17 +22,21 @@ use crate::{
 /// High (passthrough): read-only snapshot plus one verified SWITCHES0 = 0x00
 /// write (FUSB302 Rd off, as the original firmware does), then the receive-only sniffer
 /// (`docs/SAFETY.md`): never GoodCRC, TX or reset signaling.
-/// PHY interrupts remain globally masked. Errors halt without reset, retry or
+/// A silent `boot` (`NextBoot::silent`) stops the sink after the CC check, on
+/// its verified baseline: Rd on, automatic GoodCRC off, nothing sent, until
+/// the input task asks to restart the charger (`docs/SAFETY.md`). PHY
+/// interrupts remain globally masked. Errors halt without reset, retry or
 /// cleanup.
 #[embassy_executor::task]
 pub async fn run(
     mut input: embassy_hc32::exti::ExtiInput,
     pc13: InputPin,
-    cable_test: bool,
+    boot: NextBoot,
     cable_test_skipped: bool,
 ) {
     let mut observation = pd::Observation::new();
-    observation.cable_test = cable_test;
+    observation.cable_test = boot == NextBoot::CableTest;
+    observation.scan_pd = boot == NextBoot::ScanPd;
     observation.cable_test_skipped = cable_test_skipped;
     observation.reset_flags = crate::reset_flags();
     // Three equal samples or passthrough: an unsettled level never starts a sink.
@@ -42,7 +48,8 @@ pub async fn run(
     observation.pc13_high = Some(!sink_mode);
     observation.irq_high = input.is_high();
     observation.irq_count = PD_IRQ_COUNT.load(Ordering::Relaxed);
-    if sink_mode {
+    observation.quick_charge = sink_mode && boot.silent();
+    if sink_mode && !observation.quick_charge {
         let mut spr = pd::SprObservation::pending();
         spr.target_mv = 5_000;
         observation.spr = Some(spr);
@@ -60,10 +67,13 @@ pub async fn run(
                 observation.boot_step = 2;
                 store_observation(observation);
             }
-            if cfg!(feature = "pd-hold-diagnostic") {
+            if observation.quick_charge || cfg!(feature = "pd-hold-diagnostic") {
                 // CC check restored the power-on baseline: Rd on, AUTO_CRC off.
                 observation.spr = None;
                 observation.phase = pd::Phase::Hold;
+                if observation.quick_charge {
+                    silent_hold(&mut input, &mut observation, report).await;
+                }
             } else {
                 pd_trial::run(&mut observation, report).await;
             }
@@ -83,6 +93,42 @@ pub async fn run(
         )
         .await;
     }
+}
+
+/// Longest a source keeps trying PD with an unacknowledged sink, from its
+/// attach or Hard Reset: nCapsCount (50) Source_Capabilities, each
+/// tTypeCSendSourceCap (at most 200 ms) apart (USB PD R3.2, Counter
+/// Parameters and Time Values). Its NoResponseTimer Hard Resets (at most
+/// 5.5 s) come sooner. The meter boots after the source restarted VBUS, so
+/// time since boot is shorter than time since then.
+const SILENT_SETTLED: Duration = Duration::from_secs(10);
+
+/// A silent boot: hold until the input task asks for the restart, then
+/// restart the charger into PD. A supply still falling from a Quick Charge
+/// request is outside the session's start window; that start is retried each
+/// read period, nothing having been written.
+async fn silent_hold(
+    input: &mut embassy_hc32::exti::ExtiInput,
+    observation: &mut pd::Observation,
+    report: pd_cc::Report,
+) {
+    loop {
+        observation.irq_high = input.is_high();
+        observation.irq_count = PD_IRQ_COUNT.load(Ordering::Relaxed);
+        observation.silent_settled = Instant::now().as_millis() >= SILENT_SETTLED.as_millis();
+        store_observation(*observation);
+        let command =
+            embassy_time::with_timeout(crate::METER_READ_PERIOD, crate::PD_COMMANDS.receive())
+                .await;
+        if command == Ok(PdCommand::Restart) {
+            break;
+        }
+    }
+    while pd_trial::restart_unheard(observation, report).await {
+        store_observation(*observation);
+        Timer::after(crate::METER_READ_PERIOD).await;
+    }
+    store_observation(*observation);
 }
 
 /// Passthrough: release the FUSB302 Rd once; no GoodCRC or TX. Returns the

@@ -90,6 +90,13 @@ This is **kws-x1-standalone-rs**.
   direction indicator.
 - D+, D-, CC1 and CC2 line voltages.
 - USB PD sink: fixed profiles up to 20 V and PPS, chosen on the meter.
+- Quick Charge trigger (work in progress): 5, 9, 12 or 20 V over D+/D−, or
+  Quick Charge 3.0 0.2 V steps from 3.6 V, checked against VBUS, and a probe
+  that reports Quick Charge 2.0 or 3.0 and Class A or B. On USB-C the meter
+  switches the charger out of PD for it by itself.
+- A full charger scan (hold OK on the charger page): Quick Charge, the PD
+  offer, the EPR offer and, with the plug in the charger, the 5 A offer, on
+  one page.
 - Everything the charger says about itself: its full offer (EPR included),
   identity, ratings and status.
 - Cable e-marker reading, and a 5 A cable test for the meter's plug.
@@ -101,8 +108,8 @@ This is **kws-x1-standalone-rs**.
 
 What this firmware does **not** do, for now:
 
-- **USB PD only.** No other fast-charging protocol is detected or triggered:
-  no Qualcomm Quick Charge, Samsung AFC, Huawei FCP/SCP, Apple 2.4 A, BC 1.2
+- **USB PD and Quick Charge only.** No other fast-charging protocol is
+  detected or triggered: no Samsung AFC, Huawei FCP/SCP, Apple 2.4 A, BC 1.2
   or anything else on the D+/D- lines. Without PD the meter only reads the
   Type-C current advertisement (`USB`, `TYPE-C` 1.5 A / 3 A).
 - **No EPR.** The meter can ask for and list the EPR offer (28 V and up), but
@@ -110,6 +117,11 @@ What this firmware does **not** do, for now:
   within the standard range: fixed profiles up to 20 V and PPS.
 - **No AVS requests.** AVS and EPR AVS ranges are listed when the charger
   offers them, but cannot be requested.
+- **Quick Charge partly tested.** Tested on one Quick Charge 3.0 Class A
+  charger, on a USB-A port and on USB-C switched out of PD: fixed 9 and
+  12 V, the 0.2 V steps and the probe. 20 V and Class B chargers are
+  untested. The trigger drives D+/D− only on the Quick Charge page and
+  releases them on leaving it.
 - **Sink only.** The meter never acts as a source: no power role swap, no
   data role swap, no VCONN swap, no Cable_Reset.
 - **Passthrough only listens.** It cannot change or inject anything between
@@ -142,7 +154,7 @@ What this firmware does **not** do, for now:
 | Button | Short press | Hold |
 | ------ | ----------- | ---- |
 | Left / Right | previous / next page; on a framed value, change it; while scrolling, scroll | repeats on PPS values and while scrolling |
-| OK | select, confirm or start scrolling (see each page) | 0.5 s: page action (cable query, charger offer, 5 A cable test) |
+| OK | select, confirm or start scrolling (see each page) | 0.5 s: page action (cable query, full charger scan) |
 | Back | cancel the edit or scroll; elsewhere back to the overview; on the overview, open the settings | – |
 
 The header shows the page title and its position, for example `3/7`.
@@ -169,9 +181,9 @@ meter in again.
 
 - **Plug straight into a charger** (sink). The charger shows Rp on both CC
   pins, so the meter knows nothing is in between. The charger caps the offer
-  at 3 A because no cable vouches for more; the charger page can run the
-  [5 A cable test](#full-charger-offer-and-5-a-without-a-cable) to see the full
-  offer.
+  at 3 A because no cable vouches for more; the charger page's full scan ends
+  in the [5 A cable test](#full-charger-offer-and-5-a-without-a-cable) to see
+  the full offer.
 - **Through a cable** (sink). The charger on either side, through a cable. A
   5 A cable answers the charger itself, so the offer is already the full one.
   The cable page can read the cable's e-marker.
@@ -192,8 +204,9 @@ point the way it flows (they follow the screen rotation).
 | **Lines** | D+, D-, CC1 and CC2 voltages | |
 | **PD Profiles** | the charger's fixed profiles, `ACTIVE` on the one in force | OK, Left/Right to choose, OK requests it, Back cancels |
 | **PPS** | the charger's PPS ranges, the set voltage and current limit, the live output; `ACTIVE` or `NOT APPLIED` | OK, Left/Right voltage (20 mV, 100 mV held), OK, current limit (50 mA, 250 mA held), OK requests |
+| **Quick Charge** | D+, D− and VBUS while triggering, the request and whether VBUS followed, or the detected version and class | OK starts at 5 V (under a PD contract it first switches the charger out of PD); OK, Left/Right to choose a voltage, `QC3` steps or `DETECT`, OK requests it; Left/Right move a `QC3` voltage by 0.2 V; Back stops, then switches back to PD |
 | **PD Session** | sink: session state, CC levels and the charger's offer as received. Passthrough: CC pin, Rp level and the latest PD messages | OK to scroll |
-| **Charger** | the offer (`*` = needs a 5 A cable), the charger's identity, maker and peak ratings, power status and source info | OK to scroll; hold OK: ask for the EPR offer, or start the 5 A cable test with the plug in the charger |
+| **Charger** | the offer (`*` = needs a 5 A cable), the charger's identity, maker and peak ratings, power status and source info, the Quick Charge detection result | OK to scroll; hold OK: full scan (Quick Charge, PD, EPR, and the 5 A cable test with the plug in the charger) |
 | **Cable** | the cable's e-marker: identity, ratings, status and modes | OK to scroll; hold OK at fixed 5 V to read the e-marker |
 | **System** | I2C bus state and counters, frame and button timing, stack use, `LAST RESET:` cause | OK to scroll |
 | **Settings** | `BRIGHTNESS` (5 levels, 60% at first), `ROTATION` (`AUTO` follows the tilt sensor, `NORMAL`, `FLIPPED`), `RESET MAX` | Left/Right row, OK change it, Left/Right value, OK or Back done |
@@ -209,9 +222,9 @@ unknown state. A port without PD does not close it.
 ### What is saved
 
 Brightness and rotation are saved to flash once you finish changing them, and
-come back at the next power-up, as does the one-boot 5 A cable test flag. The
-chosen profile is not: every boot starts at 5 V. `MAX` values live until reset
-or power-off.
+come back at the next power-up, as does the mode the meter restarts the
+charger into (full scan, cable test, Quick Charge). The chosen profile is not:
+every boot starts at 5 V. `MAX` values live until reset or power-off.
 
 Saving appends an 8-byte record to the meter's original settings area and
 never erases flash. Each 8 KiB sector holds 1023 records and up to six are
@@ -230,7 +243,7 @@ register or message contents, shown for diagnosis.
 
 <img src="pictures/overview_screen.webp" width="360" alt="Overview screen">
 
-This is the **Overview** screen (`01/08`), the one the meter starts on.
+This is the **Overview** screen (`01/09`), the one the meter starts on.
 
 - **`VOLTAGE`**: bus voltage, in volts. `--.--` until the first reading, or
   while the sensor bus is closed.
@@ -255,7 +268,7 @@ This is the **Overview** screen (`01/08`), the one the meter starts on.
 
 #### 2. Lines
 
-This is the **Lines** screen (`02/08`): the voltages on the USB data and
+This is the **Lines** screen (`02/09`): the voltages on the USB data and
 configuration lines, read by the MCU's own ADC against its internal
 reference, independently of the bus sensor and the PD controller.
 
@@ -275,7 +288,7 @@ The lines are sampled only while this screen is shown.
 
 <img src="pictures/pd_profiles_screen.webp" width="360" alt="PD Profiles screen">
 
-This is the **PD Profiles** screen (`03/08`): the charger's fixed profiles.
+This is the **PD Profiles** screen (`03/09`): the charger's fixed profiles.
 
 - **Each row**: voltage, the charger's maximum current at it, and that power
   in watts. The voltage is coloured from cool (low) to warm (high).
@@ -291,7 +304,7 @@ This is the **PD Profiles** screen (`03/08`): the charger's fixed profiles.
 
 <img src="pictures/pps_screen.webp" width="360" alt="PPS screen">
 
-This is the **PPS** screen (`04/08`): programmable voltage.
+This is the **PPS** screen (`04/09`): programmable voltage.
 
 - **Range row**: each PPS range the charger offers, for example
   `3.30-21.00V  up to 5.00A`.
@@ -306,11 +319,53 @@ This is the **PPS** screen (`04/08`): programmable voltage.
 - **Hint row**: `OK adjust PPS    < > pages`, `< > volts    OK next: current`,
   `< > amps    OK request`, or `waiting for the charger    < > pages`.
 
-#### 5. PD Session
+#### 5. Quick Charge
+
+This is the **Quick Charge** screen (`05/09`): a Quick Charge trigger.
+OK holds D+ at 0.6 V. Once the charger releases D−, the meter requests 5 V.
+OK again opens the choice (5, 9, 12 or 20 V, `QC3` or `DETECT`), and OK
+requests it. `QC3` starts Quick Charge 3.0 continuous mode at 5 V; Left/Right
+then move the output by 0.2 V, from 3.6 V up to 12 V (20 V once `DETECT`
+found a Class B charger), one step per 100 ms scan. A Quick Charge 2.0
+charger ignores the steps: VBUS stays put. Back, or leaving the screen,
+releases D+/D− and the charger returns to 5 V.
+
+Quick Charge never confirms a request, so the meter watches VBUS: a request
+whose output has not moved halfway after 610 ms (the charger's 60 ms filter
+plus PD's 550 ms supply transition limit) shows `IGNORED`.
+
+`DETECT` requests Quick Charge 3.0 continuous mode and three 200 mV steps up
+from 5 V, then 5 V again (a charger ignored fixed requests sent straight
+from continuous mode), 9, 12 and 20 V, and ends at 5 V. The checked requests
+all raise the output, so a slowly falling VBUS cannot hide the steps. It
+shows the result: `QC3 B`, `QC2 A`, `5V ONLY` and so on (Class A ends at
+12 V, Class B adds 20 V). Below it are the fixed voltages the charger took
+and, for Quick Charge 3.0, its step range: `5 9 12V, 3.6-12V by 0.2V`. **It
+puts up to 20 V on the output port**, so disconnect anything that cannot take
+that first.
+
+A USB-C charger with a PD contract ignores Quick Charge, so under one OK
+first switches it: the meter restarts the charger with a Hard Reset and boots
+with PD silent (Rd held, nothing acknowledged), so the charger falls back to
+non-PD 5 V and takes Quick Charge. The charger may restart one or two more
+times before it settles. Back on the stopped screen switches back the same
+way, into PD. The meter stops saving the switch once the charger had 10 s to
+settle, so the next plug-in starts with PD again.
+
+- **`D+` / `D-`**: the lines as measured, to check the driven levels.
+- **`VBUS`**: the live bus voltage.
+- **Request**: `OFF`, `WAIT` (handshake), `SETTING` (waiting for VBUS),
+  `ACTIVE` or `IGNORED` with the voltage, `QC3` with the voltage the steps
+  set, `DETECT` while probing, `DETECTED` with the result, `CHOOSE` while
+  choosing, or `FAIL`: `NO DCP`
+  (D+ and D− are not shorted, so this is not a charging port) or `NO QC`
+  (D− never went low, so the charger has no Quick Charge).
+
+#### 6. PD Session
 
 <img src="pictures/pd_session_screen.webp" width="360" alt="PD Session screen">
 
-This is the **PD Session** screen (`05/08`): the meter's own PD negotiation.
+This is the **PD Session** screen (`06/09`): the meter's own PD negotiation.
 It scrolls (OK) through three sections.
 
 **Session section**
@@ -409,13 +464,14 @@ It scrolls (OK) through three sections.
 | `002B` | session ended without a contract |
 | `002C` | Hard Reset sent |
 
-#### 6. Charger
+#### 7. Charger
 
 <img src="pictures/charger_screen.webp" width="360" alt="Charger screen">
 
-This is the **Charger** screen (`06/08`): what the charger says about
-itself. These are the charger's claims, not measurements. It scrolls (OK)
-through four parts; a long offer takes two screens.
+This is the **Charger** screen (`07/09`): what the charger says about
+itself, then what Quick Charge detection found. The PD parts are the
+charger's claims, not measurements, then the Quick Charge result. It
+scrolls (OK) through the parts; a long offer takes two screens.
 
 **`CAPABILITIES`**
 
@@ -429,14 +485,30 @@ through four parts; a long offer takes two screens.
 - **`*`** after a row: offered at that current only with a 5 A cable. Then
   the note `* ONLY WITH 5A CABLE`.
 - **Notes**:
-  - `HOLD OK FOR ALL`: hold OK to ask for the EPR (28 V and up) objects.
-  - `ASKING CHARGER`, `NO ANSWER, HOLD OK AGAIN`, `LINE BUSY, HOLD OK AGAIN`.
-  - `HOLD OK: 5A CABLE TEST` / `(METER RESTARTS FOR IT)`: the plug is in the
-    charger.
+  - `HOLD OK: FULL SCAN` / `QC AND EPR; RESTARTS` (`QC, EPR, 5A; RESTARTS`
+    with the plug in the charger): hold OK for the full scan.
+  - After the scan, the EPR (28 V and up) request: `ASKING CHARGER`,
+    `NO ANSWER, HOLD OK AGAIN`, `LINE BUSY, HOLD OK AGAIN`, or in the 5 A
+    cable test `HOLD OK FOR ALL`.
   - `BACK ENDS 5A CABLE TEST`: the test is running. The heading then also
     names the reset cause (`POWER` is expected).
   - `5A TEST DID NOT START` / `HOLD OK TO TRY AGAIN`.
   - `NO PD SESSION`, `NO OFFER YET`.
+
+**`QUICK CHARGE 2.0`** and **`QUICK CHARGE 3.0`**
+
+Quick Charge reports nothing itself, so these show the result of the full
+scan or the last `DETECT`, measured on VBUS:
+
+- **2.0**: the class (`CLASS A, UP TO 12V` or `CLASS B, UP TO 20V`), then
+  `YES` or `NO` for each fixed voltage, `5V` to `20V`. `NOT SUPPORTED`
+  when the charger took no 9 V.
+- **3.0**: `SUPPORTED` with `RANGE 3.6-12V` (up to 20 V for Class B) and
+  `STEP 0.2V`, or `NOT SUPPORTED` / `NO 0.2V STEPS`.
+
+A failed handshake shows one `QUICK CHARGE` section with `NOT A CHARGING
+PORT` or `NO QUICK CHARGE`. Before any result it shows `NOT SCANNED YET`
+with `HOLD OK: FULL SCAN`.
 
 **`IDENTITY`**
 
@@ -474,11 +546,25 @@ through four parts; a long offer takes two screens.
 **Answer words** used in these sections: `OK`, `WAITING`, `NOT SUPPORTED`,
 `NO REPLY`, `BLOCKED`, `RESET`, `PD2 N/A` (not available under PD 2.0).
 
-#### 7. Cable
+**Full scan.** Hold OK on this screen (`HOLD OK: FULL SCAN`). A charger
+ignores Quick Charge under a PD contract, so the meter:
+
+1. Restarts the charger with a Hard Reset into a boot with PD silent, and
+   runs `DETECT` on the Quick Charge screen (it may restart once or twice
+   more first; it carries on). Back abandons the scan.
+2. Saves the result, restarts the charger into PD, asks for the EPR offer by
+   itself, and opens this screen with everything: the offer, the EPR offer,
+   the Quick Charge sections and the charger's answers. With the plug in the
+   charger that boot is the
+   [5 A cable test](#full-charger-offer-and-5-a-without-a-cable).
+
+The output goes up to 20 V during the scan.
+
+#### 8. Cable
 
 <img src="pictures/cable_screen.webp" width="360" alt="Cable screen">
 
-This is the **Cable** screen (`07/08`): the cable's e-marker. Hold OK at
+This is the **Cable** screen (`08/09`): the cable's e-marker. Hold OK at
 fixed 5 V to read it. It scrolls (OK) through several sections.
 
 **Before or instead of a reading**
@@ -521,11 +607,11 @@ GET_STATUS`, `SECOND PLUG NO DATA`).
 **Status words**: `NOT QUERIED`, `ACK`, `NAK`, `BUSY NO RETRY`,
 `TIMEOUT NO RETRY`, `LIST INCOMPLETE`, `NOT SUPPORTED`.
 
-#### 8. System
+#### 9. System
 
 <img src="pictures/system_screen.webp" width="360" alt="System screen">
 
-This is the **System** screen (`08/08`): the meter's own health.
+This is the **System** screen (`09/09`): the meter's own health.
 
 **Sensor bus**
 
@@ -625,15 +711,15 @@ that question itself, as the source firmware did. It does so only in the
 **5 A cable test**. Otherwise it stays silent, and the charger offers what it
 would through any 3 A cable.
 
-**Running the test.** On the charger page, hold OK (the page says
-`HOLD OK: 5A CABLE TEST`). The charger asks the cable question only right
-after plug-in, so the meter restarts the charger to be asked again:
+**Running the test.** It is the last part of the full scan: on the charger
+page, hold OK (`HOLD OK: FULL SCAN`). The charger asks the cable question only
+right after plug-in, so the meter restarts the charger to be asked again:
 
-1. It saves a one-boot "cable test" flag with the settings, and ends its PD
-   session at its idle contract.
+1. After the scan's Quick Charge part, it saves a one-boot "cable test" mode
+   with the settings.
 2. It sends a Hard Reset. The charger removes VBUS and VCONN, which powers the
    meter off, then turns them back on and starts over as at plug-in.
-3. That boot reads and clears the flag. It opens the charger page, answers the
+3. That boot reads and clears the mode. It opens the charger page, answers the
    cable question as a 5 A cable, and asks for the EPR list by itself.
 
 During the test the meter stays on the charger page at the boot's 5 V: it
@@ -643,10 +729,10 @@ session.
 
 During the test the `CAPABILITIES` heading also names how that boot started:
 `POWER` alone is the expected power cycle. The test runs only on a boot that
-follows a power-up, after its one-boot flag was cleared and read back. A boot
+follows a power-up, after its one-boot mode was cleared and read back. A boot
 after any reset without power loss (for example one during that clear), or a
 failed clear, runs normally on the charger page with `5A TEST DID NOT START`;
-the flag is then cleared once the meter is up, and holding OK tries again. So
+the mode is then cleared once the meter is up, and holding OK tries again. So
 no reset can repeat the test.
 
 **Back** on the charger page during the test restarts the same way into normal

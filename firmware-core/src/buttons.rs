@@ -6,7 +6,9 @@
 //! the device.
 #![allow(dead_code)]
 
-use crate::settings::{Item, Settings};
+use crate::settings::{Item, NextBoot, QcFindings, Settings};
+use qc_protocol::qc2::Voltage;
+use qc_protocol::qc3::{MIN_MV, STEP_MV};
 
 pub const COUNT: usize = 4;
 /// Pin identifiers, matching the original configuration.
@@ -90,6 +92,8 @@ pub enum Page {
     Fixed { choosing: bool },
     /// PPS voltage and current selector.
     Pps(PpsFocus),
+    /// Quick Charge 2.0 and 3.0 trigger.
+    Qc(QcFocus),
     /// Opened by Back on the overview.
     Settings(SettingsFocus),
     /// A detail list shown from row `top`; while `scrolling` (OK), Left/Right
@@ -109,6 +113,70 @@ pub enum PpsFocus {
     Browse,
     Voltage,
     Current,
+}
+
+/// The Quick Charge page: OK starts the trigger at 5 V, OK again opens a
+/// voltage choice that a third OK requests; Back closes the choice, then
+/// stops. With Quick Charge 3.0 steps requested, Left/Right move the target.
+/// Leaving the page stops the trigger too. Under a PD contract the charger
+/// ignores Quick Charge, so OK first restarts it into a silent PD boot
+/// (`NextBoot::QuickCharge`); Back on the stopped page there restarts it into
+/// PD again.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum QcFocus {
+    /// D+/D− undriven.
+    #[default]
+    Off,
+    /// This is asked of the charger.
+    Requested(QcTarget),
+    /// Left/Right choose `preview` while `request` stays in force.
+    Choosing {
+        request: QcTarget,
+        preview: QcTarget,
+    },
+}
+
+/// What the Quick Charge page asks of the charger.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QcTarget {
+    Volts(Voltage),
+    /// Quick Charge 3.0 continuous mode, stepping toward this output in mV.
+    Steps(u16),
+    /// Try each request in turn and report which the charger followed.
+    Detect,
+}
+
+impl QcTarget {
+    /// The choices, in Left/Right order. Steps start where continuous mode
+    /// is entered from, 5 V.
+    const ALL: [Self; 6] = [
+        Self::Volts(Voltage::V5),
+        Self::Volts(Voltage::V9),
+        Self::Volts(Voltage::V12),
+        Self::Volts(Voltage::V20),
+        Self::Steps(Voltage::V5.millivolts()),
+        Self::Detect,
+    ];
+
+    /// Position in [`Self::ALL`]; any steps target is the steps choice.
+    fn index(self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|choice| {
+                *choice == self || matches!((choice, self), (Self::Steps(_), Self::Steps(_)))
+            })
+            .unwrap_or(0)
+    }
+}
+
+impl QcFocus {
+    /// What is asked of the charger; `None` leaves D+/D− undriven.
+    pub const fn request(self) -> Option<QcTarget> {
+        match self {
+            Self::Off => None,
+            Self::Requested(request) | Self::Choosing { request, .. } => Some(request),
+        }
+    }
 }
 
 /// The settings page cursor, and whether its value is being changed.
@@ -153,18 +221,19 @@ pub enum Detail {
 }
 
 /// The pages as Left/Right enter them.
-const PAGES: [Page; 8] = [
+const PAGES: [Page; 9] = [
     Page::Overview,
     Page::Lines,
     Page::Fixed { choosing: false },
     Page::Pps(PpsFocus::Browse),
+    Page::Qc(QcFocus::Off),
     Page::detail(Detail::Pd),
     Page::detail(Detail::Charger),
     Page::detail(Detail::Cable),
     Page::detail(Detail::System),
 ];
 /// Index of the first detail page in `PAGES`.
-const FIRST_DETAIL: usize = 4;
+const FIRST_DETAIL: usize = 5;
 
 /// `items[index ± 1]`, wrapping.
 fn cycle<T: Copy>(items: &[T], index: usize, forward: bool) -> T {
@@ -237,6 +306,7 @@ impl Page {
             Self::Lines => Some(1),
             Self::Fixed { .. } => Some(2),
             Self::Pps(_) => Some(3),
+            Self::Qc(_) => Some(4),
             Self::Detail { page, .. } => Some(FIRST_DETAIL + page as usize),
             Self::Settings(_) => None,
         }
@@ -260,6 +330,7 @@ impl Page {
             self,
             Self::Fixed { choosing: true }
                 | Self::Pps(PpsFocus::Voltage | PpsFocus::Current)
+                | Self::Qc(QcFocus::Choosing { .. })
                 | Self::Settings(SettingsFocus::Brightness | SettingsFocus::Rotation)
                 | Self::Detail {
                     scrolling: true,
@@ -286,8 +357,8 @@ pub enum PdCommand {
     QueryCable,
     /// Ask an EPR capable charger for its EPR offer (informational only).
     QueryEpr,
-    /// Restart the meter through a charger power cycle: into the 5 A cable
-    /// test when the saved settings ask for it, else back to normal.
+    /// Restart the meter through a charger power cycle, into the saved
+    /// `Settings::next_boot`.
     Restart,
 }
 
@@ -327,6 +398,12 @@ pub struct Navigation {
     /// 5 A cable test.
     plug_in_charger: bool,
     cable_test: bool,
+    /// This boot keeps PD silent (`NextBoot::silent`): no session takes PD
+    /// commands but the restart.
+    silent: bool,
+    /// A probe this boot found the charger takes 20 V (Class B), so steps
+    /// may go up to it; Class A stops at 12 V (NCP4371 Table 4).
+    qc_class_b: bool,
     /// Last row the shown detail list can start at, as the renderer laid it
     /// out.
     list_end: u16,
@@ -360,8 +437,8 @@ impl Navigation {
     }
 
     /// The meter's plug sits in the charger (`plug_in_charger`), and this
-    /// boot runs the 5 A cable test (`testing`). Then a long OK on the
-    /// charger page restarts into the test, and Back there ends it.
+    /// boot runs the 5 A cable test (`testing`). Then the full scan (a long
+    /// OK on the charger page) ends in the test, and Back there ends it.
     /// The test keeps the charger page open (`update`).
     pub fn set_cable_test(&mut self, plug_in_charger: bool, testing: bool) {
         self.plug_in_charger = plug_in_charger;
@@ -369,6 +446,52 @@ impl Navigation {
         if testing && !self.input.page.is_charger() {
             self.input.page = Page::detail(Detail::Charger);
         }
+    }
+
+    /// Whether this boot keeps PD silent for Quick Charge, and whether the
+    /// charger has had time to give PD up (`settled`). Quick Charge mode is
+    /// saved only to outlast the charger's own restarts until then, so a
+    /// later plug-in starts with PD again.
+    pub fn set_silent(&mut self, silent: bool, settled: bool) {
+        self.silent = silent;
+        if settled && self.input.settings.next_boot == NextBoot::QuickCharge {
+            self.input.settings.next_boot = NextBoot::Normal;
+        }
+    }
+
+    /// A probe found the charger's class: Class B (`class_b`) raises the
+    /// steps' ceiling from 12 V to 20 V.
+    pub fn set_qc_class_b(&mut self, class_b: bool) {
+        self.qc_class_b = class_b;
+    }
+
+    /// This boot runs the full scan's Quick Charge part, which keeps the
+    /// probe on screen until it ends; Back abandons the scan.
+    fn scanning(&self) -> bool {
+        self.silent
+            && matches!(
+                self.input.settings.next_boot,
+                NextBoot::ScanQuickCharge { .. }
+            )
+    }
+
+    /// The scan's Quick Charge part ended with `findings`: keep them for its
+    /// PD part and restart into that.
+    pub fn finish_scan(&mut self, findings: QcFindings) -> Option<PdCommand> {
+        if !self.scanning() {
+            return None;
+        }
+        let settings = &mut self.input.settings;
+        let NextBoot::ScanQuickCharge { then_cable_test } = settings.next_boot else {
+            return None;
+        };
+        settings.qc_findings = Some(findings);
+        settings.next_boot = if then_cable_test {
+            NextBoot::CableTest
+        } else {
+            NextBoot::ScanPd
+        };
+        Some(PdCommand::Restart)
     }
 
     /// The last row the shown detail list can start at; a list that got
@@ -423,21 +546,10 @@ impl Navigation {
         if after & OK != 0 {
             self.ok_held += 1;
             if self.ok_held == LONG_OK_SAMPLES
-                && let Page::Detail { page, .. } = self.input.page
+                && let Some(query) = self.long_ok()
             {
-                let query = match page {
-                    Detail::Cable => Some(PdCommand::QueryCable),
-                    Detail::Charger if self.plug_in_charger && !self.cable_test => {
-                        self.input.settings.cable_test = true;
-                        Some(PdCommand::Restart)
-                    }
-                    Detail::Charger => Some(PdCommand::QueryEpr),
-                    _ => None,
-                };
-                if query.is_some() {
-                    self.ok_long = true;
-                    command = query;
-                }
+                self.ok_long = true;
+                command = query;
             }
         } else {
             if falling & OK != 0 && !self.ok_long {
@@ -447,7 +559,12 @@ impl Navigation {
             self.ok_long = false;
         }
         if rising & BACK != 0 {
+            let leave_silent =
+                self.scanning() || (self.silent && self.input.page == Page::Qc(QcFocus::Off));
             if self.cable_test && self.input.page.is_charger() {
+                command = Some(PdCommand::Restart);
+            } else if leave_silent {
+                self.input.settings.next_boot = NextBoot::Normal;
                 command = Some(PdCommand::Restart);
             } else {
                 self.back();
@@ -462,7 +579,41 @@ impl Navigation {
             }
             command = command.filter(|c| matches!(c, PdCommand::QueryEpr | PdCommand::Restart));
         }
+        // The scan's Quick Charge part keeps its probe on screen.
+        if self.scanning() {
+            self.input.page = Page::Qc(QcFocus::Requested(QcTarget::Detect));
+        }
+        if self.silent {
+            command = command.filter(|c| *c == PdCommand::Restart);
+        }
         (self.input, command)
+    }
+
+    /// What a long OK does here: `None` when the page has no long OK, else
+    /// the PD command it sends, if any.
+    fn long_ok(&mut self) -> Option<Option<PdCommand>> {
+        let Page::Detail { page, .. } = self.input.page else {
+            return None;
+        };
+        match page {
+            Detail::Cable => Some(Some(PdCommand::QueryCable)),
+            Detail::Charger if self.cable_test => Some(Some(PdCommand::QueryEpr)),
+            // The full scan: Quick Charge first, with PD silent (a charger
+            // ignores it under a PD contract), then PD again with its EPR
+            // offer, ending here.
+            Detail::Charger if self.selectable => {
+                self.input.settings.next_boot = NextBoot::ScanQuickCharge {
+                    then_cable_test: self.plug_in_charger,
+                };
+                Some(Some(PdCommand::Restart))
+            }
+            // Without PD, Quick Charge answers directly.
+            Detail::Charger => {
+                self.input.page = Page::Qc(QcFocus::Requested(QcTarget::Detect));
+                Some(None)
+            }
+            _ => None,
+        }
     }
 
     fn back(&mut self) {
@@ -471,6 +622,8 @@ impl Navigation {
             Page::Overview => Page::Settings(SettingsFocus::default()),
             Page::Fixed { choosing: true } => Page::Fixed { choosing: false },
             Page::Pps(PpsFocus::Voltage | PpsFocus::Current) => Page::Pps(PpsFocus::Browse),
+            Page::Qc(QcFocus::Choosing { request, .. }) => Page::Qc(QcFocus::Requested(request)),
+            Page::Qc(QcFocus::Requested(_)) => Page::Qc(QcFocus::Off),
             Page::Settings(focus @ (SettingsFocus::Brightness | SettingsFocus::Rotation)) => {
                 Page::Settings(SettingsFocus::Row(focus.row()))
             }
@@ -510,6 +663,21 @@ impl Navigation {
             Page::Settings(SettingsFocus::Brightness) => input.settings.step_brightness(forward),
             Page::Settings(SettingsFocus::Rotation) => input.settings.step_rotation(forward),
             Page::Fixed { choosing: true } => return Some(PdCommand::StepFixed(sign as i8)),
+            Page::Qc(QcFocus::Choosing { preview, .. }) => {
+                *preview = cycle(&QcTarget::ALL, preview.index(), forward);
+            }
+            Page::Qc(QcFocus::Requested(QcTarget::Steps(mv))) => {
+                let max = if self.qc_class_b {
+                    Voltage::V20
+                } else {
+                    Voltage::V12
+                };
+                *mv = if forward {
+                    mv.saturating_add(STEP_MV).min(max.millivolts())
+                } else {
+                    mv.saturating_sub(STEP_MV).max(MIN_MV)
+                };
+            }
             Page::Pps(PpsFocus::Voltage) => {
                 let step = if repeat { PPS_MV_REPEAT } else { PPS_MV_STEP };
                 return Some(PdCommand::PpsVoltage(sign * step));
@@ -567,6 +735,22 @@ impl Navigation {
                 None,
             ),
             Page::Settings(focus) => (Page::Settings(SettingsFocus::Row(focus.row())), None),
+            // A PD contract hides Quick Charge: restart into a silent boot.
+            page @ Page::Qc(QcFocus::Off) if self.selectable => {
+                input.settings.next_boot = NextBoot::QuickCharge;
+                (page, Some(PdCommand::Restart))
+            }
+            Page::Qc(focus) => (
+                Page::Qc(match focus {
+                    QcFocus::Off => QcFocus::Requested(QcTarget::Volts(Voltage::V5)),
+                    QcFocus::Requested(request) => QcFocus::Choosing {
+                        request,
+                        preview: request,
+                    },
+                    QcFocus::Choosing { preview, .. } => QcFocus::Requested(preview),
+                }),
+                None,
+            ),
             page @ (Page::Overview | Page::Lines) => (page, None),
         };
         input.page = page;

@@ -189,7 +189,7 @@ const EPR_OBJECTS: usize = firmware_core::pd_spr::EPR_OBJECTS;
 
 /// Sections the capability list spans: a heading, up to 11 objects (the
 /// EPR answer, section 6.5.15) and two note rows.
-const CAPABILITY_SECTIONS: u32 = 2;
+pub const CAPABILITY_SECTIONS: u32 = 2;
 /// Where the reset cause follows the 12-character `CAPABILITIES` heading.
 const TEST_RESET_COLUMN: usize = 13;
 
@@ -242,13 +242,15 @@ fn capability_rows(observation: Observation) -> [[u8; 24]; 16] {
         put(&mut rows[next], b"* ONLY WITH 5A CABLE");
         next += 1;
     }
-    // With the meter's plug in the charger, a long OK first restarts into
-    // the 5 A cable test (`PdCommand::Restart`); there it asks for EPR.
+    // A long OK runs the full scan (`NextBoot::ScanQuickCharge`): Quick
+    // Charge, then this list again with the EPR offer and, with the meter's
+    // plug in the charger, as the 5 A cable test. Its PD part lists it all.
     let plug_in_charger = observation.listen.is_some();
+    let scanned = observation.cable_test || observation.scan_pd;
     let note: &[u8] = if plug_in_charger && observation.cable_test_skipped {
         b"5A TEST DID NOT START"
-    } else if plug_in_charger && !observation.cable_test {
-        b"HOLD OK: 5A CABLE TEST"
+    } else if !scanned {
+        b"HOLD OK: FULL SCAN"
     } else if !epr_capable(live[0].raw) || spr.peer_revision != Some(3) {
         b""
     } else {
@@ -265,8 +267,9 @@ fn capability_rows(observation: Observation) -> [[u8; 24]; 16] {
     let follow: &[u8] = match (plug_in_charger, observation.cable_test) {
         (_, true) => b"BACK ENDS 5A CABLE TEST",
         (true, false) if observation.cable_test_skipped => b"HOLD OK TO TRY AGAIN",
-        (true, false) => b"(METER RESTARTS FOR IT)",
-        (false, false) => b"",
+        _ if scanned => b"",
+        (true, false) => b"QC, EPR, 5A; RESTARTS",
+        (false, false) => b"QC AND EPR; RESTARTS",
     };
     put(&mut rows[next + usize::from(!note.is_empty())], follow);
     rows

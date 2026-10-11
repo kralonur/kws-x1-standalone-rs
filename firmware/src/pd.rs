@@ -3,7 +3,7 @@ mod cable;
 mod partner;
 
 pub use cable::{cable_lines, cable_sections, cable_svid_index, control_cable_selection};
-pub use partner::{partner_lines, partner_sections};
+pub use partner::{CAPABILITY_SECTIONS, partner_lines, partner_sections};
 
 use firmware_core::pd_cable::CableStatus;
 use firmware_core::pd_sniff::Supply;
@@ -31,6 +31,15 @@ pub struct Observation {
     /// The saved settings asked for the test, but this boot did not follow a
     /// power-up or clearing that request failed, so it runs normally (`main`).
     pub cable_test_skipped: bool,
+    /// This boot keeps PD silent for Quick Charge (`NextBoot::silent`): Rd
+    /// held, nothing acknowledged or sent.
+    pub quick_charge: bool,
+    /// A silent boot outlasted the source's PD attempts
+    /// (`pd_task::SILENT_SETTLED`), so it no longer restarts the meter.
+    pub silent_settled: bool,
+    /// This boot is the full scan's PD part (`NextBoot::ScanPd`), which also
+    /// asks for the EPR offer.
+    pub scan_pd: bool,
     /// The boot's reset cause flags, shown during the test, whose page is
     /// the only one open.
     pub reset_flags: u16,
@@ -53,6 +62,9 @@ impl Observation {
             pc13_high: None,
             cable_test: false,
             cable_test_skipped: false,
+            quick_charge: false,
+            silent_settled: false,
+            scan_pd: false,
             reset_flags: 0,
             sniff: None,
             last_boot: None,
@@ -370,6 +382,7 @@ fn phase_line(row: &mut [u8; 24], observation: Observation) {
     match observation.phase {
         Phase::Waiting => put(row, b"WAIT CC TEST"),
         Phase::Passive => put(row, b"PASSIVE TX OFF"),
+        Phase::Hold if observation.quick_charge => put(row, b"QUICK CHARGE PD OFF"),
         Phase::Hold => put(row, b"HOLD RD ON TX OFF"),
         Phase::Skipped => put(row, b"SKIP BUS LATCHED"),
         Phase::Measuring => put(row, b"MEAS RX POWER"),
