@@ -35,8 +35,9 @@ pub enum NextBoot {
     CableTest,
     /// PD silent: the sink holds Rd but never acknowledges the charger, so a
     /// USB-C charger falls back to its non-PD mode, where it takes Quick
-    /// Charge requests. Kept until the Quick Charge page leaves it.
-    QuickCharge,
+    /// Charge requests. Kept until the Quick Charge page leaves it; `steps`
+    /// reopens the Quick Charge 3.0 tab rather than 2.0.
+    QuickCharge { steps: bool },
     /// The full charger scan's first part: PD silent, the Quick Charge probe
     /// runs. Kept until it ends (a charger may restart the meter meanwhile),
     /// then `then_cable_test` picks the PD part.
@@ -47,11 +48,12 @@ pub enum NextBoot {
 }
 
 impl NextBoot {
-    /// Record values, by position.
-    const ALL: [Self; 6] = [
+    /// Record values, by position; new values go last, so older records
+    /// still decode.
+    const ALL: [Self; 7] = [
         Self::Normal,
         Self::CableTest,
-        Self::QuickCharge,
+        Self::QuickCharge { steps: false },
         Self::ScanQuickCharge {
             then_cable_test: false,
         },
@@ -59,11 +61,15 @@ impl NextBoot {
             then_cable_test: true,
         },
         Self::ScanPd,
+        Self::QuickCharge { steps: true },
     ];
 
     /// PD stays silent in this boot's sink session.
     pub fn silent(self) -> bool {
-        matches!(self, Self::QuickCharge | Self::ScanQuickCharge { .. })
+        matches!(
+            self,
+            Self::QuickCharge { .. } | Self::ScanQuickCharge { .. }
+        )
     }
 
     /// The mode lasts one boot, which clears it before any task starts.

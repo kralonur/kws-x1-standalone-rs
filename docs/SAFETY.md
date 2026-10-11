@@ -52,7 +52,7 @@ sink the same way after the CC check: verified baseline, Rd on, automatic
 GoodCRC off, nothing transmitted. A source whose Source_Capabilities are never
 acknowledged stops PD after nCapsCount tries and stays at 5 V, where a USB-C
 charger may take Quick Charge requests on D+/D−. Under a PD contract the
-Quick Charge page's OK, and the charger page's long OK (the full scan),
+Quick Charge pages' OK, and the charger page's long OK (the full scan),
 enter one through the cable test's Hard Reset restart. After that Hard Reset
 a source that hears nothing within NoResponseTimer (4.5-5.5 s) may send up to
 nHardResetCount (2) more, then recover by detaching (USB PD R3.2 source
@@ -77,8 +77,11 @@ the carried result once.
 
 The Quick Charge 3.0 steps on its page go up to 12 V, or 20 V after a
 probe found Class B, and enter and leave continuous mode through a 5 V
-request. The Quick Charge probe runs only when chosen on its page or in the
-full scan. It requests continuous mode and its steps first, then 5 V, 9, 12
+request; Quick Charge 2.0 offers only the voltages the probe saw followed.
+The Quick Charge probe runs when Quick Charge first starts in a boot (OK on
+a Quick Charge page, or the switch out of PD that OK there asks for), on a
+long OK on the charger page without PD, and in the full scan; each page
+that starts it warns it tests up to 20 V. It requests continuous mode and its steps first, then 5 V, 9, 12
 and up to 20 V, so the load behind the meter must be rated for it, and it
 ends on a 5 V request. Its Quick Charge 3.0 step pulse is a 1 ms busy wait,
 which only an interrupt can lengthen: its levels also code a fixed request,

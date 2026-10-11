@@ -135,10 +135,10 @@ fn input() -> firmware_core::buttons::Input {
 
 /// The cable list section at the top of the screen, while it is shown.
 fn detail_page() -> Option<u32> {
-    use firmware_core::buttons::{Detail, Page};
+    use firmware_core::buttons::{Detail, View};
     let shown = matches!(
-        input().page,
-        Page::Detail {
+        input().page.view(),
+        View::Detail {
             page: Detail::Cable,
             ..
         }

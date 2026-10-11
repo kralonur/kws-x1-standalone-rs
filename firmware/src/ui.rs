@@ -9,7 +9,9 @@ use embedded_graphics::primitives::{
     Circle, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle, RoundedRectangle, StyledDrawable,
     Triangle,
 };
-use firmware_core::buttons::{Detail, PpsFocus, QcFocus, QcTarget, SettingsFocus};
+use firmware_core::buttons::{
+    Detail, Level, PpsFocus, QC2_VOLTAGES, Qc2Focus, QcOffer, SettingsFocus, Tab,
+};
 use firmware_core::settings::{BRIGHTNESS_PERCENT, Item, QcFindings, Rotation, Settings};
 use u8g2_fonts::FontRenderer;
 use u8g2_fonts::fonts;
@@ -59,6 +61,22 @@ const RIGHT: i32 = 232;
 /// Header: title baseline and the rule under it.
 const TITLE_BASELINE: i32 = 15;
 const HEADER_RULE_Y: i32 = 21;
+/// Header tab strip, in pixels: each tab's top and height, the shown tab's
+/// label padding, a folded tab's width, the space between tabs, the
+/// tab-level underline's height and the group-level marker's width.
+const TAB_TOP: i32 = 3;
+const TAB_HEIGHT: u32 = 16;
+const TAB_PADDING: i32 = 6;
+const FOLDED_TAB: u32 = 6;
+const TAB_GAP: i32 = 3;
+const TAB_UNDERLINE: u32 = 2;
+const TAB_MARKER: u32 = 3;
+const TAB_CORNER: Size = Size::new(3, 3);
+/// Group dots on the header's right: diameter and centre spacing, in pixels.
+const GROUP_DOT: u32 = 6;
+const GROUP_DOT_PITCH: i32 = 10;
+/// The group dots' centre line, level with the tab labels' capitals.
+const GROUP_DOT_Y: i32 = TITLE_BASELINE - 5;
 /// Button hint baseline, along the bottom edge.
 const HINT_BASELINE: i32 = 131;
 /// Card corner radius.
@@ -142,6 +160,8 @@ pub const MAX_OBJECTS: usize = 7;
 pub struct Offer {
     /// The sink session runs, so profiles can be requested.
     pub session: bool,
+    /// This boot keeps PD silent for Quick Charge, so no offer is heard.
+    pub quick_charge: bool,
     fixed: [Supply; MAX_OBJECTS],
     fixed_count: usize,
     pps: [PpsRange; MAX_OBJECTS],
@@ -184,11 +204,44 @@ impl Offer {
     }
 }
 
-/// Page header: title on the left, one-based page position (when the page
-/// is in a cycle) on the right.
-pub struct Header<'a> {
-    pub title: &'a str,
-    pub position: Option<(u8, u8)>,
+/// Page header.
+pub enum Header<'a> {
+    /// A page in the groups: its group's tabs as a strip, each in its own
+    /// colour and only the shown one labelled, so a group fits many tabs;
+    /// and a dot per group on the right.
+    Tabs {
+        tabs: &'a [Tab],
+        /// Index of the shown tab in `tabs`.
+        current: usize,
+        /// The shown group's index and the group count.
+        group: (usize, usize),
+        /// What Left/Right move: the dots light for groups, the shown tab is
+        /// underlined for tabs.
+        level: Level,
+        /// The PD session page is the passthrough sniffer.
+        passthrough: bool,
+    },
+    /// The settings, outside the groups.
+    Settings,
+}
+
+/// A tab's label and colour.
+fn tab_style(tab: Tab, passthrough: bool) -> (&'static str, Rgb565) {
+    match tab {
+        Tab::Overview => ("OVERVIEW", CYAN),
+        Tab::Lines => ("LINES", YELLOW),
+        Tab::Fixed => ("PD PROFILES", GREEN),
+        Tab::Pps => ("PPS", MAGENTA),
+        Tab::Qc2 => ("QC 2.0", ORANGE),
+        Tab::Qc3 => ("QC 3.0", CYAN),
+        Tab::Detail { page, .. } => match page {
+            Detail::Pd if passthrough => ("PD SNIFF", GREEN),
+            Detail::Pd => ("PD SESSION", GREEN),
+            Detail::Charger => ("CHARGER", ORANGE),
+            Detail::Cable => ("CABLE", CYAN),
+            Detail::System => ("SYSTEM", YELLOW),
+        },
+    }
 }
 
 /// Everything the overview page shows. `reading` is `None` before the first
@@ -248,11 +301,6 @@ impl Label {
             }
         }
         self.push(&digits[start..])
-    }
-
-    /// Two digits with a leading zero, e.g. "01".
-    fn two_digits(self, value: u8) -> Self {
-        self.push(&[b'0' + value / 10 % 10, b'0' + value % 10])
     }
 
     /// Milli-units with two decimals, e.g. 2012 mV is "2.01".
@@ -369,40 +417,120 @@ fn value_with_unit<D: DrawTarget<Color = Rgb565>>(
     );
 }
 
-/// Title in the page's accent colour, page counter and rule.
-fn draw_header<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'_>, accent: Rgb565) {
-    fill(
-        target,
-        Rectangle::new(Point::new(LEFT - 2, 5), Size::new(3, 13)),
-        accent,
-    );
-    text(
-        target,
-        &BOLD,
-        header.title,
-        Point::new(LEFT + 5, TITLE_BASELINE),
-        HorizontalAlignment::Left,
-        accent,
-    );
-    if let Some((index, count)) = header.position {
-        let counter = Label::new().two_digits(index).push(b"/").two_digits(count);
+/// The tab strip and group dots, or the settings title, and the rule.
+fn draw_header<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'_>) {
+    rule(target, HEADER_RULE_Y);
+    let &Header::Tabs {
+        tabs,
+        current,
+        group: (shown_group, groups),
+        level,
+        passthrough,
+    } = header
+    else {
+        fill(
+            target,
+            Rectangle::new(Point::new(LEFT - 2, 5), Size::new(3, 13)),
+            YELLOW,
+        );
         text(
             target,
-            &PLAIN,
-            counter.as_str(),
-            Point::new(RIGHT, TITLE_BASELINE),
-            HorizontalAlignment::Right,
-            MUTED,
+            &BOLD,
+            "SETTINGS",
+            Point::new(LEFT + 5, TITLE_BASELINE),
+            HorizontalAlignment::Left,
+            YELLOW,
+        );
+        return;
+    };
+    let mut x = LEFT - 2;
+    let mut shown_color = WHITE;
+    for (index, tab) in tabs.iter().enumerate() {
+        let (label, color) = tab_style(*tab, passthrough);
+        let shown = index == current;
+        let width = if shown {
+            let label_width = BOLD
+                .get_rendered_dimensions(label, Point::zero(), VerticalPosition::Baseline)
+                .map_or(0, |dimensions| dimensions.advance.x);
+            (label_width + 2 * TAB_PADDING) as u32
+        } else {
+            FOLDED_TAB
+        };
+        let area = Rectangle::new(Point::new(x, TAB_TOP), Size::new(width, TAB_HEIGHT));
+        // The shown tab marks the level: a bar beside its name while
+        // Left/Right move between groups, an underline while they move
+        // between tabs, a filled tab once the page itself has them.
+        let line = Size::zero();
+        let (marker, corner, label_color) = match level {
+            _ if !shown => (area, TAB_CORNER, color),
+            Level::Groups => (
+                Rectangle::new(area.top_left, Size::new(TAB_MARKER, TAB_HEIGHT)),
+                line,
+                color,
+            ),
+            Level::Tabs => (
+                Rectangle::new(
+                    Point::new(x, HEADER_RULE_Y + 1 - TAB_UNDERLINE as i32),
+                    Size::new(width, TAB_UNDERLINE),
+                ),
+                line,
+                color,
+            ),
+            Level::Page => (area, TAB_CORNER, BLACK),
+        };
+        fill(
+            target,
+            RoundedRectangle::with_equal_corners(marker, corner),
+            color,
+        );
+        if shown {
+            shown_color = color;
+            text(
+                target,
+                &BOLD,
+                label,
+                Point::new(x + TAB_PADDING, TITLE_BASELINE),
+                HorizontalAlignment::Left,
+                label_color,
+            );
+        }
+        x += width as i32 + TAB_GAP;
+    }
+    let lit = if level == Level::Groups {
+        shown_color
+    } else {
+        MUTED
+    };
+    for index in 0..groups {
+        let offset = GROUP_DOT_PITCH * (groups - 1 - index) as i32;
+        fill(
+            target,
+            Circle::with_center(
+                Point::new(RIGHT - GROUP_DOT as i32 / 2 - offset, GROUP_DOT_Y),
+                GROUP_DOT,
+            ),
+            if index == shown_group { lit } else { RULE },
         );
     }
-    rule(target, HEADER_RULE_Y);
 }
 
-fn hint<D: DrawTarget<Color = Rgb565>>(target: &mut D, content: &str) {
+/// The bottom hint: `content`, the page's own, unless Left/Right move
+/// between groups.
+fn hint<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'_>, content: &str) {
     text(
         target,
         &PLAIN,
-        content,
+        if matches!(
+            header,
+            Header::Tabs {
+                level: Level::Groups,
+                ..
+            }
+        ) {
+            "< > groups    OK tabs"
+        } else {
+            content
+        },
         Point::new(LEFT, HINT_BASELINE),
         HorizontalAlignment::Left,
         MUTED,
@@ -475,7 +603,7 @@ pub fn draw_meter<D: DrawTarget<Color = Rgb565>>(
     header: &Header<'_>,
     meter: &Meter,
 ) {
-    draw_header(target, header, CYAN);
+    draw_header(target, header);
     let (volts, amps, power) = match meter.reading {
         // The meter works in either direction (charger on the plug or on the
         // receptacle), so the current is shown as a magnitude.
@@ -662,7 +790,7 @@ pub fn draw_lines<D: DrawTarget<Color = Rgb565>>(
     header: &Header<'_>,
     lines: Option<LineVoltages>,
 ) {
-    draw_header(target, header, YELLOW);
+    draw_header(target, header);
     let value = |mv| line_volts(lines, mv);
     volt_cards(
         target,
@@ -673,12 +801,8 @@ pub fn draw_lines<D: DrawTarget<Color = Rgb565>>(
             (CC2_CARD, MAGENTA_TINT, MAGENTA, "CC2", value(|l| l.cc2_mv)),
         ],
     );
-    hint(target, "uncalibrated    < > pages");
+    hint(target, header, "uncalibrated    < > tabs");
 }
-
-/// Quick Charge cards: D+/D− read back on top, VBUS and the request below.
-const QC_VBUS_CARD: Rectangle = CC1_CARD;
-const QC_REQUEST_CARD: Rectangle = CC2_CARD;
 
 /// How the PD side of the port stands, for the Quick Charge hints.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -693,175 +817,314 @@ pub enum QcMode {
     Silent,
 }
 
-/// The Quick Charge trigger: the driven lines as measured, the bus voltage
-/// and the request, or the voltage being chosen.
-pub fn draw_qc<D: DrawTarget<Color = Rgb565>>(
-    target: &mut D,
-    header: &Header<'_>,
-    focus: QcFocus,
-    mode: QcMode,
-    status: Status,
-    lines: Option<LineVoltages>,
-    reading: Option<Reading>,
-) {
-    draw_header(target, header, ORANGE);
-    volt_cards(
-        target,
-        &[
-            (
-                DP_CARD,
-                YELLOW_TINT,
-                YELLOW,
-                "D+",
-                line_volts(lines, |l| l.dp_mv),
-            ),
-            (
-                DM_CARD,
-                CYAN_TINT,
-                CYAN,
-                "D-",
-                line_volts(lines, |l| l.dm_mv),
-            ),
-            (
-                QC_VBUS_CARD,
-                GREEN_TINT,
-                GREEN,
-                "VBUS",
-                volts_or_blank(reading.map(|r| r.mv)),
-            ),
-        ],
-    );
-
-    let fail = || Label::new().push(b"FAIL");
-    let volts = |voltage: Voltage| Label::new().volts(voltage.millivolts());
-    let findings;
-    let (label, value, color, hint_text) = match (focus, status) {
-        (QcFocus::Choosing { preview, .. }, _) => (
-            "CHOOSE",
-            match preview {
-                QcTarget::Volts(voltage) => volts(voltage),
-                QcTarget::Steps(_) => Label::new().push(b"QC3"),
-                QcTarget::Detect => Label::new().push(b"DETECT"),
-            },
-            ORANGE,
-            match preview {
-                QcTarget::Volts(_) => "< > choose  OK request  BACK cancel",
-                QcTarget::Steps(_) => "OK 0.2V steps from 5V (QC3)",
-                // The probe puts up to 20 V on the output port.
-                QcTarget::Detect => "OK tests 9-20V on the output",
-            },
-        ),
-        (_, Status::Off) => (
-            "REQUEST",
-            Label::new().push(b"OFF"),
-            MUTED,
-            match mode {
-                QcMode::Plain => "OK start 5V    < > pages",
-                QcMode::Pd => "OK switch the charger to QC",
-                QcMode::Silent => "OK start 5V    BACK back to PD",
-            },
-        ),
-        (_, Status::Entering) => (
-            "REQUEST",
-            Label::new().push(b"WAIT"),
-            ORANGE,
-            "handshake    BACK stop",
-        ),
-        (_, Status::Failed(Failure::NotDcp)) => {
-            ("NO DCP", fail(), MAGENTA, "D+ D- not shorted    BACK")
-        }
-        (_, Status::Failed(Failure::NoEntry)) => {
-            ("NO QC", fail(), MAGENTA, "D- stayed high    BACK")
-        }
-        (_, Status::Active(voltage, Some(Outcome::Waiting))) => (
-            "SETTING",
-            volts(voltage),
-            ORANGE,
-            "waiting for VBUS    BACK stop",
-        ),
-        (_, Status::Active(voltage, Some(Outcome::Ignored))) => (
-            "IGNORED",
-            volts(voltage),
-            MAGENTA,
-            if voltage == Voltage::V20 {
-                "20V needs a Class B charger"
-            } else {
-                "charger kept its output"
-            },
-        ),
-        (_, Status::Active(voltage, _)) => {
-            ("ACTIVE", volts(voltage), GREEN, "OK change    BACK stop")
-        }
-        (_, Status::Stepping(mv)) => (
-            "QC3",
-            Label::new().volts(mv),
-            GREEN,
-            "< > 0.2V    OK change    BACK stop",
-        ),
-        (_, Status::Detecting(stage)) => (
-            "DETECT",
-            match stage {
-                Stage::Fixed(voltage) => volts(voltage),
-                Stage::Back => volts(Voltage::V5),
-                Stage::Continuous => Label::new().push(b"QC3"),
-                Stage::StepUp(sent) => Label::new()
-                    .push(b"+")
-                    .hundredths(u32::from(sent) * u32::from(STEP_MV))
-                    .push(b"V"),
-            },
-            ORANGE,
-            "testing each request    BACK stop",
-        ),
-        (_, Status::Detected(report)) => {
-            findings = report_line(report);
-            ("DETECTED", report_summary(report), GREEN, findings.as_str())
-        }
-    };
-    let border = matches!(focus, QcFocus::Choosing { .. }).then_some(ORANGE);
-    card(target, QC_REQUEST_CARD, RULE, border);
-    card_label(target, QC_REQUEST_CARD, label, color);
-    mixed_value(
-        target,
-        &value,
-        QC_REQUEST_CARD.top_left + Point::new(6, CARD_VALUE),
-        color,
-    );
-    hint(target, hint_text);
+/// A Quick Charge tab under a PD contract, which the charger then ignores:
+/// only how to switch.
+fn pd_mode<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'_>) {
+    notice(target, "PD MODE", "the charger ignores QC under PD", GREEN);
+    hint(target, header, "OK switch to QC, tests up to 20V");
 }
 
-/// A card value whose leading number uses the reading font and whose rest
-/// (a unit or words, e.g. "V", "QC3 A", "OFF") uses the bold font: the
-/// reading font has numerals only, and drops letters.
-fn mixed_value<D: DrawTarget<Color = Rgb565>>(
-    target: &mut D,
-    value: &Label,
-    position: Point,
-    color: Rgb565,
-) {
-    let value = value.as_str();
-    let (number, rest) = value.split_at(
-        value
-            .find(|c: char| c.is_ascii_alphabetic())
-            .unwrap_or(value.len()),
+/// A PD tab while this boot keeps PD silent for Quick Charge: only how to
+/// switch back.
+fn qc_mode<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'_>) {
+    notice(
+        target,
+        "QC MODE",
+        "PD is off while Quick Charge runs",
+        ORANGE,
     );
-    let mut x = position.x;
-    if !number.is_empty() {
-        x = text(
-            target,
-            &READING,
-            number,
-            position,
-            HorizontalAlignment::Left,
-            color,
-        ) + UNIT_GAP;
+    hint(target, header, "BACK on a stopped QC tab: PD");
+}
+
+/// Hint on a stopped Quick Charge tab: the probe comes first while this
+/// boot has none, else `start`.
+fn qc_start_hint(mode: QcMode, qc: QcOffer, start: &'static str) -> &'static str {
+    match (mode, qc.report()) {
+        (_, None) => "OK test the charger, up to 20V",
+        (QcMode::Silent, Some(_)) => "OK start    BACK back to PD",
+        (_, Some(_)) => start,
     }
+}
+
+/// The status pill on the Quick Charge 2.0 tab: on the voltage it reports,
+/// or on the request while entering or after a failed entry.
+fn qc2_pill(status: Status, request: Option<Voltage>) -> Option<(Voltage, &'static str, Rgb565)> {
+    Some(match status {
+        Status::Entering => (request?, "WAIT", ORANGE),
+        Status::Failed(Failure::NotDcp) => (request?, "NO DCP", MAGENTA),
+        Status::Failed(Failure::NoEntry) => (request?, "NO QC", MAGENTA),
+        Status::Active(voltage, Some(Outcome::Waiting)) => (voltage, "SETTING", ORANGE),
+        Status::Active(voltage, Some(Outcome::Ignored)) => (voltage, "IGNORED", MAGENTA),
+        Status::Active(voltage, _) => (voltage, "ACTIVE", GREEN),
+        Status::Off | Status::Stepping(_) | Status::Detecting(_) | Status::Detected(_) => {
+            return None;
+        }
+    })
+}
+
+/// Baseline of the probe's verdict under the Quick Charge 2.0 rows.
+const QC2_PROBE_BASELINE: i32 = 116;
+
+/// Everything the Quick Charge 2.0 tab shows.
+pub struct Qc2 {
+    /// The running trigger; `None` while stopped.
+    pub focus: Option<Qc2Focus>,
+    pub mode: QcMode,
+    pub status: Status,
+    pub qc: QcOffer,
+}
+
+/// The Quick Charge 2.0 tab, laid out as the fixed PD profiles: one row per
+/// voltage, the choice framed, the status on its row. Voltages the probe
+/// found the charger ignores are greyed out and cannot be chosen.
+pub fn draw_qc2<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'_>, page: &Qc2) {
+    let &Qc2 {
+        focus,
+        mode,
+        status,
+        qc,
+    } = page;
+    draw_header(target, header);
+    if focus.is_none() && mode == QcMode::Pd {
+        pd_mode(target, header);
+        return;
+    }
+    let preview = match focus {
+        Some(Qc2Focus::Choosing { preview, .. }) => Some(preview),
+        _ => None,
+    };
+    let pill = qc2_pill(status, focus.map(Qc2Focus::request));
+    for (row, voltage) in QC2_VOLTAGES.into_iter().enumerate() {
+        let taken = qc.takes(voltage);
+        let detail = match (taken, voltage, qc.report()) {
+            // 20 V is Class B only (NCP4371 Table 4).
+            (_, Voltage::V20, None) => "Class B only",
+            (true, ..) => "",
+            (false, Voltage::V20, _) => "needs Class B",
+            (false, ..) => "charger ignored it",
+        };
+        selector_row(
+            target,
+            row,
+            Label::new().volts(voltage.millivolts()).as_str(),
+            if taken {
+                level_color(voltage.millivolts())
+            } else {
+                MUTED
+            },
+            [detail, ""],
+            preview == Some(voltage),
+            pill.filter(|(at, ..)| *at == voltage)
+                .map(|(_, label, color)| (label, color)),
+        );
+    }
+    if let Some(report) = qc.report() {
+        let line = Label::new()
+            .push(b"probe: ")
+            .push(report_summary(report).as_str().as_bytes());
+        text(
+            target,
+            &PLAIN,
+            line.as_str(),
+            Point::new(LEFT, QC2_PROBE_BASELINE),
+            HorizontalAlignment::Left,
+            CYAN,
+        );
+    }
+    let hint_text = match (focus, status) {
+        (None, _) => qc_start_hint(mode, qc, "OK choose a voltage    < > tabs"),
+        (Some(Qc2Focus::Choosing { .. }), _) => "< > choose  OK request  BACK cancel",
+        (_, Status::Entering) => "handshake    BACK stop",
+        (_, Status::Failed(Failure::NotDcp)) => "D+ D- not shorted    BACK",
+        (_, Status::Failed(Failure::NoEntry)) => "D- stayed high    BACK",
+        (_, Status::Active(_, Some(Outcome::Waiting))) => "waiting for VBUS    BACK stop",
+        (_, Status::Active(_, Some(Outcome::Ignored))) => "charger kept its output",
+        _ => "OK change    BACK stop",
+    };
+    hint(target, header, hint_text);
+}
+
+/// The probe, on either Quick Charge tab: what it is asking the charger.
+pub fn draw_probe<D: DrawTarget<Color = Rgb565>>(
+    target: &mut D,
+    header: &Header<'_>,
+    status: Status,
+) {
+    draw_header(target, header);
+    let step;
+    let (title, detail, color) = match status {
+        Status::Failed(Failure::NotDcp) => {
+            ("NO CHARGING PORT", "D+ and D- are not shorted", MAGENTA)
+        }
+        Status::Failed(Failure::NoEntry) => ("NO QUICK CHARGE", "D- stayed high", MAGENTA),
+        Status::Detecting(stage) => (
+            "TESTING THE CHARGER",
+            match stage {
+                Stage::Fixed(voltage) => {
+                    step = Label::new()
+                        .push(b"asking for ")
+                        .volts(voltage.millivolts());
+                    step.as_str()
+                }
+                Stage::Back => "back to 5V",
+                Stage::Continuous => "QC 3.0 continuous mode",
+                Stage::StepUp(sent) => {
+                    step = Label::new()
+                        .push(b"QC 3.0 steps +")
+                        .hundredths(u32::from(sent) * u32::from(STEP_MV))
+                        .push(b"V");
+                    step.as_str()
+                }
+            },
+            ORANGE,
+        ),
+        _ => ("TESTING THE CHARGER", "Quick Charge handshake", ORANGE),
+    };
+    notice(target, title, detail, color);
+    hint(
+        target,
+        header,
+        if matches!(status, Status::Failed(_)) {
+            "BACK"
+        } else {
+            "up to 20V on the output    BACK stop"
+        },
+    );
+}
+
+/// Everything the Quick Charge 3.0 tab shows.
+pub struct Qc3 {
+    /// The output the steps aim for in mV, while the trigger runs.
+    pub target_mv: Option<u16>,
+    pub mode: QcMode,
+    pub status: Status,
+    pub qc: QcOffer,
+    pub lines: Option<LineVoltages>,
+    pub reading: Option<Reading>,
+}
+
+/// The Quick Charge 3.0 tab, laid out as the PPS page: the step range, the
+/// target and the output, and the driven lines as measured.
+pub fn draw_qc3<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'_>, page: &Qc3) {
+    let &Qc3 {
+        target_mv,
+        mode,
+        status,
+        qc,
+        lines,
+        reading,
+    } = page;
+    draw_header(target, header);
+    if target_mv.is_none() && mode == QcMode::Pd {
+        pd_mode(target, header);
+        return;
+    }
+    if !qc.steps() {
+        notice(target, "NO QC 3.0", "the charger ignored the steps", CYAN);
+        hint(target, header, "< > tabs");
+        return;
+    }
+    // The range the probe found, else both classes' (NCP4371 Table 4).
+    let class_range = |max: Voltage, class: &[u8]| {
+        Label::new()
+            .fixed(u32::from(MIN_MV) / 100, 1)
+            .push(b"-")
+            .fixed(u32::from(max.millivolts()) / 1000, 0)
+            .push(b"V by ")
+            .push(step_size().as_str().as_bytes())
+            .push(class)
+    };
+    let ranges = match qc.report().and_then(step_range) {
+        Some(range) => [Some(range), None],
+        None => [
+            Some(class_range(Voltage::V12, b"  Class A")),
+            Some(class_range(Voltage::V20, b"  Class B")),
+        ],
+    };
+    for (index, range) in ranges.iter().flatten().enumerate() {
+        text(
+            target,
+            &PLAIN,
+            range.as_str(),
+            Point::new(LEFT, RANGE_BASELINE + RANGE_PITCH * index as i32),
+            HorizontalAlignment::Left,
+            CYAN,
+        );
+    }
+
+    let set = match target_mv {
+        Some(mv) => Label::new().hundredths(u32::from(mv)),
+        None => Label::new().push(b"--.--"),
+    };
+    card(
+        target,
+        PPS_VOLTS,
+        if target_mv.is_some() { RULE } else { BLACK },
+        Some(if target_mv.is_some() { YELLOW } else { RULE }),
+    );
+    card_label(target, PPS_VOLTS, "SET VOLTAGE", YELLOW);
+    value_with_unit(
+        target,
+        &READING,
+        &set,
+        "V",
+        PPS_VOLTS.top_left + PPS_VALUE,
+        if target_mv.is_some() { WHITE } else { YELLOW },
+    );
+    if target_mv.is_some() {
+        arrows(target, PPS_VOLTS, YELLOW);
+    }
+    card(target, PPS_AMPS, BLACK, Some(RULE));
+    card_label(target, PPS_AMPS, "VBUS", CYAN);
+    value_with_unit(
+        target,
+        &READING,
+        &volts_or_blank(reading.map(|r| r.mv)),
+        "V",
+        PPS_AMPS.top_left + PPS_VALUE,
+        CYAN,
+    );
+
+    let readback = Label::new()
+        .push(b"D+ ")
+        .push(line_volts(lines, |l| l.dp_mv).as_str().as_bytes())
+        .push(b"V  D- ")
+        .push(line_volts(lines, |l| l.dm_mv).as_str().as_bytes())
+        .push(b"V");
     text(
         target,
-        &BOLD,
-        rest,
-        Point::new(x, position.y),
+        &PLAIN,
+        readback.as_str(),
+        Point::new(LEFT, PPS_STATUS_BASELINE),
         HorizontalAlignment::Left,
+        WHITE,
+    );
+    let (state, color) = match status {
+        Status::Entering => ("WAIT", ORANGE),
+        Status::Failed(Failure::NotDcp) => ("NO DCP", MAGENTA),
+        Status::Failed(Failure::NoEntry) => ("NO QC", MAGENTA),
+        Status::Stepping(mv) if Some(mv) == target_mv => ("ACTIVE", GREEN),
+        Status::Stepping(_) => ("STEPPING", ORANGE),
+        _ => ("", MUTED),
+    };
+    text(
+        target,
+        &PLAIN,
+        state,
+        Point::new(RIGHT, PPS_STATUS_BASELINE),
+        HorizontalAlignment::Right,
         color,
+    );
+    hint(
+        target,
+        header,
+        match (target_mv, status) {
+            (None, _) => qc_start_hint(mode, qc, "OK start at 5V    < > tabs"),
+            (_, Status::Entering) => "handshake    BACK stop",
+            (_, Status::Failed(Failure::NotDcp)) => "D+ D- not shorted    BACK",
+            (_, Status::Failed(Failure::NoEntry)) => "D- stayed high    BACK",
+            _ => "< > 0.2V    BACK stop",
+        },
     );
 }
 
@@ -875,33 +1138,6 @@ fn report_summary(report: Report) -> Label {
     Label::new()
         .push(version)
         .push(if report.v20 { b"B" } else { b"A" })
-}
-
-/// What the charger offers, from the probe: the fixed voltages it took, and
-/// for Quick Charge 3.0 the step range.
-fn report_line(report: Report) -> Label {
-    match step_range(report) {
-        Some(range) => fixed_volts(report)
-            .push(b", ")
-            .push(range.as_str().as_bytes()),
-        None => fixed_volts(report).push(b" fixed only"),
-    }
-}
-
-/// The fixed voltages the charger took, e.g. "5 9 12V".
-fn fixed_volts(report: Report) -> Label {
-    let fixed: [(bool, &[u8]); 3] = [
-        (report.v9, b" 9"),
-        (report.v12, b" 12"),
-        (report.v20, b" 20"),
-    ];
-    let mut line = Label::new().push(b"5");
-    for (taken, volts) in fixed {
-        if taken {
-            line = line.push(volts);
-        }
-    }
-    line.push(b"V")
 }
 
 /// The Quick Charge 3.0 step range, from 3.6 V to the class maximum, e.g.
@@ -1027,7 +1263,7 @@ pub fn qc_charger_lines(findings: Option<QcFindings>, mode: QcMode, section: u32
         None => {
             line(b"QUICK CHARGE");
             line(b"NOT TESTED YET");
-            line(b"HOLD OK: DETECT");
+            line(b"HOLD OK: TEST QC");
         }
     }
     rows
@@ -1058,6 +1294,65 @@ const PROFILE_TOP: i32 = 25;
 const PROFILE_PITCH: i32 = 19;
 const PROFILE_ROWS: usize = 5;
 
+/// Detail columns of a selector row, from the left edge.
+const ROW_DETAILS_X: [i32; 2] = [78, 130];
+/// A selector row's status pill.
+const ROW_PILL_X: i32 = 178;
+const ROW_PILL: Size = Size::new(52, 12);
+
+/// Selector row `row`: `title` in `color`, two details, framed while
+/// `selected`, and a status pill on the right.
+fn selector_row<D: DrawTarget<Color = Rgb565>>(
+    target: &mut D,
+    row: usize,
+    title: &str,
+    color: Rgb565,
+    details: [&str; 2],
+    selected: bool,
+    pill: Option<(&str, Rgb565)>,
+) {
+    let top = PROFILE_TOP + row as i32 * PROFILE_PITCH;
+    if selected {
+        let area = Rectangle::new(Point::new(4, top), Size::new(232, PROFILE_PITCH as u32 - 2));
+        card(target, area, RULE, Some(color));
+    }
+    let baseline = top + 13;
+    text(
+        target,
+        &BOLD,
+        title,
+        Point::new(LEFT + 4, baseline),
+        HorizontalAlignment::Left,
+        color,
+    );
+    for (detail, x) in details.into_iter().zip(ROW_DETAILS_X) {
+        text(
+            target,
+            &PLAIN,
+            detail,
+            Point::new(x, baseline),
+            HorizontalAlignment::Left,
+            if selected { WHITE } else { MUTED },
+        );
+    }
+    if let Some((label, color)) = pill {
+        let pill = Rectangle::new(Point::new(ROW_PILL_X, top + 3), ROW_PILL);
+        fill(
+            target,
+            RoundedRectangle::with_equal_corners(pill, Size::new(6, 6)),
+            color,
+        );
+        text(
+            target,
+            &PLAIN,
+            label,
+            Point::new(pill.center().x, baseline),
+            HorizontalAlignment::Center,
+            BLACK,
+        );
+    }
+}
+
 /// The fixed PD profile selector. While `editing`, the previewed profile is
 /// framed; the contract in force is marked ACTIVE. Before the sink session
 /// has the charger's offer, the page only shows what is known.
@@ -1067,7 +1362,11 @@ pub fn draw_fixed<D: DrawTarget<Color = Rgb565>>(
     offer: &Offer,
     editing: bool,
 ) {
-    draw_header(target, header, GREEN);
+    draw_header(target, header);
+    if offer.quick_charge {
+        qc_mode(target, header);
+        return;
+    }
     let profiles = offer.fixed();
     if profiles.is_empty() {
         notice(target, "NO PD CHARGER", "plug in a PD source", GREEN);
@@ -1090,80 +1389,48 @@ pub fn draw_fixed<D: DrawTarget<Color = Rgb565>>(
         .take(PROFILE_ROWS)
         .enumerate()
     {
-        let top = PROFILE_TOP + row as i32 * PROFILE_PITCH;
-        let color = level_color(profile.mv);
-        let area = Rectangle::new(Point::new(4, top), Size::new(232, PROFILE_PITCH as u32 - 2));
-        let selected = preview == Some(index);
-        if selected {
-            card(target, area, RULE, Some(color));
-        }
-        let baseline = top + 13;
-        text(
-            target,
-            &BOLD,
-            Label::new().volts(profile.mv).as_str(),
-            Point::new(LEFT + 4, baseline),
-            HorizontalAlignment::Left,
-            color,
-        );
-        text(
-            target,
-            &PLAIN,
-            Label::new()
-                .hundredths(u32::from(profile.ma))
-                .push(b"A")
-                .as_str(),
-            Point::new(78, baseline),
-            HorizontalAlignment::Left,
-            if selected { WHITE } else { MUTED },
-        );
+        let amps = Label::new().hundredths(u32::from(profile.ma)).push(b"A");
         let watts = u32::from(profile.mv) * u32::from(profile.ma) / 1_000_000;
-        text(
-            target,
-            &PLAIN,
-            Label::new().fixed(watts, 0).push(b"W").as_str(),
-            Point::new(130, baseline),
-            HorizontalAlignment::Left,
-            if selected { WHITE } else { MUTED },
-        );
-        if offer
+        let watts = Label::new().fixed(watts, 0).push(b"W");
+        let active = offer
             .contract
-            .is_some_and(|contract| !contract.pps && contract.mv == profile.mv)
-        {
-            let pill = Rectangle::new(Point::new(178, top + 3), Size::new(52, 12));
-            fill(
-                target,
-                RoundedRectangle::with_equal_corners(pill, Size::new(6, 6)),
-                GREEN,
-            );
-            text(
-                target,
-                &PLAIN,
-                "ACTIVE",
-                Point::new(pill.center().x, top + 13),
-                HorizontalAlignment::Center,
-                BLACK,
-            );
-        }
+            .is_some_and(|contract| !contract.pps && contract.mv == profile.mv);
+        selector_row(
+            target,
+            row,
+            Label::new().volts(profile.mv).as_str(),
+            level_color(profile.mv),
+            [amps.as_str(), watts.as_str()],
+            preview == Some(index),
+            active.then_some(("ACTIVE", GREEN)),
+        );
     }
     hint(
         target,
+        header,
         if !offer.session {
             VIEW_ONLY
         } else if editing {
             "< > choose  OK request  BACK cancel"
         } else {
-            "OK select a profile    < > pages"
+            "OK select a profile    < > tabs"
         },
     );
 }
 
 /// Hint on the selector pages before the sink session has an offer.
-const VIEW_ONLY: &str = "waiting for the charger    < > pages";
+const VIEW_ONLY: &str = "waiting for the charger    < > tabs";
 
 /// PPS value boxes.
 const PPS_VOLTS: Rectangle = Rectangle::new(Point::new(4, 52), Size::new(114, 44));
 const PPS_AMPS: Rectangle = Rectangle::new(Point::new(122, 52), Size::new(114, 44));
+/// A PPS box's value baseline, from the box's top-left corner.
+const PPS_VALUE: Point = Point::new(8, 37);
+/// Baseline of the line under the PPS boxes: the output and the state.
+const PPS_STATUS_BASELINE: i32 = 112;
+/// The range lines above the PPS boxes: the first baseline and the pitch.
+const RANGE_BASELINE: i32 = 34;
+const RANGE_PITCH: i32 = 12;
 
 /// The PPS selector: the advertised ranges, the voltage and current boxes
 /// (the one Left/Right change is framed), and the live reading.
@@ -1171,10 +1438,14 @@ pub fn draw_pps<D: DrawTarget<Color = Rgb565>>(
     target: &mut D,
     header: &Header<'_>,
     offer: &Offer,
-    focus: PpsFocus,
+    focus: Option<PpsFocus>,
     live: Option<Reading>,
 ) {
-    draw_header(target, header, MAGENTA);
+    draw_header(target, header);
+    if offer.quick_charge {
+        qc_mode(target, header);
+        return;
+    }
     let ranges = offer.pps();
     if ranges.is_empty() {
         notice(
@@ -1197,7 +1468,7 @@ pub fn draw_pps<D: DrawTarget<Color = Rgb565>>(
             target,
             &PLAIN,
             line.as_str(),
-            Point::new(LEFT, 34 + 12 * index as i32),
+            Point::new(LEFT, RANGE_BASELINE + RANGE_PITCH * index as i32),
             HorizontalAlignment::Left,
             MAGENTA,
         );
@@ -1230,7 +1501,7 @@ pub fn draw_pps<D: DrawTarget<Color = Rgb565>>(
         ),
     ];
     for (area, label, value, unit, field, color) in &boxes {
-        let focused = focus == *field;
+        let focused = focus == Some(*field);
         let (tint, border) = if focused {
             (RULE, Some(*color))
         } else {
@@ -1243,7 +1514,7 @@ pub fn draw_pps<D: DrawTarget<Color = Rgb565>>(
             &READING,
             value,
             unit,
-            area.top_left + Point::new(8, 37),
+            area.top_left + PPS_VALUE,
             if focused { WHITE } else { *color },
         );
         if focused {
@@ -1268,7 +1539,7 @@ pub fn draw_pps<D: DrawTarget<Color = Rgb565>>(
             target,
             &PLAIN,
             line.as_str(),
-            Point::new(LEFT, 112),
+            Point::new(LEFT, PPS_STATUS_BASELINE),
             HorizontalAlignment::Left,
             WHITE,
         );
@@ -1277,17 +1548,18 @@ pub fn draw_pps<D: DrawTarget<Color = Rgb565>>(
         target,
         &PLAIN,
         state.0,
-        Point::new(RIGHT, 112),
+        Point::new(RIGHT, PPS_STATUS_BASELINE),
         HorizontalAlignment::Right,
         state.1,
     );
     hint(
         target,
+        header,
         match focus {
             _ if !offer.session => VIEW_ONLY,
-            PpsFocus::Voltage => "< > volts    OK next: current",
-            PpsFocus::Current => "< > amps    OK request",
-            _ => "OK adjust PPS    < > pages",
+            Some(PpsFocus::Voltage) => "< > volts    OK next: current",
+            Some(PpsFocus::Current) => "< > amps    OK request",
+            None => "OK adjust PPS    < > tabs",
         },
     );
 }
@@ -1328,7 +1600,7 @@ pub fn draw_settings<D: DrawTarget<Color = Rgb565>>(
     settings: Settings,
     focus: SettingsFocus,
 ) {
-    draw_header(target, header, YELLOW);
+    draw_header(target, header);
     for (index, item) in Item::ALL.into_iter().enumerate() {
         let baseline = SETTINGS_BASELINE + index as i32 * SETTINGS_PITCH;
         let selected = item == focus.row();
@@ -1406,6 +1678,7 @@ pub fn draw_settings<D: DrawTarget<Color = Rgb565>>(
     }
     hint(
         target,
+        header,
         match focus {
             SettingsFocus::Brightness => "< > dimmer/brighter    OK done",
             SettingsFocus::Rotation => "< > auto/normal/flipped  OK done",
@@ -1480,13 +1753,8 @@ pub fn draw_detail<D: DrawTarget<Color = Rgb565>>(
     top: u16,
     scrolling: bool,
 ) -> ListView {
-    let accent = match page {
-        Detail::Pd => GREEN,
-        Detail::Charger => ORANGE,
-        Detail::Cable => CYAN,
-        Detail::System => YELLOW,
-    };
-    draw_header(target, header, accent);
+    let (_, accent) = tab_style(Tab::detail(page), false);
+    draw_header(target, header);
     let mut rows = 0u16;
     let mut view = ListView::default();
     for (section, lines) in sections.into_iter().enumerate() {
@@ -1539,10 +1807,11 @@ pub fn draw_detail<D: DrawTarget<Color = Rgb565>>(
     }
     hint(
         target,
+        header,
         match (scrolling, view.end > 0) {
             (true, _) => "< > scroll    OK done",
-            (false, true) => "OK scroll    < > pages",
-            (false, false) => "< > pages    BACK home",
+            (false, true) => "OK scroll    < > tabs",
+            (false, false) => "< > tabs    BACK groups",
         },
     );
     view

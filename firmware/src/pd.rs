@@ -283,6 +283,7 @@ pub fn protocol(observation: &Observation) -> Protocol {
 /// the passthrough sniffer.
 pub fn offer(observation: &Observation) -> ui::Offer {
     let mut offer = ui::Offer::default();
+    offer.quick_charge = observation.quick_charge;
     let mut add = |raw: u32| match firmware_core::pd_spr::advertised(raw) {
         Advertised::Fixed { mv, ma } => offer.push_fixed(mv, ma),
         Advertised::Pps {

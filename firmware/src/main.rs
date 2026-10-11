@@ -44,7 +44,7 @@ use bus::{
     ASYNC_READS, BUS_LATCH, I2C_ERRORS, I2C_FAULT_STEP, I2C_IRQ_COUNT, I2C_LAST_CR1, I2C_LAST_CR4,
     I2C_LAST_SR, I2C3, bus_failed, read_meter, write_meter, write_sensor,
 };
-use button_logic::{Detail, Page, QcFocus, QcTarget};
+use button_logic::{Detail, MAX_TABS, Open, Page, QcPage, QcTarget, Tab, View};
 use embassy_time::{Instant, Timer};
 use embedded_graphics::pixelcolor::{Rgb565, RgbColor};
 use firmware_core::buttons as button_logic;
@@ -526,22 +526,25 @@ async fn tilt_task(input: InputPin) {
 
 /// Scan the line voltages at the meter's read pace while the lines or
 /// Quick Charge page is shown, ADC2 idle otherwise, and step the Quick Charge
-/// trigger toward what that page asks for. Any other page releases D+/D−.
+/// trigger toward what that page asks for. Stopped, or on any other page, it
+/// releases D+/D−.
 #[embassy_executor::task]
 async fn line_task(mut adc: line_adc::LineAdc, mut trigger: qc_drive::Trigger) {
     let lines_sender = LINE_VOLTAGES.sender();
     let status_sender = QC_STATUS.sender();
     loop {
-        let page = BUTTON_STATE.try_get().map(|input| input.page);
-        let lines = if matches!(page, Some(Page::Lines | Page::Qc(_))) {
+        let view = BUTTON_STATE.try_get().map(|input| input.page.view());
+        let lines = if view.is_some_and(View::shows_lines) {
             let lines = adc.read().await;
             lines_sender.send(lines);
             lines
         } else {
             None
         };
-        let request = match page {
-            Some(Page::Qc(focus)) => focus.request(),
+        let request = match view {
+            Some(View::Qc2(focus)) => focus.map(|focus| QcTarget::Volts(focus.request())),
+            Some(View::Probe) => Some(QcTarget::Detect),
+            Some(View::Qc3(mv)) => mv.map(QcTarget::Steps),
             _ => None,
         };
         // The trigger judges requests by the output, read here rather than
@@ -591,15 +594,17 @@ async fn button_task(
     #[cfg(not(feature = "cable-log"))]
     let fatal = false;
     let mut navigation = if cfg!(feature = "pd-boot-diagnostic") || fatal {
-        button_logic::Navigation::new(Page::detail(Detail::Pd), saved)
+        button_logic::Navigation::new(Page::Groups(Tab::detail(Detail::Pd)), saved)
     } else if matches!(requested, NextBoot::CableTest | NextBoot::ScanPd) {
-        button_logic::Navigation::new(Page::detail(Detail::Charger), saved)
-    } else if requested == NextBoot::QuickCharge {
-        button_logic::Navigation::new(Page::Qc(QcFocus::Off), saved)
+        button_logic::Navigation::new(Page::Tabs(Tab::detail(Detail::Charger)), saved)
+    } else if let NextBoot::QuickCharge { steps } = requested {
+        // The switch out of PD runs the probe at once.
+        let page = if steps { QcPage::Qc3 } else { QcPage::Qc2 };
+        button_logic::Navigation::new(Page::Open(Open::Probe(page)), saved)
     } else if matches!(requested, NextBoot::ScanQuickCharge { .. }) {
-        button_logic::Navigation::new(Page::Qc(QcFocus::Requested(QcTarget::Detect)), saved)
+        button_logic::Navigation::new(Page::Open(Open::Probe(QcPage::Qc2)), saved)
     } else {
-        button_logic::Navigation::new(Page::Overview, saved)
+        button_logic::Navigation::new(Page::default(), saved)
     };
     let input_sender = BUTTON_STATE.sender();
     let mut qc_updates = QC_STATUS.anon_receiver();
@@ -626,7 +631,7 @@ async fn button_task(
         // The scan's Quick Charge part ends with the probe's result.
         let scan_end = match qc_updates.try_get() {
             Some(qc_drive::Status::Detected(report)) => {
-                navigation.set_qc_class_b(report.v20);
+                navigation.finish_probe(report);
                 navigation.finish_scan(QcFindings::Detected(report))
             }
             Some(qc_drive::Status::Failed(failure)) => {
@@ -654,6 +659,32 @@ async fn button_task(
         Timer::after_millis(u64::from(button_logic::POLL_MS)).await;
     }
 }
+
+/// The header for `page`: the shown group's tabs, written into `tabs`, and
+/// where Left/Right move.
+fn header(page: Page, passthrough: bool, tabs: &mut [Tab; MAX_TABS]) -> ui::Header<'_> {
+    let Some(shown) = page.tab() else {
+        return ui::Header::Settings;
+    };
+    let group = shown.group();
+    let mut count = 0;
+    let mut current = 0;
+    for (slot, tab) in tabs.iter_mut().zip(group.available(passthrough)) {
+        *slot = tab;
+        if tab.same(shown) {
+            current = count;
+        }
+        count += 1;
+    }
+    ui::Header::Tabs {
+        tabs: &tabs[..count],
+        current,
+        group: group.position(passthrough),
+        level: page.level(),
+        passthrough,
+    }
+}
+
 /// The latest observation as the detail pages show it, with the live bus
 /// voltage and, in the logging builds, the previous boot's record.
 fn detail_observation(raw_vbus: Option<u16>) -> pd::Observation {
@@ -761,6 +792,7 @@ async fn meter_task(
             dirty = true;
         }
         let page = input.page;
+        let view = page.view();
         if input.peaks_reset != peaks_reset {
             peaks_reset = input.peaks_reset;
             peaks = ui::Peaks::default();
@@ -796,13 +828,11 @@ async fn meter_task(
         let mut changed = false;
         // Pages showing live values read the meter; the PD details page reads
         // only the bus voltage, as before.
-        let reads_current = matches!(
-            page,
-            Page::Overview | Page::Fixed { .. } | Page::Pps(_) | Page::Qc(_)
-        );
+        let reads_current = matches!(view, View::Overview | View::Fixed { .. } | View::Pps(_))
+            || view.quick_charge();
         let pd_details = matches!(
-            page,
-            Page::Detail {
+            view,
+            View::Detail {
                 page: Detail::Pd,
                 ..
             }
@@ -831,7 +861,7 @@ async fn meter_task(
 
         if let Some(update) = line_updates.try_changed() {
             lines = update;
-            changed |= matches!(page, Page::Lines | Page::Qc(_));
+            changed |= view.shows_lines();
         }
         if let Some(update) = qc_updates.try_changed() {
             qc_status = update;
@@ -840,7 +870,7 @@ async fn meter_task(
                 qc_drive::Status::Failed(failure) => Some(QcFindings::Failed(failure)),
                 _ => qc_findings,
             };
-            changed |= matches!(page, Page::Qc(_));
+            changed |= view.quick_charge();
         }
 
         let secs = now.as_secs() as u32;
@@ -866,17 +896,15 @@ async fn meter_task(
             dirty = false;
             // SAFETY: this task is the sole framebuffer owner.
             let frame = unsafe { &mut *(fb as *mut Frame) };
-            let header = |title| ui::Header {
-                title,
-                position: page.position(input.passthrough),
-            };
-            match page {
-                Page::Overview => {
+            let mut tabs = [Tab::default(); MAX_TABS];
+            let header = header(page, input.passthrough, &mut tabs);
+            match view {
+                View::Overview => {
                     render::clear(frame);
                     let observation = latest_observation();
                     ui::draw_meter(
                         &mut Canvas(frame),
-                        &header("OVERVIEW"),
+                        &header,
                         &ui::Meter {
                             reading: reading(last_raw_v, last_raw_i),
                             peaks,
@@ -887,52 +915,68 @@ async fn meter_task(
                         },
                     );
                 }
-                Page::Lines => {
+                View::Lines => {
                     render::clear(frame);
-                    ui::draw_lines(&mut Canvas(frame), &header("LINES"), lines);
+                    ui::draw_lines(&mut Canvas(frame), &header, lines);
                 }
-                Page::Qc(focus) => {
+                View::Qc2(focus) => {
                     let mode = qc_mode(latest_observation());
                     render::clear(frame);
-                    ui::draw_qc(
+                    ui::draw_qc2(
                         &mut Canvas(frame),
-                        &header("QUICK CHARGE"),
-                        focus,
-                        mode,
-                        qc_status,
-                        lines,
-                        reading(last_raw_v, last_raw_i),
+                        &header,
+                        &ui::Qc2 {
+                            focus,
+                            mode,
+                            status: qc_status,
+                            qc: input.qc,
+                        },
                     );
                 }
-                Page::Fixed { choosing } => {
+                View::Probe => {
+                    render::clear(frame);
+                    ui::draw_probe(&mut Canvas(frame), &header, qc_status);
+                }
+                View::Qc3(target_mv) => {
+                    let mode = qc_mode(latest_observation());
+                    render::clear(frame);
+                    ui::draw_qc3(
+                        &mut Canvas(frame),
+                        &header,
+                        &ui::Qc3 {
+                            target_mv,
+                            mode,
+                            status: qc_status,
+                            qc: input.qc,
+                            lines,
+                            reading: reading(last_raw_v, last_raw_i),
+                        },
+                    );
+                }
+                View::Fixed { choosing } => {
                     render::clear(frame);
                     ui::draw_fixed(
                         &mut Canvas(frame),
-                        &header("PD PROFILES"),
+                        &header,
                         &pd::offer(&latest_observation()),
                         choosing,
                     );
                 }
-                Page::Pps(focus) => {
+                View::Pps(focus) => {
                     render::clear(frame);
                     ui::draw_pps(
                         &mut Canvas(frame),
-                        &header("PPS"),
+                        &header,
                         &pd::offer(&latest_observation()),
                         focus,
                         reading(last_raw_v, last_raw_i),
                     );
                 }
-                Page::Settings(focus) => {
+                View::Settings(focus) => {
                     render::clear(frame);
-                    ui::draw_settings(
-                        &mut Canvas(frame),
-                        &header("SETTINGS"),
-                        input.settings,
-                        focus,
-                    );
+                    ui::draw_settings(&mut Canvas(frame), &header, input.settings, focus);
                 }
-                Page::Detail {
+                View::Detail {
                     page: detail,
                     top,
                     scrolling,
@@ -940,14 +984,6 @@ async fn meter_task(
                     render::clear(frame);
                     let observation = detail_observation(last_raw_v);
                     let canvas = &mut Canvas(frame);
-                    let title = match detail {
-                        Detail::Pd if input.passthrough => "PD SNIFF",
-                        Detail::Pd => "PD SESSION",
-                        Detail::Charger => "CHARGER",
-                        Detail::Cable => "CABLE",
-                        Detail::System => "SYSTEM",
-                    };
-                    let header = header(title);
                     let view = match detail {
                         Detail::Pd => ui::draw_detail(
                             canvas,

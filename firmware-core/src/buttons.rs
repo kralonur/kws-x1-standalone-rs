@@ -7,6 +7,7 @@
 #![allow(dead_code)]
 
 use crate::settings::{Item, NextBoot, QcFindings, Settings};
+use qc_protocol::detect::Report;
 use qc_protocol::qc2::Voltage;
 use qc_protocol::qc3::{MIN_MV, STEP_MV};
 
@@ -77,66 +78,326 @@ const PPS_MV_REPEAT: i16 = 100;
 const PPS_MA_STEP: i16 = 50;
 const PPS_MA_REPEAT: i16 = 250;
 
-/// The screen and what its Left, Right and OK act on. Each page carries only
-/// its own state, so e.g. a PPS edit outside the PPS page cannot exist.
-/// Left/Right cycle the pages in `PAGES` that the PD mode can use; Back on
-/// the overview opens the settings.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// The screen and what its Left, Right and OK act on, one level at a time:
+/// Left/Right move between groups, OK goes into a group's tabs, OK again
+/// opens the shown tab, and Back goes up a level. Each level carries only its
+/// own state, so e.g. a PPS edit on a closed tab cannot exist. Back on the
+/// overview opens the settings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Page {
+    /// Left/Right move between groups; the group's tab is shown.
+    Groups(Tab),
+    /// Left/Right move between the shown group's tabs.
+    Tabs(Tab),
+    /// Left/Right and OK act on the tab itself.
+    Open(Open),
+    /// Opened by Back on the overview.
+    Settings(SettingsFocus),
+}
+
+impl Default for Page {
+    fn default() -> Self {
+        Self::Groups(Tab::Overview)
+    }
+}
+
+/// The page groups, in Left/Right order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Group {
+    /// Live readings.
+    Monitor,
+    /// Fixed PD, PPS and Quick Charge requests.
+    Trigger,
+    /// The detail lists.
+    Info,
+}
+
+/// The most tabs a group has.
+pub const MAX_TABS: usize = 4;
+
+impl Group {
+    pub const ALL: [Self; 3] = [Self::Monitor, Self::Trigger, Self::Info];
+
+    /// The group's tabs, in Left/Right order.
+    const fn tabs(self) -> &'static [Tab] {
+        const MONITOR: [Tab; 2] = [Tab::Overview, Tab::Lines];
+        const TRIGGER: [Tab; 4] = [Tab::Fixed, Tab::Pps, Tab::Qc2, Tab::Qc3];
+        const INFO: [Tab; MAX_TABS] = [
+            Tab::detail(Detail::Pd),
+            Tab::detail(Detail::Charger),
+            Tab::detail(Detail::Cable),
+            Tab::detail(Detail::System),
+        ];
+        match self {
+            Self::Monitor => &MONITOR,
+            Self::Trigger => &TRIGGER,
+            Self::Info => &INFO,
+        }
+    }
+
+    /// The group's tabs `passthrough` leaves, in Left/Right order.
+    pub fn available(self, passthrough: bool) -> impl Iterator<Item = Tab> {
+        self.tabs()
+            .iter()
+            .copied()
+            .filter(move |tab| tab.available(passthrough))
+    }
+
+    /// Index among the groups with a tab `passthrough` leaves, and their
+    /// count.
+    pub fn position(self, passthrough: bool) -> (usize, usize) {
+        let shown = |group: &&Self| group.available(passthrough).next().is_some();
+        (
+            Self::ALL[..self as usize].iter().filter(shown).count(),
+            Self::ALL.iter().filter(shown).count(),
+        )
+    }
+}
+
+/// A page within its group, shown but not acted on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Tab {
     #[default]
     Overview,
     /// D+, D−, CC1 and CC2 line voltages.
     Lines,
-    /// Fixed PD profile selector; while `choosing`, Left/Right preview
-    /// profiles.
-    Fixed { choosing: bool },
+    /// Fixed PD profile selector.
+    Fixed,
     /// PPS voltage and current selector.
+    Pps,
+    /// Quick Charge 2.0 fixed voltages and the probe, stopped.
+    Qc2,
+    /// Quick Charge 3.0 continuous mode, stopped.
+    Qc3,
+    /// A detail list shown from row `top`.
+    Detail { page: Detail, top: u16 },
+}
+
+impl Tab {
+    /// A detail list at its top.
+    pub const fn detail(page: Detail) -> Self {
+        Self::Detail { page, top: 0 }
+    }
+
+    pub const fn group(self) -> Group {
+        match self {
+            Self::Overview | Self::Lines => Group::Monitor,
+            Self::Fixed | Self::Pps | Self::Qc2 | Self::Qc3 => Group::Trigger,
+            Self::Detail { .. } => Group::Info,
+        }
+    }
+
+    /// The same tab as `other`, wherever either list is scrolled.
+    pub fn same(self, other: Self) -> bool {
+        match (self, other) {
+            (Self::Detail { page, .. }, Self::Detail { page: other, .. }) => page == other,
+            _ => self == other,
+        }
+    }
+
+    /// Whether the tab has anything to show: in passthrough the meter only
+    /// listens, so the selectors and the charger and cable lists, which need
+    /// a sink session, are left out.
+    pub fn available(self, passthrough: bool) -> bool {
+        !passthrough
+            || matches!(
+                self,
+                Self::Overview
+                    | Self::Lines
+                    | Self::Detail {
+                        page: Detail::Pd | Detail::System,
+                        ..
+                    }
+            )
+    }
+
+    /// The available tab `forward` (Right) or back from this one in its
+    /// group, wrapping; a new list starts at its top.
+    fn next(self, forward: bool, passthrough: bool) -> Self {
+        let tabs = self.group().tabs();
+        let index = tabs.iter().position(|tab| tab.same(self)).unwrap_or(0);
+        cycle_where(tabs, index, forward, |tab| tab.available(passthrough)).unwrap_or(self)
+    }
+}
+
+/// An open tab and what Left/Right and OK do there. The overview and the
+/// lines have nothing to open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Open {
+    /// Left/Right preview fixed profiles; OK requests one.
+    Fixed,
+    /// Left/Right change the PPS voltage or current.
     Pps(PpsFocus),
-    /// Quick Charge 2.0 and 3.0 trigger.
-    Qc(QcFocus),
-    /// Opened by Back on the overview.
-    Settings(SettingsFocus),
-    /// A detail list shown from row `top`; while `scrolling` (OK), Left/Right
-    /// move it instead of changing pages.
+    /// The Quick Charge probe runs; `page` then opens with what it found.
+    Probe(QcPage),
+    /// The Quick Charge 2.0 trigger runs.
+    Qc2(Qc2Focus),
+    /// Quick Charge 3.0 steps toward this output in mV; Left/Right move it.
+    Qc3(u16),
+    /// Left/Right scroll the list, shown from row `top`.
+    Detail { page: Detail, top: u16 },
+}
+
+impl Open {
+    /// The tab this is open on.
+    pub const fn tab(self) -> Tab {
+        match self {
+            Self::Fixed => Tab::Fixed,
+            Self::Pps(_) => Tab::Pps,
+            Self::Probe(page) => page.tab(),
+            Self::Qc2(_) => Tab::Qc2,
+            Self::Qc3(_) => Tab::Qc3,
+            Self::Detail { page, top } => Tab::Detail { page, top },
+        }
+    }
+}
+
+/// What Left/Right move at the current level.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Level {
+    Groups,
+    Tabs,
+    /// Something within the page.
+    Page,
+}
+
+/// What the renderer shows: the tab and, when open, what it is doing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum View {
+    Overview,
+    Lines,
+    Fixed {
+        choosing: bool,
+    },
+    Pps(Option<PpsFocus>),
+    Qc2(Option<Qc2Focus>),
+    /// The Quick Charge probe runs, on either Quick Charge tab.
+    Probe,
+    /// The Quick Charge 3.0 target in mV while it runs.
+    Qc3(Option<u16>),
     Detail {
         page: Detail,
         top: u16,
         scrolling: bool,
     },
+    Settings(SettingsFocus),
 }
 
-/// What Left/Right change on the PPS page.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+impl View {
+    /// A Quick Charge tab, which drives D+/D− and reads them back.
+    pub const fn quick_charge(self) -> bool {
+        matches!(self, Self::Qc2(_) | Self::Qc3(_) | Self::Probe)
+    }
+
+    /// The line voltages are shown here.
+    pub const fn shows_lines(self) -> bool {
+        matches!(self, Self::Lines) || self.quick_charge()
+    }
+}
+
+/// What Left/Right change on the open PPS tab.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PpsFocus {
-    /// Nothing: Left/Right move between pages.
-    #[default]
-    Browse,
     Voltage,
     Current,
 }
 
-/// The Quick Charge page: OK starts the trigger at 5 V, OK again opens a
-/// voltage choice that a third OK requests; Back closes the choice, then
-/// stops. With Quick Charge 3.0 steps requested, Left/Right move the target.
-/// Leaving the page stops the trigger too. Under a PD contract the charger
-/// ignores Quick Charge, so OK first restarts it into a silent PD boot
-/// (`NextBoot::QuickCharge`); Back on the stopped page there restarts it into
-/// PD again.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum QcFocus {
-    /// D+/D− undriven.
-    #[default]
-    Off,
-    /// This is asked of the charger.
-    Requested(QcTarget),
-    /// Left/Right choose `preview` while `request` stays in force.
-    Choosing {
-        request: QcTarget,
-        preview: QcTarget,
-    },
+/// A Quick Charge tab, as the probe that opens it remembers it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QcPage {
+    Qc2,
+    Qc3,
 }
 
-/// What the Quick Charge page asks of the charger.
+impl QcPage {
+    pub const fn tab(self) -> Tab {
+        match self {
+            Self::Qc2 => Tab::Qc2,
+            Self::Qc3 => Tab::Qc3,
+        }
+    }
+
+    /// Start Quick Charge on this stopped tab: the probe first, unless this
+    /// boot already ran it (`qc`); a charger without steps leaves Quick
+    /// Charge 3.0 stopped. Both versions enter at 5 V.
+    fn start(self, qc: QcOffer) -> Page {
+        match self {
+            _ if qc.report().is_none() => Page::Open(Open::Probe(self)),
+            Self::Qc2 => Page::Open(Open::Qc2(Qc2Focus::Choosing {
+                request: Voltage::V5,
+                preview: Voltage::V5,
+            })),
+            Self::Qc3 if qc.steps() => Page::Open(Open::Qc3(Voltage::V5.millivolts())),
+            Self::Qc3 => Page::Tabs(Tab::Qc3),
+        }
+    }
+}
+
+/// The Quick Charge 2.0 voltages, in Left/Right order.
+pub const QC2_VOLTAGES: [Voltage; 4] = [Voltage::V5, Voltage::V9, Voltage::V12, Voltage::V20];
+
+/// The running Quick Charge 2.0 trigger: it opens at 5 V with the choice
+/// open, and OK requests the choice; OK again reopens it, Back closes it,
+/// then stops. Left/Right offer only what the probe found the charger takes.
+/// Under a PD contract the charger ignores Quick Charge, so OK on a stopped
+/// Quick Charge tab first restarts it into a silent PD boot
+/// (`NextBoot::QuickCharge`), which runs the probe; Back on the stopped tab
+/// there restarts it into PD again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Qc2Focus {
+    /// This is asked of the charger.
+    Requested(Voltage),
+    /// Left/Right choose `preview` while `request` stays in force.
+    Choosing { request: Voltage, preview: Voltage },
+}
+
+impl Qc2Focus {
+    /// What is asked of the charger.
+    pub const fn request(self) -> Voltage {
+        match self {
+            Self::Requested(request) | Self::Choosing { request, .. } => request,
+        }
+    }
+}
+
+/// What this boot's probe found the charger takes; before a probe, nothing
+/// is ruled out.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct QcOffer(Option<Report>);
+
+impl QcOffer {
+    pub const fn report(self) -> Option<Report> {
+        self.0
+    }
+
+    /// The charger followed a request for `voltage`; 5 V is where Quick
+    /// Charge starts, so it always is.
+    pub fn takes(self, voltage: Voltage) -> bool {
+        self.0.is_none_or(|report| match voltage {
+            Voltage::V5 => true,
+            Voltage::V9 => report.v9,
+            Voltage::V12 => report.v12,
+            Voltage::V20 => report.v20,
+        })
+    }
+
+    /// The charger followed Quick Charge 3.0 steps.
+    pub fn steps(self) -> bool {
+        self.0.is_none_or(|report| report.steps)
+    }
+
+    /// Highest output the steps may ask for: 20 V once the charger took it
+    /// (Class B), else 12 V (Class A, NCP4371 Table 4).
+    pub fn steps_max(self) -> Voltage {
+        if self.0.is_some_and(|report| report.v20) {
+            Voltage::V20
+        } else {
+            Voltage::V12
+        }
+    }
+}
+
+/// What the Quick Charge trigger asks of the charger.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QcTarget {
     Volts(Voltage),
@@ -144,39 +405,6 @@ pub enum QcTarget {
     Steps(u16),
     /// Try each request in turn and report which the charger followed.
     Detect,
-}
-
-impl QcTarget {
-    /// The choices, in Left/Right order. Steps start where continuous mode
-    /// is entered from, 5 V.
-    const ALL: [Self; 6] = [
-        Self::Volts(Voltage::V5),
-        Self::Volts(Voltage::V9),
-        Self::Volts(Voltage::V12),
-        Self::Volts(Voltage::V20),
-        Self::Steps(Voltage::V5.millivolts()),
-        Self::Detect,
-    ];
-
-    /// Position in [`Self::ALL`]; any steps target is the steps choice.
-    fn index(self) -> usize {
-        Self::ALL
-            .iter()
-            .position(|choice| {
-                *choice == self || matches!((choice, self), (Self::Steps(_), Self::Steps(_)))
-            })
-            .unwrap_or(0)
-    }
-}
-
-impl QcFocus {
-    /// What is asked of the charger; `None` leaves D+/D− undriven.
-    pub const fn request(self) -> Option<QcTarget> {
-        match self {
-            Self::Off => None,
-            Self::Requested(request) | Self::Choosing { request, .. } => Some(request),
-        }
-    }
 }
 
 /// The settings page cursor, and whether its value is being changed.
@@ -206,7 +434,7 @@ impl SettingsFocus {
     }
 }
 
-/// Detail pages, in Left/Right order after the selectors.
+/// The detail lists, in Left/Right order.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Detail {
     /// PD session state.
@@ -220,21 +448,6 @@ pub enum Detail {
     System,
 }
 
-/// The pages as Left/Right enter them.
-const PAGES: [Page; 9] = [
-    Page::Overview,
-    Page::Lines,
-    Page::Fixed { choosing: false },
-    Page::Pps(PpsFocus::Browse),
-    Page::Qc(QcFocus::Off),
-    Page::detail(Detail::Pd),
-    Page::detail(Detail::Charger),
-    Page::detail(Detail::Cable),
-    Page::detail(Detail::System),
-];
-/// Index of the first detail page in `PAGES`.
-const FIRST_DETAIL: usize = 5;
-
 /// `items[index ± 1]`, wrapping.
 fn cycle<T: Copy>(items: &[T], index: usize, forward: bool) -> T {
     let next = if forward {
@@ -245,97 +458,119 @@ fn cycle<T: Copy>(items: &[T], index: usize, forward: bool) -> T {
     items[next % items.len()]
 }
 
-impl Page {
-    /// A detail page at the top of its list, not scrolling.
-    pub const fn detail(page: Detail) -> Self {
-        Self::Detail {
-            page,
-            top: 0,
-            scrolling: false,
-        }
-    }
-
-    fn is_charger(self) -> bool {
-        matches!(
-            self,
-            Self::Detail {
-                page: Detail::Charger,
-                ..
+/// The first of `items` after `index` (before it, unless `forward`) that
+/// `keep` accepts, wrapping round to `items[index]` itself.
+fn cycle_where<T: Copy>(
+    items: &[T],
+    index: usize,
+    forward: bool,
+    keep: impl Fn(T) -> bool,
+) -> Option<T> {
+    let count = items.len();
+    (1..=count)
+        .map(|offset| {
+            if forward {
+                items[(index + offset) % count]
+            } else {
+                items[(index + count - offset) % count]
             }
-        )
-    }
+        })
+        .find(|item| keep(*item))
+}
 
-    /// Whether the page has anything to show: in passthrough the meter only
-    /// listens, so the selectors and the charger and cable pages, which need
-    /// a sink session, are left out.
-    pub fn available(self, passthrough: bool) -> bool {
-        !passthrough
-            || matches!(
-                self,
-                Self::Overview
-                    | Self::Lines
-                    | Self::Settings(_)
-                    | Self::Detail {
-                        page: Detail::Pd | Detail::System,
-                        ..
-                    }
-            )
-    }
+/// The tab the group `forward` (Right) or back from `tab`'s shows: the one
+/// it last showed (`last`, by `Group::ALL` index), else its first available.
+fn next_group(last: &[Tab; Group::ALL.len()], tab: Tab, forward: bool, passthrough: bool) -> Tab {
+    let shown = |group: Group| {
+        let last = last[group as usize];
+        if last.group() == group && last.available(passthrough) {
+            Some(last)
+        } else {
+            group.available(passthrough).next()
+        }
+    };
+    cycle_where(&Group::ALL, tab.group() as usize, forward, |group| {
+        shown(group).is_some()
+    })
+    .and_then(shown)
+    .unwrap_or(tab)
+}
 
-    /// The available page `forward` (Right) or back from this one, wrapping.
-    fn next(self, forward: bool, passthrough: bool) -> Self {
-        let index = self.index().unwrap_or(0);
-        let count = PAGES.len();
-        (1..count)
-            .map(|offset| {
-                if forward {
-                    PAGES[(index + offset) % count]
-                } else {
-                    PAGES[(index + count - offset) % count]
-                }
-            })
-            .find(|page| page.available(passthrough))
-            .unwrap_or(Self::Overview)
-    }
-
-    /// Index into `PAGES`; `None` for the settings page, which is outside
-    /// the cycle.
-    fn index(self) -> Option<usize> {
+impl Page {
+    /// The shown tab; `None` for the settings.
+    pub const fn tab(self) -> Option<Tab> {
         match self {
-            Self::Overview => Some(0),
-            Self::Lines => Some(1),
-            Self::Fixed { .. } => Some(2),
-            Self::Pps(_) => Some(3),
-            Self::Qc(_) => Some(4),
-            Self::Detail { page, .. } => Some(FIRST_DETAIL + page as usize),
+            Self::Groups(tab) | Self::Tabs(tab) => Some(tab),
+            Self::Open(open) => Some(open.tab()),
             Self::Settings(_) => None,
         }
     }
 
-    /// One-based position among the available pages and their count;
-    /// `None` for the settings page.
-    pub fn position(self, passthrough: bool) -> Option<(u8, u8)> {
-        let index = self.index()?;
-        let shown = |page: &&Page| page.available(passthrough);
-        Some((
-            PAGES[..=index].iter().filter(shown).count() as u8,
-            PAGES.iter().filter(shown).count() as u8,
-        ))
+    pub const fn level(self) -> Level {
+        match self {
+            Self::Groups(_) => Level::Groups,
+            Self::Tabs(_) => Level::Tabs,
+            Self::Open(_) | Self::Settings(_) => Level::Page,
+        }
+    }
+
+    pub const fn view(self) -> View {
+        match self {
+            Self::Groups(tab) | Self::Tabs(tab) => match tab {
+                Tab::Overview => View::Overview,
+                Tab::Lines => View::Lines,
+                Tab::Fixed => View::Fixed { choosing: false },
+                Tab::Pps => View::Pps(None),
+                Tab::Qc2 => View::Qc2(None),
+                Tab::Qc3 => View::Qc3(None),
+                Tab::Detail { page, top } => View::Detail {
+                    page,
+                    top,
+                    scrolling: false,
+                },
+            },
+            Self::Open(open) => match open {
+                Open::Fixed => View::Fixed { choosing: true },
+                Open::Pps(focus) => View::Pps(Some(focus)),
+                Open::Probe(_) => View::Probe,
+                Open::Qc2(focus) => View::Qc2(Some(focus)),
+                Open::Qc3(mv) => View::Qc3(Some(mv)),
+                Open::Detail { page, top } => View::Detail {
+                    page,
+                    top,
+                    scrolling: true,
+                },
+            },
+            Self::Settings(focus) => View::Settings(focus),
+        }
+    }
+
+    fn is_charger(self) -> bool {
+        self.tab()
+            .is_some_and(|tab| tab.same(Tab::detail(Detail::Charger)))
+    }
+
+    /// The shown list's top row.
+    fn top_mut(&mut self) -> Option<&mut u16> {
+        match self {
+            Self::Groups(Tab::Detail { top, .. })
+            | Self::Tabs(Tab::Detail { top, .. })
+            | Self::Open(Open::Detail { top, .. }) => Some(top),
+            _ => None,
+        }
     }
 
     /// Left/Right change a value or scroll here, rather than moving between
-    /// pages or rows.
+    /// groups, tabs or rows.
     pub fn editing(self) -> bool {
         matches!(
             self,
-            Self::Fixed { choosing: true }
-                | Self::Pps(PpsFocus::Voltage | PpsFocus::Current)
-                | Self::Qc(QcFocus::Choosing { .. })
-                | Self::Settings(SettingsFocus::Brightness | SettingsFocus::Rotation)
-                | Self::Detail {
-                    scrolling: true,
-                    ..
-                }
+            Self::Open(
+                Open::Fixed
+                    | Open::Pps(_)
+                    | Open::Qc2(Qc2Focus::Choosing { .. })
+                    | Open::Detail { .. }
+            ) | Self::Settings(SettingsFocus::Brightness | SettingsFocus::Rotation)
         )
     }
 }
@@ -374,6 +609,7 @@ pub struct Input {
     /// Incremented by each peak reset request; the meter clears its peaks
     /// when this changes.
     pub peaks_reset: u8,
+    pub qc: QcOffer,
 }
 
 /// Navigation and settings, owned by the input task rather than the renderer,
@@ -401,12 +637,12 @@ pub struct Navigation {
     /// This boot keeps PD silent (`NextBoot::silent`): no session takes PD
     /// commands but the restart.
     silent: bool,
-    /// A probe this boot found the charger takes 20 V (Class B), so steps
-    /// may go up to it; Class A stops at 12 V (NCP4371 Table 4).
-    qc_class_b: bool,
     /// Last row the shown detail list can start at, as the renderer laid it
     /// out.
     list_end: u16,
+    /// The tab each group last showed, by `Group::ALL` index, so moving
+    /// between groups returns to it.
+    last: [Tab; Group::ALL.len()],
 }
 
 impl Navigation {
@@ -422,29 +658,34 @@ impl Navigation {
     /// PD and PPS pages only show the offer, and an open selection closes.
     pub fn set_selectable(&mut self, selectable: bool) {
         self.selectable = selectable;
-        if !selectable && matches!(self.input.page, Page::Fixed { .. } | Page::Pps(_)) {
-            self.input.page = PAGES[self.input.page.index().unwrap_or(0)];
+        if let Page::Open(open @ (Open::Fixed | Open::Pps(_))) = self.input.page
+            && !selectable
+        {
+            self.input.page = Page::Tabs(open.tab());
         }
     }
 
-    /// Whether the PD controller only listens; a page passthrough cannot
+    /// Whether the PD controller only listens; a tab passthrough cannot
     /// use closes to the overview.
     pub fn set_passthrough(&mut self, passthrough: bool) {
         self.input.passthrough = passthrough;
-        if !self.input.page.available(passthrough) {
-            self.input.page = Page::Overview;
+        if let Some(tab) = self.input.page.tab()
+            && !tab.available(passthrough)
+        {
+            self.input.page = Page::default();
         }
     }
 
     /// The meter's plug sits in the charger (`plug_in_charger`), and this
     /// boot runs the 5 A cable test (`testing`). Then the full scan (a long
     /// OK on the charger page) ends in the test, and Back there ends it.
-    /// The test keeps the charger page open (`update`).
+    /// The test keeps the charger page shown (`update`), its tabs level
+    /// so OK scrolls it.
     pub fn set_cable_test(&mut self, plug_in_charger: bool, testing: bool) {
         self.plug_in_charger = plug_in_charger;
         self.cable_test = testing;
         if testing && !self.input.page.is_charger() {
-            self.input.page = Page::detail(Detail::Charger);
+            self.input.page = Page::Tabs(Tab::detail(Detail::Charger));
         }
     }
 
@@ -454,15 +695,20 @@ impl Navigation {
     /// later plug-in starts with PD again.
     pub fn set_silent(&mut self, silent: bool, settled: bool) {
         self.silent = silent;
-        if settled && self.input.settings.next_boot == NextBoot::QuickCharge {
+        if settled && matches!(self.input.settings.next_boot, NextBoot::QuickCharge { .. }) {
             self.input.settings.next_boot = NextBoot::Normal;
         }
     }
 
-    /// A probe found the charger's class: Class B (`class_b`) raises the
-    /// steps' ceiling from 12 V to 20 V.
-    pub fn set_qc_class_b(&mut self, class_b: bool) {
-        self.qc_class_b = class_b;
+    /// The probe found `report`: keep it, and open the Quick Charge tab that
+    /// waited for it (the scan keeps its own page).
+    pub fn finish_probe(&mut self, report: Report) {
+        self.input.qc = QcOffer(Some(report));
+        if let Page::Open(Open::Probe(page)) = self.input.page
+            && !self.scanning()
+        {
+            self.input.page = page.start(self.input.qc);
+        }
     }
 
     /// This boot runs the full scan's Quick Charge part, which keeps the
@@ -498,7 +744,7 @@ impl Navigation {
     /// shorter scrolls back.
     pub fn set_list_end(&mut self, end: u16) {
         self.list_end = end;
-        if let Page::Detail { top, .. } = &mut self.input.page {
+        if let Some(top) = self.input.page.top_mut() {
             *top = (*top).min(end);
         }
     }
@@ -528,11 +774,7 @@ impl Navigation {
                 && (self.held - REPEAT_DELAY_SAMPLES).is_multiple_of(REPEAT_SAMPLES)
                 && matches!(
                     self.input.page,
-                    Page::Pps(PpsFocus::Voltage | PpsFocus::Current)
-                        | Page::Detail {
-                            scrolling: true,
-                            ..
-                        }
+                    Page::Open(Open::Pps(_) | Open::Qc3(_) | Open::Detail { .. })
                 )
             {
                 self.repeated = true;
@@ -559,8 +801,12 @@ impl Navigation {
             self.ok_long = false;
         }
         if rising & BACK != 0 {
-            let leave_silent =
-                self.scanning() || (self.silent && self.input.page == Page::Qc(QcFocus::Off));
+            let leave_silent = self.scanning()
+                || (self.silent
+                    && matches!(
+                        self.input.page,
+                        Page::Groups(Tab::Qc2 | Tab::Qc3) | Page::Tabs(Tab::Qc2 | Tab::Qc3)
+                    ));
             if self.cable_test && self.input.page.is_charger() {
                 command = Some(PdCommand::Restart);
             } else if leave_silent {
@@ -581,7 +827,10 @@ impl Navigation {
         }
         // The scan's Quick Charge part keeps its probe on screen.
         if self.scanning() {
-            self.input.page = Page::Qc(QcFocus::Requested(QcTarget::Detect));
+            self.input.page = Page::Open(Open::Probe(QcPage::Qc2));
+        }
+        if let Some(tab) = self.input.page.tab() {
+            self.last[tab.group() as usize] = tab;
         }
         if self.silent {
             command = command.filter(|c| *c == PdCommand::Restart);
@@ -592,7 +841,7 @@ impl Navigation {
     /// What a long OK does here: `None` when the page has no long OK, else
     /// the PD command it sends, if any.
     fn long_ok(&mut self) -> Option<Option<PdCommand>> {
-        let Page::Detail { page, .. } = self.input.page else {
+        let Some(Tab::Detail { page, .. }) = self.input.page.tab() else {
             return None;
         };
         match page {
@@ -609,7 +858,7 @@ impl Navigation {
             }
             // Without PD, Quick Charge answers directly.
             Detail::Charger => {
-                self.input.page = Page::Qc(QcFocus::Requested(QcTarget::Detect));
+                self.input.page = Page::Open(Open::Probe(QcPage::Qc2));
                 Some(None)
             }
             _ => None,
@@ -619,24 +868,14 @@ impl Navigation {
     fn back(&mut self) {
         let page = &mut self.input.page;
         *page = match *page {
-            Page::Overview => Page::Settings(SettingsFocus::default()),
-            Page::Fixed { choosing: true } => Page::Fixed { choosing: false },
-            Page::Pps(PpsFocus::Voltage | PpsFocus::Current) => Page::Pps(PpsFocus::Browse),
-            Page::Qc(QcFocus::Choosing { request, .. }) => Page::Qc(QcFocus::Requested(request)),
-            Page::Qc(QcFocus::Requested(_)) => Page::Qc(QcFocus::Off),
-            Page::Settings(focus @ (SettingsFocus::Brightness | SettingsFocus::Rotation)) => {
-                Page::Settings(SettingsFocus::Row(focus.row()))
+            Page::Groups(Tab::Overview) => Page::Settings(SettingsFocus::default()),
+            Page::Groups(_) | Page::Settings(SettingsFocus::Row(_)) => Page::default(),
+            Page::Settings(focus) => Page::Settings(SettingsFocus::Row(focus.row())),
+            Page::Tabs(tab) => Page::Groups(tab),
+            Page::Open(Open::Qc2(Qc2Focus::Choosing { request, .. })) => {
+                Page::Open(Open::Qc2(Qc2Focus::Requested(request)))
             }
-            Page::Detail {
-                page,
-                top,
-                scrolling: true,
-            } => Page::Detail {
-                page,
-                top,
-                scrolling: false,
-            },
-            _ => Page::Overview,
+            Page::Open(open) => Page::Tabs(open.tab()),
         };
     }
 
@@ -645,11 +884,9 @@ impl Navigation {
         let sign = if forward { 1 } else { -1 };
         let input = &mut self.input;
         match &mut input.page {
-            Page::Detail {
-                top,
-                scrolling: true,
-                ..
-            } => {
+            Page::Groups(tab) => *tab = next_group(&self.last, *tab, forward, input.passthrough),
+            Page::Tabs(tab) => *tab = tab.next(forward, input.passthrough),
+            Page::Open(Open::Detail { top, .. }) => {
                 *top = if forward {
                     top.saturating_add(1).min(self.list_end)
                 } else {
@@ -662,31 +899,31 @@ impl Navigation {
             }
             Page::Settings(SettingsFocus::Brightness) => input.settings.step_brightness(forward),
             Page::Settings(SettingsFocus::Rotation) => input.settings.step_rotation(forward),
-            Page::Fixed { choosing: true } => return Some(PdCommand::StepFixed(sign as i8)),
-            Page::Qc(QcFocus::Choosing { preview, .. }) => {
-                *preview = cycle(&QcTarget::ALL, preview.index(), forward);
+            Page::Open(Open::Fixed) => return Some(PdCommand::StepFixed(sign as i8)),
+            Page::Open(Open::Qc2(Qc2Focus::Choosing { preview, .. })) => {
+                let index = QC2_VOLTAGES.iter().position(|v| v == preview).unwrap_or(0);
+                let qc = input.qc;
+                *preview =
+                    cycle_where(&QC2_VOLTAGES, index, forward, |v| qc.takes(v)).unwrap_or(*preview);
             }
-            Page::Qc(QcFocus::Requested(QcTarget::Steps(mv))) => {
-                let max = if self.qc_class_b {
-                    Voltage::V20
-                } else {
-                    Voltage::V12
-                };
+            Page::Open(Open::Qc3(mv)) => {
+                let max = input.qc.steps_max();
                 *mv = if forward {
                     mv.saturating_add(STEP_MV).min(max.millivolts())
                 } else {
                     mv.saturating_sub(STEP_MV).max(MIN_MV)
                 };
             }
-            Page::Pps(PpsFocus::Voltage) => {
+            // A fixed request or the probe holds until OK or Back.
+            Page::Open(Open::Qc2(Qc2Focus::Requested(_)) | Open::Probe(_)) => {}
+            Page::Open(Open::Pps(PpsFocus::Voltage)) => {
                 let step = if repeat { PPS_MV_REPEAT } else { PPS_MV_STEP };
                 return Some(PdCommand::PpsVoltage(sign * step));
             }
-            Page::Pps(PpsFocus::Current) => {
+            Page::Open(Open::Pps(PpsFocus::Current)) => {
                 let step = if repeat { PPS_MA_REPEAT } else { PPS_MA_STEP };
                 return Some(PdCommand::PpsCurrent(sign * step));
             }
-            page => *page = page.next(forward, input.passthrough),
         }
         None
     }
@@ -694,35 +931,43 @@ impl Navigation {
     fn ok(&mut self) -> Option<PdCommand> {
         let input = &mut self.input;
         let (page, command) = match input.page {
-            Page::Detail {
-                page,
-                top,
-                scrolling,
-            } => (
-                Page::Detail {
-                    page,
-                    top,
-                    scrolling: !scrolling,
-                },
+            Page::Groups(tab) => (Page::Tabs(tab), None),
+            page @ Page::Tabs(Tab::Overview | Tab::Lines) => (page, None),
+            page @ Page::Tabs(Tab::Fixed | Tab::Pps) if !self.selectable => (page, None),
+            Page::Tabs(Tab::Fixed) => (Page::Open(Open::Fixed), Some(PdCommand::StepFixed(0))),
+            Page::Tabs(Tab::Pps) => (
+                Page::Open(Open::Pps(PpsFocus::Voltage)),
+                Some(PdCommand::PpsVoltage(0)),
+            ),
+            Page::Tabs(Tab::Qc2) if !self.selectable => (QcPage::Qc2.start(input.qc), None),
+            Page::Tabs(Tab::Qc3) if !self.selectable => (QcPage::Qc3.start(input.qc), None),
+            // A PD contract hides Quick Charge: restart into a silent boot.
+            page @ Page::Tabs(tab @ (Tab::Qc2 | Tab::Qc3)) => {
+                input.settings.next_boot = NextBoot::QuickCharge {
+                    steps: tab == Tab::Qc3,
+                };
+                (page, Some(PdCommand::Restart))
+            }
+            Page::Tabs(Tab::Detail { page, top }) => (Page::Open(Open::Detail { page, top }), None),
+            Page::Open(Open::Fixed) => (Page::Tabs(Tab::Fixed), Some(PdCommand::Confirm)),
+            Page::Open(Open::Pps(PpsFocus::Voltage)) => {
+                (Page::Open(Open::Pps(PpsFocus::Current)), None)
+            }
+            Page::Open(Open::Pps(PpsFocus::Current)) => {
+                (Page::Tabs(Tab::Pps), Some(PdCommand::Confirm))
+            }
+            Page::Open(Open::Qc2(focus)) => (
+                Page::Open(Open::Qc2(match focus {
+                    Qc2Focus::Requested(request) => Qc2Focus::Choosing {
+                        request,
+                        preview: request,
+                    },
+                    Qc2Focus::Choosing { preview, .. } => Qc2Focus::Requested(preview),
+                })),
                 None,
             ),
-            page @ (Page::Fixed { choosing: false } | Page::Pps(PpsFocus::Browse))
-                if !self.selectable =>
-            {
-                (page, None)
-            }
-            Page::Fixed { choosing: false } => (
-                Page::Fixed { choosing: true },
-                Some(PdCommand::StepFixed(0)),
-            ),
-            Page::Fixed { choosing: true } => {
-                (Page::Fixed { choosing: false }, Some(PdCommand::Confirm))
-            }
-            Page::Pps(PpsFocus::Browse) => {
-                (Page::Pps(PpsFocus::Voltage), Some(PdCommand::PpsVoltage(0)))
-            }
-            Page::Pps(PpsFocus::Voltage) => (Page::Pps(PpsFocus::Current), None),
-            Page::Pps(PpsFocus::Current) => (Page::Pps(PpsFocus::Browse), Some(PdCommand::Confirm)),
+            page @ Page::Open(Open::Qc3(_) | Open::Probe(_)) => (page, None),
+            Page::Open(open @ Open::Detail { .. }) => (Page::Tabs(open.tab()), None),
             Page::Settings(SettingsFocus::Row(item)) => (
                 Page::Settings(match item {
                     Item::Brightness => SettingsFocus::Brightness,
@@ -735,23 +980,6 @@ impl Navigation {
                 None,
             ),
             Page::Settings(focus) => (Page::Settings(SettingsFocus::Row(focus.row())), None),
-            // A PD contract hides Quick Charge: restart into a silent boot.
-            page @ Page::Qc(QcFocus::Off) if self.selectable => {
-                input.settings.next_boot = NextBoot::QuickCharge;
-                (page, Some(PdCommand::Restart))
-            }
-            Page::Qc(focus) => (
-                Page::Qc(match focus {
-                    QcFocus::Off => QcFocus::Requested(QcTarget::Volts(Voltage::V5)),
-                    QcFocus::Requested(request) => QcFocus::Choosing {
-                        request,
-                        preview: request,
-                    },
-                    QcFocus::Choosing { preview, .. } => QcFocus::Requested(preview),
-                }),
-                None,
-            ),
-            page @ (Page::Overview | Page::Lines) => (page, None),
         };
         input.page = page;
         command
