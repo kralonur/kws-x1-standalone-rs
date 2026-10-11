@@ -13,6 +13,7 @@ mod bus;
 mod clock_setup;
 mod flash;
 mod ina226;
+mod line_adc;
 mod lis3dh;
 #[path = "panel.rs"]
 mod panel;
@@ -273,6 +274,10 @@ static EIRQ_COUNT: AtomicU32 = AtomicU32::new(0);
 static SWI_COUNT: AtomicU32 = AtomicU32::new(0);
 /// Screen orientation: `tilt_task` sends it, `meter_task` applies it.
 static ORIENTATION: Watch<CriticalSectionRawMutex, Orientation, 1> = Watch::new();
+/// Line voltages: `line_task` sends each scan (`None` when one fails) while
+/// the lines page is shown; `meter_task` draws them.
+static LINE_VOLTAGES: Watch<CriticalSectionRawMutex, Option<line_adc::LineVoltages>, 1> =
+    Watch::new();
 /// Completed 180-degree flips, shown next to the raw edge count.
 static TILT_FLIPS: AtomicU32 = AtomicU32::new(0);
 
@@ -291,6 +296,10 @@ const SWI_CHANNEL: u8 = 8;
 const PD_LINE: embassy_hc32::intc::Line = line(4);
 const TILT_LINE: embassy_hc32::intc::Line = line(13);
 const SWI_LINE: embassy_hc32::intc::Line = line(8);
+/// ADC2 end of scan (event 452): group 14's window is lines 116..=121
+/// (RM Table 10-2).
+const ADC2_EOCA: u16 = 452;
+const ADC_LINE: embassy_hc32::intc::Line = line(116);
 /// NVIC priorities (lower is more urgent). Both stay below SysTick (0), so
 /// timing never starves; bus and tilt wakes rank ahead of the PD alert and self-test.
 const BUS_PRIORITY: u8 = 8;
@@ -360,6 +369,12 @@ fn INT112() {
 fn INT113() {
     I2C_IRQ_COUNT.fetch_add(1, Ordering::Relaxed);
     embassy_hc32::i2c::on_interrupt();
+}
+
+/// ADC2 end of scan, on `ADC_LINE`.
+#[cortex_m_rt::interrupt]
+fn INT116() {
+    embassy_hc32::adc::on_interrupt();
 }
 
 /// SPI3 TX-empty, physical idle and error sources (group 9, lines 86..88).
@@ -506,6 +521,22 @@ async fn tilt_task(input: InputPin) {
     }
 }
 
+/// Scan the line voltages at the meter's read pace while the lines page is
+/// shown; ADC2 stays idle otherwise.
+#[embassy_executor::task]
+async fn line_task(mut adc: line_adc::LineAdc) {
+    let sender = LINE_VOLTAGES.sender();
+    loop {
+        if BUTTON_STATE
+            .try_get()
+            .is_some_and(|input| input.page == Page::Lines)
+        {
+            sender.send(adc.read().await);
+        }
+        Timer::after(METER_READ_PERIOD).await;
+    }
+}
+
 /// INT1_CFG for an orientation: raise INT1 in the position opposite it.
 fn armed_position(orientation: Orientation) -> u8 {
     match orientation {
@@ -638,6 +669,8 @@ async fn meter_task(mut backlight: embassy_hc32::pwm::TimerA4Pwm) {
     // redraws the meter page.
     let mut last_raw_v: Option<u16> = None;
     let mut last_raw_i: Option<u16> = None;
+    let mut line_updates = LINE_VOLTAGES.anon_receiver();
+    let mut lines = None;
     // Peaks follow the meter page's reads; a settings or meter page reset
     // request clears them.
     let mut peaks = ui::Peaks::default();
@@ -735,6 +768,11 @@ async fn meter_task(mut backlight: embassy_hc32::pwm::TimerA4Pwm) {
             }
         }
 
+        if let Some(update) = line_updates.try_changed() {
+            lines = update;
+            changed |= page == Page::Lines;
+        }
+
         let secs = now.as_secs() as u32;
         let pulses = PULSES.load(Ordering::Relaxed) & 1 != 0;
         // A latched bus turns the heartbeat dot red on the meter page.
@@ -778,6 +816,10 @@ async fn meter_task(mut backlight: embassy_hc32::pwm::TimerA4Pwm) {
                             alive: pulse_now,
                         },
                     );
+                }
+                Page::Lines => {
+                    render::clear(frame);
+                    ui::draw_lines(&mut Canvas(frame), &header("LINES"), lines);
                 }
                 Page::Fixed { choosing } => {
                     render::clear(frame);
@@ -989,6 +1031,7 @@ async fn main(spawner: Spawner) {
     let cable_test_skipped = requested && !cable_test;
 
     let backlight_pwm;
+    let line_adc;
     let button_inputs;
     let tilt_input;
     let pd_input;
@@ -1007,6 +1050,8 @@ async fn main(spawner: Spawner) {
         // Read-only slider sense (the original shows "Switch To Sink Mode" while
         // it reads high; observed low with the slider ON).
         pc13_input = InputPin::new_pull_up(Port::C, 13);
+        // PA6, PA7, PB0 and PB1 become analog inputs owned by ADC2.
+        line_adc = line_adc::LineAdc::new(hc32f460_pac::Adc2::steal()).await;
 
         // The INTC is not reset by a jump into this image, so a bootloader or an
         // earlier image can leave `SEL` entries mapped; `register` then refuses
@@ -1078,6 +1123,11 @@ async fn main(spawner: Spawner) {
             }
         }
 
+        // The line ADC waits for its scans on this wake.
+        if embassy_hc32::intc::register(ADC2_EOCA, ADC_LINE, BUS_PRIORITY).is_err() {
+            IRQ_REG_FAILURES.fetch_add(1, Ordering::Relaxed);
+        }
+
         // Route a software interrupt to INT008.
         if embassy_hc32::intc::register(u16::from(SWI_CHANNEL), SWI_LINE, PD_PRIORITY).is_err() {
             IRQ_REG_FAILURES.fetch_add(1, Ordering::Relaxed);
@@ -1123,6 +1173,7 @@ async fn main(spawner: Spawner) {
 
     spawner.spawn(pulse_task().expect(ONE_SPAWN));
     spawner.spawn(tilt_task(tilt_input).expect(ONE_SPAWN));
+    spawner.spawn(line_task(line_adc).expect(ONE_SPAWN));
     spawner.spawn(button_task(button_inputs, store, settings, requested).expect(ONE_SPAWN));
     spawner.spawn(meter_task(backlight_pwm).expect(ONE_SPAWN));
 }

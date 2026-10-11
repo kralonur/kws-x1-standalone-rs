@@ -88,6 +88,7 @@ This is **kws-x1-standalone-rs**.
 
 - Voltage, current and power in either direction, with peaks and a flow
   direction indicator.
+- D+, D-, CC1 and CC2 line voltages.
 - USB PD sink: fixed profiles up to 20 V and PPS, chosen on the meter.
 - Everything the charger says about itself: its full offer (EPR included),
   identity, ratings and status.
@@ -122,6 +123,9 @@ What this firmware does **not** do, for now:
 - **No energy or charge counting** (no mAh or Wh), no timer, no graphs, no
   recording, and no USB data connection to a computer or app.
 - **No calibration setting.** The measurement uses a fixed sensor calibration.
+  The line voltages use the reference manual's nominal internal reference
+  (about 1.15 V, no tolerance given) and have not been checked against a
+  multimeter.
 - **The chosen profile is not remembered:** every boot starts at 5 V.
 - **About 6000 settings saves** in the device's lifetime (see
   [What is saved](#what-is-saved)).
@@ -159,7 +163,7 @@ meter in again.
   pull-downs off and sits between a charger and a device, which negotiate with
   each other as through a plain cable. The meter measures and logs their PD
   messages; it never sends, never acknowledges and never resets. Only the
-  overview, PD session, system and settings pages are shown.
+  overview, lines, PD session, system and settings pages are shown.
 
 ### Ways to connect
 
@@ -185,6 +189,7 @@ point the way it flows (they follow the screen rotation).
 | Page | Shows | Buttons |
 | ---- | ----- | ------- |
 | **Overview** | voltage, current, power; the highest of each since boot (`MAX`); protocol (`USB`, `TYPE-C`, `PD 2.0`, `PD 3.0`, `PPS`) with the CC pin and contract; flow chevrons; a heartbeat dot | Back: settings |
+| **Lines** | D+, D-, CC1 and CC2 voltages | |
 | **PD Profiles** | the charger's fixed profiles, `ACTIVE` on the one in force | OK, Left/Right to choose, OK requests it, Back cancels |
 | **PPS** | the charger's PPS ranges, the set voltage and current limit, the live output; `ACTIVE` or `NOT APPLIED` | OK, Left/Right voltage (20 mV, 100 mV held), OK, current limit (50 mA, 250 mA held), OK requests |
 | **PD Session** | sink: session state, CC levels and the charger's offer as received. Passthrough: CC pin, Rp level and the latest PD messages | OK to scroll |
@@ -225,7 +230,7 @@ register or message contents, shown for diagnosis.
 
 <img src="pictures/overview_screen.webp" width="360" alt="Overview screen">
 
-This is the **Overview** screen (`01/07`), the one the meter starts on.
+This is the **Overview** screen (`01/08`), the one the meter starts on.
 
 - **`VOLTAGE`**: bus voltage, in volts. `--.--` until the first reading, or
   while the sensor bus is closed.
@@ -248,11 +253,29 @@ This is the **Overview** screen (`01/07`), the one the meter starts on.
 - **Heartbeat dot** (bottom right): blinks while the meter runs; red when the
   sensor bus is closed (see the System screen).
 
-#### 2. PD Profiles
+#### 2. Lines
+
+This is the **Lines** screen (`02/08`): the voltages on the USB data and
+configuration lines, read by the MCU's own ADC against its internal
+reference, independently of the bus sensor and the PD controller.
+
+- **`D+`** / **`D-`**: the USB 2.0 data lines, in volts. Chargers that
+  identify themselves on these lines (BC 1.2, Apple and similar dividers) show
+  their levels here.
+- **`CC1`** / **`CC2`**: the Type-C configuration channels, in volts. The pin
+  in use carries the Type-C pull-up/pull-down level; a cable's VCONN shows on
+  the other one.
+- `-.--`: no reading yet, or the last ADC scan failed.
+- **`uncalibrated`** (hint row): the values use the reference manual's
+  nominal internal reference and have not been compared against a multimeter.
+
+The lines are sampled only while this screen is shown.
+
+#### 3. PD Profiles
 
 <img src="pictures/pd_profiles_screen.webp" width="360" alt="PD Profiles screen">
 
-This is the **PD Profiles** screen (`02/07`): the charger's fixed profiles.
+This is the **PD Profiles** screen (`03/08`): the charger's fixed profiles.
 
 - **Each row**: voltage, the charger's maximum current at it, and that power
   in watts. The voltage is coloured from cool (low) to warm (high).
@@ -264,11 +287,11 @@ This is the **PD Profiles** screen (`02/07`): the charger's fixed profiles.
   `< > choose  OK request  BACK cancel`. Before the charger's offer arrives it
   reads `waiting for the charger    < > pages`.
 
-#### 3. PPS
+#### 4. PPS
 
 <img src="pictures/pps_screen.webp" width="360" alt="PPS screen">
 
-This is the **PPS** screen (`03/07`): programmable voltage.
+This is the **PPS** screen (`04/08`): programmable voltage.
 
 - **Range row**: each PPS range the charger offers, for example
   `3.30-21.00V  up to 5.00A`.
@@ -283,11 +306,11 @@ This is the **PPS** screen (`03/07`): programmable voltage.
 - **Hint row**: `OK adjust PPS    < > pages`, `< > volts    OK next: current`,
   `< > amps    OK request`, or `waiting for the charger    < > pages`.
 
-#### 4. PD Session
+#### 5. PD Session
 
 <img src="pictures/pd_session_screen.webp" width="360" alt="PD Session screen">
 
-This is the **PD Session** screen (`04/07`): the meter's own PD negotiation.
+This is the **PD Session** screen (`05/08`): the meter's own PD negotiation.
 It scrolls (OK) through three sections.
 
 **Session section**
@@ -386,11 +409,11 @@ It scrolls (OK) through three sections.
 | `002B` | session ended without a contract |
 | `002C` | Hard Reset sent |
 
-#### 5. Charger
+#### 6. Charger
 
 <img src="pictures/charger_screen.webp" width="360" alt="Charger screen">
 
-This is the **Charger** screen (`05/07`): what the charger says about
+This is the **Charger** screen (`06/08`): what the charger says about
 itself. These are the charger's claims, not measurements. It scrolls (OK)
 through four parts; a long offer takes two screens.
 
@@ -451,11 +474,11 @@ through four parts; a long offer takes two screens.
 **Answer words** used in these sections: `OK`, `WAITING`, `NOT SUPPORTED`,
 `NO REPLY`, `BLOCKED`, `RESET`, `PD2 N/A` (not available under PD 2.0).
 
-#### 6. Cable
+#### 7. Cable
 
 <img src="pictures/cable_screen.webp" width="360" alt="Cable screen">
 
-This is the **Cable** screen (`06/07`): the cable's e-marker. Hold OK at
+This is the **Cable** screen (`07/08`): the cable's e-marker. Hold OK at
 fixed 5 V to read it. It scrolls (OK) through several sections.
 
 **Before or instead of a reading**
@@ -498,11 +521,11 @@ GET_STATUS`, `SECOND PLUG NO DATA`).
 **Status words**: `NOT QUERIED`, `ACK`, `NAK`, `BUSY NO RETRY`,
 `TIMEOUT NO RETRY`, `LIST INCOMPLETE`, `NOT SUPPORTED`.
 
-#### 7. System
+#### 8. System
 
 <img src="pictures/system_screen.webp" width="360" alt="System screen">
 
-This is the **System** screen (`07/07`): the meter's own health.
+This is the **System** screen (`08/08`): the meter's own health.
 
 **Sensor bus**
 
@@ -546,8 +569,8 @@ This is the **Settings** screen (Back on the overview).
 
 ### Passthrough mode
 
-Passthrough shows three screens: Overview, PD Sniff and System (`01/03` to
-`03/03`). The Overview and System screens read as in sink mode.
+Passthrough shows four screens: Overview, Lines, PD Sniff and System (`01/04`
+to `04/04`). The Overview, Lines and System screens read as in sink mode.
 
 #### 1. Overview in passthrough
 
@@ -561,7 +584,7 @@ messages the meter overheard, and the chevrons show which way power flows.
 
 <img src="pictures/pd_sniff_screen.webp" width="360" alt="PD Sniff screen">
 
-This is the **PD Sniff** screen (`02/03`): the PD messages between the
+This is the **PD Sniff** screen (`03/04`): the PD messages between the
 charger and the device, oldest first. The meter only listens.
 
 - **`SNIFF CC1 RP3.0A M:9`**: the CC pin carrying PD, the charger's Type-C
@@ -697,7 +720,9 @@ Passthrough (slider at passthrough, then power up):
 Sink (slider at sink, then power up from a PD charger through a cable):
 
 3. The overview shows voltage, current and the flow chevrons. Tilt the meter:
-   with rotation on auto, the screen follows.
+   with rotation on auto, the screen follows. Right: the lines page updates
+   D+, D-, CC1 and CC2, and the CC pin the overview names reads above 0 V.
+   Compare the values with a multimeter where the lines are reachable.
 4. Settings (Back on the overview): change brightness and rotation, then
    unplug and plug in again. Both are kept. Reset peaks clears them.
 5. Fixed page: step through the profiles, confirm one, check the overview

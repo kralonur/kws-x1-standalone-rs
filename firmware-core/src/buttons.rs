@@ -83,6 +83,8 @@ const PPS_MA_REPEAT: i16 = 250;
 pub enum Page {
     #[default]
     Overview,
+    /// D+, D−, CC1 and CC2 line voltages.
+    Lines,
     /// Fixed PD profile selector; while `choosing`, Left/Right preview
     /// profiles.
     Fixed { choosing: bool },
@@ -151,8 +153,9 @@ pub enum Detail {
 }
 
 /// The pages as Left/Right enter them.
-const PAGES: [Page; 7] = [
+const PAGES: [Page; 8] = [
     Page::Overview,
+    Page::Lines,
     Page::Fixed { choosing: false },
     Page::Pps(PpsFocus::Browse),
     Page::detail(Detail::Pd),
@@ -161,7 +164,7 @@ const PAGES: [Page; 7] = [
     Page::detail(Detail::System),
 ];
 /// Index of the first detail page in `PAGES`.
-const FIRST_DETAIL: usize = 3;
+const FIRST_DETAIL: usize = 4;
 
 /// `items[index ± 1]`, wrapping.
 fn cycle<T: Copy>(items: &[T], index: usize, forward: bool) -> T {
@@ -201,6 +204,7 @@ impl Page {
             || matches!(
                 self,
                 Self::Overview
+                    | Self::Lines
                     | Self::Settings(_)
                     | Self::Detail {
                         page: Detail::Pd | Detail::System,
@@ -230,8 +234,9 @@ impl Page {
     fn index(self) -> Option<usize> {
         match self {
             Self::Overview => Some(0),
-            Self::Fixed { .. } => Some(1),
-            Self::Pps(_) => Some(2),
+            Self::Lines => Some(1),
+            Self::Fixed { .. } => Some(2),
+            Self::Pps(_) => Some(3),
             Self::Detail { page, .. } => Some(FIRST_DETAIL + page as usize),
             Self::Settings(_) => None,
         }
@@ -562,7 +567,7 @@ impl Navigation {
                 None,
             ),
             Page::Settings(focus) => (Page::Settings(SettingsFocus::Row(focus.row())), None),
-            Page::Overview => (Page::Overview, None),
+            page @ (Page::Overview | Page::Lines) => (page, None),
         };
         input.page = page;
         command

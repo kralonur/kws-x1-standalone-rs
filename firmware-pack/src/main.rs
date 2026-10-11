@@ -13,7 +13,7 @@ const VECTOR_COUNT: usize = 160;
 const FIRST_IRQ: usize = 16;
 const SYSTICK_EXCEPTION: usize = 15;
 // Firmware startup's permitted non-default external interrupt vector indices.
-const CUSTOM_IRQS: [usize; 11] = [4, 8, 13, 31, 86, 87, 88, 110, 111, 112, 113];
+const CUSTOM_IRQS: [usize; 12] = [4, 8, 13, 31, 86, 87, 88, 110, 111, 112, 113, 116];
 // The startup stack must lie strictly inside this linker-defined RAM region.
 const STACK_RAM_START: u32 = 0x20000000;
 const STACK_RAM_END: u32 = 0x20010000;

@@ -19,7 +19,7 @@ const DESCRIPTOR: [u8; 16] = [
 ];
 // The fixture has 160 vectors and the firmware's permitted custom IRQ lines.
 const VECTOR_COUNT: usize = 160;
-const CUSTOM_IRQS: [usize; 11] = [4, 8, 13, 31, 86, 87, 88, 110, 111, 112, 113];
+const CUSTOM_IRQS: [usize; 12] = [4, 8, 13, 31, 86, 87, 88, 110, 111, 112, 113, 116];
 
 fn digest(data: &[u8]) -> String {
     Sha256::digest(data)

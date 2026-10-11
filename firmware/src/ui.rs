@@ -1,7 +1,7 @@
-//! Graphical pages: overview, PD profile and PPS selectors, settings and
-//! the scrolling detail lists, drawn with `embedded-graphics` primitives and `u8g2-fonts` text on any
-//! RGB565 target. The renderer gathers the values; nothing here touches
-//! hardware.
+//! Graphical pages: overview, line voltages, PD profile and PPS selectors,
+//! settings and the scrolling detail lists, drawn with `embedded-graphics`
+//! primitives and `u8g2-fonts` text on any RGB565 target. The renderer
+//! gathers the values; nothing here touches hardware.
 
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
@@ -14,6 +14,8 @@ use firmware_core::settings::{BRIGHTNESS_PERCENT, Item, Rotation, Settings};
 use u8g2_fonts::FontRenderer;
 use u8g2_fonts::fonts;
 use u8g2_fonts::types::{FontColor, HorizontalAlignment, VerticalPosition};
+
+use crate::line_adc::LineVoltages;
 
 /// Voltage and current: Inconsolata Bold 19 px, numerals only.
 const READING: FontRenderer =
@@ -608,6 +610,45 @@ fn status(protocol: Protocol, cc: Option<u8>) -> Label {
             .hundredths(u32::from(ma))
             .push(b"A"),
     }
+}
+
+/// Line cards, two by two: the data pair on top, the CC pair below.
+const DP_CARD: Rectangle = VOLTS_CARD;
+const DM_CARD: Rectangle = AMPS_CARD;
+const CC1_CARD: Rectangle = Rectangle::new(Point::new(4, 70), Size::new(114, 41));
+const CC2_CARD: Rectangle = Rectangle::new(Point::new(122, 70), Size::new(114, 41));
+
+/// The line voltage page. `lines` is `None` before the first scan and after
+/// a failed one.
+pub fn draw_lines<D: DrawTarget<Color = Rgb565>>(
+    target: &mut D,
+    header: &Header<'_>,
+    lines: Option<LineVoltages>,
+) {
+    draw_header(target, header, YELLOW);
+    let value = |mv: fn(&LineVoltages) -> u16| match lines {
+        Some(lines) => Label::new().hundredths(u32::from(mv(&lines))),
+        None => Label::new().push(b"-.--"),
+    };
+    let cards = [
+        (DP_CARD, YELLOW_TINT, YELLOW, "D+", value(|l| l.dp_mv)),
+        (DM_CARD, CYAN_TINT, CYAN, "D-", value(|l| l.dm_mv)),
+        (CC1_CARD, GREEN_TINT, GREEN, "CC1", value(|l| l.cc1_mv)),
+        (CC2_CARD, MAGENTA_TINT, MAGENTA, "CC2", value(|l| l.cc2_mv)),
+    ];
+    for (area, tint, color, label, value) in &cards {
+        card(target, *area, *tint, None);
+        card_label(target, *area, label, *color);
+        value_with_unit(
+            target,
+            &READING,
+            value,
+            "V",
+            area.top_left + Point::new(6, CARD_VALUE),
+            *color,
+        );
+    }
+    hint(target, "uncalibrated    < > pages");
 }
 
 /// Centred notice for a selector page with nothing to select.
