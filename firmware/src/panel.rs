@@ -183,9 +183,9 @@ pub async unsafe fn init(mut backlight_pin: AlternatePin) -> bool {
     }
 }
 
-/// Panel size in pixels, as frame buffer indices.
-const WIDTH: usize = panel::WIDTH as usize;
-const HEIGHT: usize = panel::HEIGHT as usize;
+/// Bytes in one RGB565 panel row. The frame goes out a row per SPI write,
+/// since the SPI driver faults a single write that runs past its timeout.
+const ROW_BYTES: usize = panel::WIDTH as usize * 2;
 
 /// CASET/RASET parameters: first and last address, big-endian (ST 9.1.20, 9.1.21).
 const fn span(start: u16, length: u16) -> [u8; 4] {
@@ -230,14 +230,9 @@ impl Orientation {
 }
 
 /// # Safety
-/// `frame` must point to [`panel::PIXELS`] readable RGB565 wire-swapped halfwords. Callback
-/// may sample inputs/update model but must not modify the frame during transfer.
-async unsafe fn stream(
-    bus: &mut impl Bus,
-    frame: *const u16,
-    mut sample: impl FnMut(),
-    orientation: Orientation,
-) -> bool {
+/// `frame` must point to [`panel::PIXELS`] readable RGB565 wire-swapped
+/// halfwords that nothing modifies during the transfer.
+async unsafe fn stream(bus: &mut impl Bus, frame: *const u16, orientation: Orientation) -> bool {
     if !command(bus, panel::CMD_COLUMN_ADDRESS, &COLUMNS).await
         || !command(bus, panel::CMD_ROW_ADDRESS, &orientation.rows()).await
         || !command(bus, panel::CMD_MEMORY_WRITE, &[]).await
@@ -246,14 +241,12 @@ async unsafe fn stream(
         return false;
     }
     bus.dc(true);
-    let mut wire = [0u8; WIDTH * 2];
-    for row in 0..HEIGHT {
-        sample();
-        for column in 0..WIDTH {
-            let pixel = unsafe { frame.add(row * WIDTH + column).read_volatile() };
-            wire[2 * column..2 * column + 2].copy_from_slice(&pixel.to_le_bytes());
-        }
-        if !bus.bytes(&wire).await {
+    // SAFETY: the caller guarantees `frame` holds PIXELS halfwords that stay
+    // unmodified for this transfer. They are already in wire byte order, so
+    // their memory bytes go out unchanged.
+    let wire = unsafe { core::slice::from_raw_parts(frame.cast::<u8>(), panel::PIXELS * 2) };
+    for row in wire.chunks(ROW_BYTES) {
+        if !bus.bytes(row).await {
             return false;
         }
     }
@@ -277,14 +270,10 @@ pub async unsafe fn set_orientation(orientation: Orientation) -> bool {
 
 /// # Safety
 /// Same initialized hardware/frame requirements as init/stream.
-pub async unsafe fn flush(
-    frame: *const u16,
-    sample: impl FnMut(),
-    orientation: Orientation,
-) -> bool {
+pub async unsafe fn flush(frame: *const u16, orientation: Orientation) -> bool {
     let mut owner = DISPLAY.lock().await;
     let Some(bus) = owner.as_mut() else {
         return false;
     };
-    unsafe { stream(bus, frame, sample, orientation).await }
+    unsafe { stream(bus, frame, orientation).await }
 }

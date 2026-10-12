@@ -1072,7 +1072,7 @@ async fn meter_task(
             }
             let frame_start = Instant::now();
             unsafe {
-                panel::flush(fb, || {}, current_rotation).await;
+                panel::flush(fb, current_rotation).await;
             }
             FRAME_MS.store(frame_start.elapsed().as_millis() as u32, Ordering::Relaxed);
         }
