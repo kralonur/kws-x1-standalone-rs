@@ -168,9 +168,18 @@ async fn passthrough(observation: &mut pd::Observation) -> Option<pd::Snapshot> 
     released
 }
 
+/// Longest gap between two full sniffer polls. In between, a 1 ms STATUS1
+/// sample starts one as soon as a message arrives, so this only bounds how
+/// late the latched interrupt flags (Hard Reset, collision) and the Rp level
+/// are read. Each full poll is five I2C reads, and each read wakes the PD
+/// executor several times: polling them every 1 ms measured a 63% PD
+/// executor load with the screen starved, against 6% in the I2C handlers.
+const SNIFF_FULL_POLL: embassy_time::Duration = embassy_time::Duration::from_millis(10);
+
 /// Receive-only passthrough sniffer: verified start (orientation, flush,
-/// listen), then one poll per I2C3 lock every nominal 1 ms and a read-only
-/// configuration check every second. Any error stops it for good, without
+/// listen), then per I2C3 lock every nominal 1 ms a STATUS1 sample or a full
+/// poll (see [`SNIFF_FULL_POLL`]) and a read-only configuration check every
+/// second. Any error stops it for good, without
 /// cleanup writes; bus errors and configuration mismatches also latch the bus.
 async fn sniff(observation: &mut pd::Observation, released: pd::Snapshot) {
     let mut view = pd::SniffObservation::new();
@@ -210,6 +219,7 @@ async fn sniff(observation: &mut pd::Observation, released: pd::Snapshot) {
         return;
     };
     let mut next_check = Instant::now() + embassy_time::Duration::from_secs(1);
+    let mut next_poll = Instant::now();
     while view.stop.is_none() {
         Timer::after_millis(1).await;
         let mut changed = false;
@@ -219,11 +229,24 @@ async fn sniff(observation: &mut pd::Observation, released: pd::Snapshot) {
                 view.stop = Some(pd::SniffStop::Halted);
                 break;
             };
-            let result = if Instant::now() >= next_check {
+            let now = Instant::now();
+            let result = if now >= next_check {
                 next_check += embassy_time::Duration::from_secs(1);
                 sniffer.check(bus).await.map(|()| None)
             } else {
-                sniffer.poll(bus).await.map(Some)
+                let due = if now >= next_poll {
+                    Ok(true)
+                } else {
+                    sniffer.pending(bus).await
+                };
+                match due {
+                    Ok(true) => {
+                        next_poll = now + SNIFF_FULL_POLL;
+                        sniffer.poll(bus).await.map(Some)
+                    }
+                    Ok(false) => Ok(None),
+                    Err(error) => Err(error),
+                }
             };
             view.flags = sniffer.flags();
             match result {

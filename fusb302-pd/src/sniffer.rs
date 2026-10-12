@@ -284,6 +284,18 @@ impl ActiveSniffer {
         self.stopped = false;
         Ok((outcome, status0))
     }
+    /// One read-only STATUS1 sample: whether a full [`Self::poll`] is needed
+    /// now, because a message is arriving or a FIFO or fault bit is set. The
+    /// read-clear interrupt flags stay latched in the PHY until that poll.
+    pub async fn pending<B: I2c>(&mut self, bus: &mut B) -> Result<bool, Error<B::Error>> {
+        if self.stopped {
+            return Err(Error::Stopped);
+        }
+        self.stopped = true;
+        let status = read(bus, register::STATUS1).await?;
+        self.stopped = false;
+        Ok(status & status1::FIFOS_AND_FAULTS != status1::IDLE)
+    }
     /// Read-only re-check of the 11 configuration bytes against the listening set.
     pub async fn check<B: I2c>(&mut self, bus: &mut B) -> Result<(), Error<B::Error>> {
         if self.stopped {
