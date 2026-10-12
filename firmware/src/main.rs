@@ -888,13 +888,17 @@ async fn meter_task(
         } else {
             ALIVE_B
         };
+        // Once a second, redraw what changes without a signal: the PD
+        // observation, the System screen's counters and timings.
         if secs != last_secs {
             last_secs = secs;
             dirty = true;
         }
         if Some(pulse_now) != last_pulse {
             last_pulse = Some(pulse_now);
-            dirty = true;
+            // Only the meter page draws the heartbeat dot; opening it is an
+            // input change, which redraws it with the current colour.
+            dirty |= view == View::Overview;
         }
 
         if dirty || changed {
