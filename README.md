@@ -131,8 +131,9 @@ What this firmware does **not** do, for now:
 - **Passthrough only listens.** It cannot change or inject anything between
   the charger and the device, and stops listening for good after a Hard Reset,
   a receive overflow or a malformed frame (until the next power-up).
-- **Cable reading needs fixed 5 V and the right orientation.** VCONN reaches
-  only one CC pin, so a cable on the other side reads `TURN CABLE OVER`.
+- **Cable reading runs at fixed 5 V, needs a PD 3.0 charger and the right
+  orientation.** Above 5 V, hold OK drops to 5 V first. VCONN reaches only one
+  CC pin, so a cable on the other side reads `TURN CABLE OVER`.
 - **The 5 A cable test is non-standard**, and works only with the meter's plug
   straight in the charger. See
   [Full charger offer and 5 A without a cable](#full-charger-offer-and-5-a-without-a-cable).
@@ -221,7 +222,7 @@ point the way it flows (they follow the screen rotation).
 | **QC 3.0** | the step range, the set voltage, VBUS, D+ and D−; under a PD contract only `PD MODE` | OK tests the charger, then starts continuous mode at 5 V (under a PD contract it first switches the charger out of PD); Left/Right move it by 0.2 V (repeats held); OK or Back closes it; the steps stay in force on other screens until `OFF` on QC 2.0 |
 | **PD Session** | sink: session state, CC levels and the charger's offer as received. Passthrough: CC pin, Rp level and the latest PD messages | OK to scroll |
 | **Charger** | the offer (`*` = needs a 5 A cable), the charger's identity, maker and peak ratings, power status and source info, the Quick Charge detection result | OK to scroll; hold OK: full scan (Quick Charge, PD, EPR, and the 5 A cable test with the plug in the charger) |
-| **Cable** | the cable's e-marker: identity, ratings, status and modes | OK to scroll; hold OK at fixed 5 V to read the e-marker |
+| **Cable** | the cable's e-marker: identity, ratings, status and modes | OK to scroll; hold OK to read the e-marker (drops to fixed 5 V first) |
 | **System** | I2C bus state and counters, frame and button timing, stack use, `LAST RESET:` cause | OK to scroll |
 | **Settings** | `BRIGHTNESS` (5 levels, 60% at first), `ROTATION` (`AUTO` follows the tilt sensor, `NORMAL`, `FLIPPED`), `RESET MAX`, `VERSION` (shown only) | Left/Right row, OK change it, Left/Right value, OK or Back done |
 
@@ -616,11 +617,12 @@ with `HOLD OK: FULL SCAN`, or without a PD contract `NOT TESTED YET` with
 <img src="pictures/cable_screen.webp" width="360" alt="Cable screen">
 
 This is the **Cable** screen (tab `CABLE` in Info): the cable's e-marker.
-Hold OK at fixed 5 V to read it. It scrolls (OK) through several sections.
+Hold OK to read it; from any other contract the meter requests fixed 5 V
+first, then asks the cable. It scrolls (OK) through several sections.
 
 **Before or instead of a reading**
 
-- `HOLD OK AT FIXED 5V`, `DISCOVERY IN PROGRESS`, `NO DISCOVERY YET`,
+- `HOLD OK TO ASK AT 5V`, `DISCOVERY IN PROGRESS`, `NO DISCOVERY YET`,
   `PD HALTED SEE PD PAGE`, `NO VALID IDENTITY`.
 - `METER PLUG IN CHARGER:` then `ACTS AS 5A CABLE` (in the test) or
   `NOT ACTING AS 5A CABLE` / `5A TEST: CHARGER PAGE`.
@@ -937,8 +939,8 @@ Sink (slider at sink, then power up from a PD charger through a cable):
    overview.
 7. Charger page (Info group): it lists the offer. With an EPR charger, hold OK: the 28 V and
    higher objects appear. With a 3 A cable, objects that need 5 A carry `*`.
-8. Cable page with an e-marked cable, from fixed 5 V: it shows the marker's
-   details.
+8. Cable page with an e-marked cable, from 9 V or higher: hold OK drops to 5 V
+   and it shows the marker's details.
 9. System page: `LAST RESET:` reads `POWER` after a plain plug-in, and the I2C
    fault counters stay at zero.
 10. Unplug and plug the charger back in mid-session: the meter boots and

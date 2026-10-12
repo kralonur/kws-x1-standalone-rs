@@ -103,7 +103,7 @@ pub fn cable_lines(observation: Observation, page: u32, svid: Option<u16>) -> [[
             } else if spr.cable_active {
                 b"DISCOVERY IN PROGRESS"
             } else {
-                b"HOLD OK AT FIXED 5V"
+                b"HOLD OK TO ASK AT 5V"
             },
         );
         return rows;

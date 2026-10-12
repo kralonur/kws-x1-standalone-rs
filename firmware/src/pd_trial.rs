@@ -168,10 +168,14 @@ fn control(
     list_all: bool,
 ) {
     use firmware_core::buttons::PdCommand;
+    // The session asks the cable only under PD 3.0
+    // (`pd_spr::Selection::request_cable`): a PD 2.0 contract is not dropped
+    // to 5 V for a query that cannot follow.
+    let pd3 = observation.spr.and_then(|spr| spr.peer_revision) == Some(3);
     while let Ok(command) = crate::PD_COMMANDS.try_receive() {
         match command {
             PdCommand::Restart => RESTART.store(true, AtomicOrdering::Relaxed),
-            PdCommand::QueryCable if plug_in_charger => {}
+            PdCommand::QueryCable if plug_in_charger || !pd3 => {}
             // The cable test only lists the offer: it keeps the boot's 5 V.
             _ if cable_test && command != PdCommand::QueryEpr => {}
             _ => selection.apply(command),
@@ -182,6 +186,7 @@ fn control(
     if list_all && selection.epr_offer() == pd_spr::EprOffer::NotAsked {
         selection.request_epr_offer();
     }
+    selection.resume_cable_query();
     if !plug_in_charger {
         pd::control_cable_selection(observation, selection, detail_page(), store);
     }

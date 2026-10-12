@@ -30,6 +30,16 @@ pub const REQUEST_MA: u32 = 100;
 /// object's Maximum Current; PD objects never exceed 5 A, so 12 A never binds.
 pub const MAX_CURRENT_MA: u32 = 12_000;
 pub const PPS_REFRESH_MS: u64 = 4_000;
+/// The only contract a cable query starts from: fixed 5 V, at the meter's
+/// own request current (`shared::Selection::request_cable`'s gate).
+const CABLE_QUERY_MV: u16 = 5_000;
+/// Wait after the 5 V contract a cable query requested, in ms, before asking
+/// the cable. The query first checks VBUS is within 4.75..=5.5 V, from the
+/// meter's sensor, which averages 64 pairs of 1.1 ms bus and shunt
+/// conversions (about 141 ms, `ina226::INIT`). Two such periods (282 ms)
+/// leave only readings taken after PS_RDY; a stale higher one fails the
+/// session. Rounded up.
+const CABLE_SETTLE_MS: u64 = 300;
 /// Fixed supply PDO units: 50 mV voltage, 10 mA maximum current (USB PD Table 6.9).
 const FIXED_VOLTAGE_UNIT_MV: u16 = 50;
 const FIXED_CURRENT_UNIT_MA: u16 = 10;
@@ -127,6 +137,11 @@ pub fn request_fixed(
 pub struct Selection {
     inner: shared::Selection<BoardLimits>,
     mode_cursor: Cell<Option<u16>>,
+    /// A cable query asked above 5 V: the meter requested 5 V first and asks
+    /// the cable once that contract is in place.
+    cable_after_5v: Cell<bool>,
+    /// When the 5 V contract a cable query waits for was first seen, in ms.
+    five_volts_since: Cell<Option<u64>>,
 }
 impl core::ops::Deref for Selection {
     type Target = shared::Selection<BoardLimits>;
@@ -139,6 +154,8 @@ impl Selection {
         Self {
             inner: shared::Selection::new(),
             mode_cursor: Cell::new(None),
+            cable_after_5v: Cell::new(false),
+            five_volts_since: Cell::new(None),
         }
     }
     pub fn mode_cursor(&self) -> Option<u16> {
@@ -150,6 +167,9 @@ impl Selection {
     /// Apply one request from the input task. Previews go through the shared
     /// selection's own checks; only `Confirm` schedules a Request.
     pub fn apply(&self, command: PdCommand) {
+        // Any other request replaces a cable query still waiting for 5 V.
+        self.cable_after_5v.set(false);
+        self.five_volts_since.set(None);
         match command {
             PdCommand::StepFixed(step) => self.step_fixed(step),
             PdCommand::PpsVoltage(delta) => self.adjust_pps(delta, 0),
@@ -157,14 +177,50 @@ impl Selection {
             PdCommand::Confirm => {
                 self.confirm();
             }
-            PdCommand::QueryCable => {
-                self.request_cable();
-            }
+            PdCommand::QueryCable => self.query_cable(),
             PdCommand::QueryEpr => {
                 self.request_epr_offer();
             }
             // The board's PD task restarts the meter; nothing to request.
             PdCommand::Restart => {}
+        }
+    }
+
+    /// Ask the cable for its identity, first requesting fixed 5 V when another
+    /// contract is held: the cable is only asked from 5 V.
+    fn query_cable(&self) {
+        if self.request_cable() {
+            return;
+        }
+        let five = self
+            .options()
+            .find(|option| option.pps_object == 0 && option.mv == CABLE_QUERY_MV);
+        if self.target_mv() != CABLE_QUERY_MV || self.target_pps_object() != 0 {
+            let requested = five.is_some_and(|five| self.preview(five) && self.confirm());
+            self.cable_after_5v.set(requested);
+        }
+    }
+
+    /// Ask the cable once the 5 V contract a cable query requested has held
+    /// for [`CABLE_SETTLE_MS`]; called on each pass of the session's control.
+    pub fn resume_cable_query(&self) {
+        if !self.cable_after_5v.get() {
+            return;
+        }
+        let at_5v = !self.request_in_flight()
+            && self
+                .established_target()
+                .is_some_and(|target| target.mv == CABLE_QUERY_MV && target.pps_object == 0);
+        if !at_5v {
+            self.five_volts_since.set(None);
+            return;
+        }
+        let now = self.now_ms();
+        let since = self.five_volts_since.get().unwrap_or(now);
+        self.five_volts_since.set(Some(since));
+        if now.saturating_sub(since) >= CABLE_SETTLE_MS && self.request_cable() {
+            self.cable_after_5v.set(false);
+            self.five_volts_since.set(None);
         }
     }
 
