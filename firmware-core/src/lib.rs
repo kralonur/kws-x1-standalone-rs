@@ -5,6 +5,7 @@
 
 pub mod buttons;
 pub mod clock;
+pub mod dcp;
 /// Application base address in flash (`0x10000`), where the bootloader enters it.
 pub const APP_BASE: u32 = 0x10000;
 pub mod latch;

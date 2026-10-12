@@ -224,13 +224,12 @@ const PPS_RDO_VOLTAGE_UNIT_MV: u32 = 20;
 const PPS_RDO_CURRENT_MASK: u32 = 0x7f;
 const PPS_RDO_CURRENT_UNIT_MA: u32 = 50;
 
-/// The charging protocol shown on the meter page. A Request the passthrough
-/// sniffer decoded wins, then this meter's own contract, then a capabilities
-/// offer, then the Type-C current advertisement on the attached CC.
-pub fn protocol(observation: &Observation) -> Protocol {
+/// The PD side of the charging protocol: a Request the passthrough sniffer
+/// decoded wins, then this meter's own contract, then a capabilities offer.
+pub fn protocol(observation: &Observation) -> Option<Protocol> {
     if let Some(sniff) = observation.sniff {
         if let Some((header, supply)) = sniff.request {
-            return match supply {
+            return Some(match supply {
                 Supply::Pps { mv, ma } => Protocol::Pps {
                     mv: mv.min(u32::from(u16::MAX)) as u16,
                     ma: ma.min(u32::from(u16::MAX)) as u16,
@@ -241,19 +240,16 @@ pub fn protocol(observation: &Observation) -> Protocol {
                     ma: ma.min(u32::from(u16::MAX)) as u16,
                 },
                 Supply::Raw => Protocol::PdOffer,
-            };
+            });
         }
         if sniff.caps_count > 0 {
-            return Protocol::PdOffer;
-        }
-        if let Some(rp) = sniff.rp {
-            return type_c(rp);
+            return Some(Protocol::PdOffer);
         }
     }
     if let Some(spr) = observation.spr
         && (spr.psrdy_seen || spr.contract_seen)
     {
-        return if spr.pps {
+        return Some(if spr.pps {
             Protocol::Pps {
                 mv: spr.target_mv,
                 ma: spr.target_ma,
@@ -266,16 +262,24 @@ pub fn protocol(observation: &Observation) -> Protocol {
                     .fixed_current(spr.target_mv)
                     .unwrap_or(spr.target_ma),
             }
-        };
+        });
     }
-    if observation.capabilities.is_some() {
-        return Protocol::PdOffer;
-    }
-    attached_cc(observation)
-        .zip(observation.cc_status)
-        .and_then(|(cc, status)| status.get(usize::from(cc).checked_sub(1)?).copied())
-        .and_then(firmware_core::pd_sniff::rp)
-        .map_or(Protocol::Unknown, type_c)
+    observation.capabilities.map(|_| Protocol::PdOffer)
+}
+
+/// The Type-C current advertisement on the attached CC, as the passthrough
+/// sniffer or this meter's own CC check saw it.
+pub fn type_c_current(observation: &Observation) -> Option<Protocol> {
+    observation
+        .sniff
+        .and_then(|sniff| sniff.rp)
+        .or_else(|| {
+            attached_cc(observation)
+                .zip(observation.cc_status)
+                .and_then(|(cc, status)| status.get(usize::from(cc).checked_sub(1)?).copied())
+                .and_then(firmware_core::pd_sniff::rp)
+        })
+        .map(type_c)
 }
 
 /// The charger's offer and this meter's preview and contract, for the

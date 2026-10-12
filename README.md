@@ -109,9 +109,11 @@ This is **kws-x1-standalone-rs**.
 What this firmware does **not** do, for now:
 
 - **USB PD and Quick Charge only.** No other fast-charging protocol is
-  detected or triggered: no Samsung AFC, Huawei FCP/SCP, Apple 2.4 A, BC 1.2
-  or anything else on the D+/D- lines. Without PD the meter only reads the
-  Type-C current advertisement (`USB`, `TYPE-C` 1.5 A / 3 A).
+  triggered: no Samsung AFC, Huawei FCP/SCP or anything else on the D+/D-
+  lines. Beyond those two the overview names the Type-C current
+  advertisement, the fixed D+/D- voltages some ports use to tell their
+  current (`DIVIDER`, `1.2V DCP`) and the BC1.2 short once the Quick Charge
+  test found it; a BC1.2 port looks like a plain USB port until then.
 - **No EPR.** The meter can ask for and list the EPR offer (28 V and up), but
   it never enters EPR mode and cannot request an EPR voltage. Requests stay
   within the standard range: fixed profiles up to 20 V and PPS.
@@ -210,7 +212,7 @@ point the way it flows (they follow the screen rotation).
 
 | Page | Shows | Buttons |
 | ---- | ----- | ------- |
-| **Overview** | voltage, current, power; the highest of each since boot (`MAX`); protocol (`USB`, `TYPE-C`, `PD 2.0`, `PD 3.0`, `PPS`) with the CC pin and contract; flow chevrons; a heartbeat dot | Back: settings |
+| **Overview** | voltage, current, power; the highest of each since boot (`MAX`); protocol (`USB`, `TYPE-C`, `PD 2.0`, `PD 3.0`, `PPS`, `QC 2.0`, `QC 3.0`, `DIVIDER`, `1.2V DCP`, `BC1.2`) with the CC pin and contract; flow chevrons; a heartbeat dot | Back: settings |
 | **Lines** | D+, D-, CC1 and CC2 voltages | |
 | **PD Profiles** | the charger's fixed profiles, `ACTIVE` on the one in force; with PD off for Quick Charge only `QC MODE` | OK, Left/Right to choose, OK requests it, Back cancels; in `QC MODE` OK switches back to PD |
 | **PPS** | the charger's PPS ranges, the set voltage and current limit, the live output; `ACTIVE` or `NOT APPLIED`; with PD off for Quick Charge only `QC MODE` | OK, Left/Right voltage (20 mV, 100 mV held), OK, current limit (50 mA, 250 mA held), OK requests; in `QC MODE` OK switches back to PD |
@@ -263,16 +265,32 @@ meter starts on.
 - **`POWER`**: voltage × current, in watts.
 - **`MAX`**: the highest voltage, current and power seen since power-up or
   the last `RESET MAX` in the settings.
-- **Protocol badge** (bottom left), one of:
-  - `NONE`: no source identified yet.
-  - `USB`: plain USB power (Type-C default current, or no Type-C at all).
-  - `TYPE-C`: Type-C current advertisement without PD (1.5 A or 3 A).
+- **Protocol badge** (bottom left): the first of these that applies.
+  - `QC 2.0` / `QC 3.0`: this meter's Quick Charge request, while the
+    charger follows it. Status: the request (`9V`) or the output the steps
+    set (`7.40V`).
   - `PD`: the charger sent an offer, no contract known yet.
   - `PD 2.0` / `PD 3.0`: fixed PD contract and its PD revision.
   - `PPS`: a PPS contract.
+  - `QC 2.0` / `QC 3.0` again: Quick Charge another device drives, read from
+    D+/D-. A raised request counts once the output moved past halfway to
+    it; continuous mode shows `continuous`.
+  - `TYPE-C`: Type-C current advertisement without PD (1.5 A or 3 A).
+  - `DIVIDER`: a port telling its current by fixed D+/D- voltages (TI
+    TPS2514 datasheet, section 8.3.3): D+ 2 V and D- 2.7 V for a 5 W adapter
+    (`5V 1.00A`), 2.7 V and 2 V for 10 W (`5V 2.00A`), 2.7 V on both for
+    12 W (`5V 2.40A`).
+  - `1.2V DCP`: 1.2 V on both lines, which some tablet chargers use
+    (section 8.3.4); no rating is published.
+  - `BC1.2`: a dedicated charging port with D+ shorted to D- (`5V
+    shorted`). Only the Quick Charge test can see the short, so this shows
+    after it ran.
+  - `USB`: plain USB power (Type-C default current, or no Type-C at all).
+  - `NONE`: no source identified yet.
 - **Status text** next to the badge: the CC pin in use (`CC1` or `CC2`),
   then one of `no source`, `5V default`, `5V 1.50A`, `5V 3.00A`,
-  `offer, 5V`, or the contract, for example `9V 3.00A`.
+  `offer, 5V`, the contract (for example `9V 3.00A`), or the Quick Charge
+  and port values above.
 - **Chevrons** `< < <` or `> > >`: the direction current flows, drawn above
   a small threshold. They follow the screen rotation.
 - **Heartbeat dot** (bottom right): blinks while the meter runs; red when the
@@ -295,8 +313,8 @@ reference, independently of the bus sensor and the PD controller.
   unit, and another unit's may differ by a few percent (see
   [Limitations](#limitations)).
 
-The lines are sampled only while this screen or a Quick Charge screen is
-shown, or while Quick Charge runs.
+The lines are sampled only while this screen, the overview or a Quick
+Charge screen is shown, or while Quick Charge runs.
 
 #### 3. PD Profiles
 
@@ -960,6 +978,10 @@ parts they behave as.
   Single-Chip TFT Controller/Driver** data sheet, Version 1.3 (2014/03):
   source outputs (section 2), system commands (section 9.1: SLPOUT 9.1.12,
   CASET 9.1.20, RASET 9.1.21, MADCTL 9.1.28) and panel commands (section 9.2).
+- **TPS2514** — Texas Instruments **TPS2513, TPS2513A, TPS2514, TPS2514A USB
+  Dedicated Charging Port Controller** data sheet, SLVSBY8D (June 2020), from
+  [ti.com](https://www.ti.com/lit/ds/symlink/tps2514.pdf): divider and 1.2 V
+  modes (sections 8.3.3 and 8.3.4) and their output voltages (section 7.5).
 - **USB PD** — **Universal Serial Bus Power Delivery Specification**, Release 3.2,
   Version 1.2 (August 19, 2026), from the
   [USB-IF document library](https://www.usb.org/document-library/usb-power-delivery).

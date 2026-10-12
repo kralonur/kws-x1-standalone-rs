@@ -22,6 +22,7 @@ mod pd_cc;
 mod pd_spr_phy;
 mod pd_task;
 mod pd_trial;
+mod protocol;
 mod qc_drive;
 
 mod pd_service;
@@ -524,10 +525,10 @@ async fn tilt_task(input: InputPin) {
     }
 }
 
-/// Scan the line voltages at the meter's read pace while the lines or a
-/// Quick Charge tab is shown or the trigger runs, ADC2 idle otherwise, and
-/// step the Quick Charge trigger toward the request in force, whichever tab
-/// is shown. Without one it releases D+/D−.
+/// Scan the line voltages at the meter's read pace while the overview, the
+/// lines or a Quick Charge tab is shown or the trigger runs, ADC2 idle
+/// otherwise, and step the Quick Charge trigger toward the request in force,
+/// whichever tab is shown. Without one it releases D+/D−.
 #[embassy_executor::task]
 async fn line_task(mut adc: line_adc::LineAdc, mut trigger: qc_drive::Trigger) {
     let lines_sender = LINE_VOLTAGES.sender();
@@ -899,13 +900,20 @@ async fn meter_task(
                 View::Overview => {
                     render::clear(frame);
                     let observation = latest_observation();
+                    let reading = reading(last_raw_v, last_raw_i);
                     ui::draw_meter(
                         &mut Canvas(frame),
                         &header,
                         &ui::Meter {
-                            reading: reading(last_raw_v, last_raw_i),
+                            reading,
                             peaks,
-                            protocol: pd::protocol(&observation),
+                            protocol: protocol::identify(&protocol::Sources {
+                                observation: &observation,
+                                lines,
+                                qc: qc_status,
+                                findings: qc_findings,
+                                vbus_mv: reading.map(|reading| reading.mv),
+                            }),
                             cc: pd::attached_cc(&observation),
                             flipped: current_rotation == Orientation::Inverted,
                             alive: pulse_now,

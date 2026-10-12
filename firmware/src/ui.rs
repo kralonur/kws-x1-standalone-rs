@@ -10,6 +10,7 @@ use embedded_graphics::primitives::{
     Triangle,
 };
 use firmware_core::buttons::{Detail, Level, PpsFocus, Qc2Choice, QcOffer, SettingsFocus, Tab};
+use firmware_core::dcp::Dcp;
 use firmware_core::settings::{BRIGHTNESS_PERCENT, Item, QcFindings, Rotation, Settings};
 use u8g2_fonts::FontRenderer;
 use u8g2_fonts::fonts;
@@ -112,7 +113,7 @@ impl Peaks {
     }
 }
 
-/// The charging protocol the meter can identify from the PD controller.
+/// The charging protocol in force, as far as the meter can tell.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Protocol {
     /// Nothing identified yet.
@@ -130,6 +131,16 @@ pub enum Protocol {
     },
     /// Programmable power supply contract.
     Pps { mv: u16, ma: u16 },
+    /// Quick Charge 2.0 at this requested output, in mV.
+    Qc2 { mv: u16 },
+    /// Quick Charge 3.0 continuous mode; `mv` is the output the steps set,
+    /// when this meter sends them.
+    Qc3 { mv: Option<u16> },
+    /// A charging port telling its current by fixed D+/D− voltages.
+    Dcp(Dcp),
+    /// A BC1.2 dedicated charging port (D+ shorted to D−), as the Quick
+    /// Charge test found it.
+    Bc12,
 }
 
 /// A supply level: fixed or PPS, in mV and mA.
@@ -547,6 +558,11 @@ fn protocol_badge(protocol: Protocol) -> (&'static str, Rgb565) {
         } => ("PD 3.0", GREEN),
         Protocol::Pd { .. } => ("PD 2.0", CYAN),
         Protocol::Pps { .. } => ("PPS", MAGENTA),
+        Protocol::Qc2 { .. } => ("QC 2.0", ORANGE),
+        Protocol::Qc3 { .. } => ("QC 3.0", ORANGE),
+        Protocol::Dcp(Dcp::Bias1V2) => ("1.2V DCP", YELLOW),
+        Protocol::Dcp(_) => ("DIVIDER", YELLOW),
+        Protocol::Bc12 => ("BC1.2", WHITE),
     }
 }
 
@@ -739,6 +755,13 @@ fn status(protocol: Protocol, cc: Option<u8>) -> Label {
             .push(b" ")
             .hundredths(u32::from(ma))
             .push(b"A"),
+        Protocol::Qc2 { mv } | Protocol::Qc3 { mv: Some(mv) } => label.volts(mv),
+        Protocol::Qc3 { mv: None } => label.push(b"continuous"),
+        Protocol::Dcp(dcp) => match dcp.milliamps() {
+            Some(ma) => label.push(b"5V ").hundredths(ma).push(b"A"),
+            None => label.push(b"5V"),
+        },
+        Protocol::Bc12 => label.push(b"5V shorted"),
     }
 }
 

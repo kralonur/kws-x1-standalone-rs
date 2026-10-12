@@ -26,8 +26,8 @@ firmware-image = { path = "firmware-image" }
 fusb302-pd = { path = "fusb302-pd" }
 hc32f460-pac = { git = "https://github.com/kralonur/hc32f460-embassy-rs", rev = "a61525380066778cf8fa0062ebf1a61d2842c270" }
 panic-halt = "1.0.0"
-pd-protocol = { git = "https://github.com/kralonur/embedded-charging-protocols-rs", rev = "a0e48562c3c5462472cbcb0914af17c6eb847657" }
-qc-protocol = { git = "https://github.com/kralonur/embedded-charging-protocols-rs", rev = "a0e48562c3c5462472cbcb0914af17c6eb847657" }
+pd-protocol = { git = "https://github.com/kralonur/embedded-charging-protocols-rs", rev = "c41cb5bf7f1a4ac2ccc763df60426db7a5ac4bc0" }
+qc-protocol = { git = "https://github.com/kralonur/embedded-charging-protocols-rs", rev = "c41cb5bf7f1a4ac2ccc763df60426db7a5ac4bc0" }
 u8g2-fonts = "0.8.0"
 usbpd = { git = "https://github.com/kralonur/usbpd", rev = "13e747ed116874d30ac54b58ff6d104cbe6b9ec3" }
 usbpd-traits = { git = "https://github.com/kralonur/usbpd", rev = "13e747ed116874d30ac54b58ff6d104cbe6b9ec3" }

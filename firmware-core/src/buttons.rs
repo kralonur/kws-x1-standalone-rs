@@ -293,9 +293,10 @@ impl View {
         matches!(self, Self::Qc2(_) | Self::Qc3 { .. } | Self::Probe)
     }
 
-    /// The line voltages are shown here.
+    /// The line voltages are read here: shown, or on the overview used to
+    /// name the charging protocol.
     pub const fn shows_lines(self) -> bool {
-        matches!(self, Self::Lines) || self.quick_charge()
+        matches!(self, Self::Overview | Self::Lines) || self.quick_charge()
     }
 }
 
