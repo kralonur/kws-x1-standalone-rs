@@ -12,6 +12,8 @@
 mod bus;
 mod clock_setup;
 mod flash;
+#[cfg(feature = "flash-probe")]
+mod flash_probe;
 mod ina226;
 mod line_adc;
 mod lis3dh;
@@ -1121,14 +1123,10 @@ async fn meter_task(
                                 reads: ASYNC_READS.load(Ordering::Relaxed),
                                 reset_flags: reset_flags(),
                             };
-                            ui::draw_detail(
-                                canvas,
-                                &header,
-                                detail,
-                                render::system_lines(counters, bus_failed()),
-                                top,
-                                scrolling,
-                            )
+                            let sections = render::system_lines(counters, bus_failed()).into_iter();
+                            #[cfg(feature = "flash-probe")]
+                            let sections = sections.chain([flash_probe::lines()]);
+                            ui::draw_detail(canvas, &header, detail, sections, top, scrolling)
                         }
                     };
                     detail_sender.send_if_modified(|current| {

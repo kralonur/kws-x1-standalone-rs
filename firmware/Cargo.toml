@@ -20,6 +20,9 @@ pd-hold-diagnostic = []
 pd-boot-diagnostic = []
 # Log cable inspection and fatal records without changing normal boot.
 cable-log = []
+# Read-only flash probe sections on the System page (bootloader, trailer,
+# upper sectors); never writes or erases.
+flash-probe = []
 
 [dependencies]
 cortex-m = { workspace = true, features = ["critical-section-single-core"] }

@@ -68,7 +68,7 @@ fn decimal(row: &mut [u8; 24], at: usize, digits: usize, value: u32) {
 }
 
 /// `digits` hexadecimal digits of `value` (the low ones) at `row[at..]`.
-fn hex(row: &mut [u8; 24], at: usize, digits: usize, value: u32) {
+pub fn hex(row: &mut [u8; 24], at: usize, digits: usize, value: u32) {
     let mut value = value;
     for cell in row[at..at + digits].iter_mut().rev() {
         *cell = b"0123456789ABCDEF"[(value & 0xf) as usize];
@@ -76,7 +76,7 @@ fn hex(row: &mut [u8; 24], at: usize, digits: usize, value: u32) {
     }
 }
 
-fn put(row: &mut [u8; 24], text: &[u8]) {
+pub fn put(row: &mut [u8; 24], text: &[u8]) {
     row[..text.len()].copy_from_slice(text);
 }
 
