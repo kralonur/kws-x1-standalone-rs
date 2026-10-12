@@ -533,12 +533,20 @@ async fn tilt_task(input: InputPin) {
     // Table 55). So a high level means "flip" even without a new edge: a turn
     // back during the lockout, or a device started upside down, otherwise
     // leaves the screen wrong until the next full flip.
+    //
+    // The sensor raises INT1 on the first sample past the threshold, and a
+    // button press can jolt the device that far for a moment. So a flip also
+    // needs INT1 to stay high for `SETTLE_MS`: a turn holds the new position,
+    // a jolt does not.
     const REFRACTORY_MS: u64 = 1500;
     let orientation_sender = ORIENTATION.sender();
     let mut orientation = Orientation::Normal;
     loop {
         if !tilt.is_high() {
             tilt.wait_for_edge().await;
+        }
+        if !held_high(&tilt).await {
+            continue;
         }
 
         // Re-arm the sensor before showing the flip: if the write fails, the
@@ -554,6 +562,26 @@ async fn tilt_task(input: InputPin) {
         Timer::after_millis(REFRACTORY_MS).await;
         while embassy_hc32::exti::take_edge(TILT_EIRQ) {}
     }
+}
+
+/// How long INT1 must stay high before the screen flips, in ms. Chosen, not
+/// measured: well past a button press's jolt, short enough that a turn
+/// still feels immediate.
+const SETTLE_MS: u64 = 300;
+/// Pace of the INT1 level checks while it settles, in ms; chosen.
+const SETTLE_CHECK_MS: u64 = 20;
+
+/// Whether INT1 stays high for [`SETTLE_MS`], checked every
+/// [`SETTLE_CHECK_MS`].
+async fn held_high(tilt: &embassy_hc32::exti::ExtiInput) -> bool {
+    let settled = Instant::now() + embassy_time::Duration::from_millis(SETTLE_MS);
+    while tilt.is_high() {
+        if Instant::now() >= settled {
+            return true;
+        }
+        Timer::after_millis(SETTLE_CHECK_MS).await;
+    }
+    false
 }
 
 /// Scan the line voltages at the meter's read pace while the overview, the

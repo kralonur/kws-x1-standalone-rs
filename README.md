@@ -702,8 +702,9 @@ This is the **Settings** screen (Back on the overview): display preferences
 and the overview's peaks.
 
 - **`BRIGHTNESS`**: five bars, 20%, 40%, 60%, 80% and 95%. Saved.
-- **`ROTATION`**: `AUTO` (follows the tilt sensor), `NORMAL` or `FLIPPED`.
-  Saved.
+- **`ROTATION`**: `AUTO` (follows the tilt sensor once the meter has stayed
+  turned for 0.3 s, so a jolt from a button press does not flip it),
+  `NORMAL` or `FLIPPED`. Saved.
 - **`RESET MAX`**: OK clears the overview's `MAX` values.
 - **Hint row**: `< > choose  OK change  BACK exit`, then
   `< > dimmer/brighter    OK done` or `< > auto/normal/flipped  OK done`.
