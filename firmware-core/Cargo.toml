@@ -11,9 +11,7 @@ test = false
 bench = false
 
 [dependencies]
-embassy-hc32.workspace = true
 fusb302-pd.workspace = true
 pd-protocol.workspace = true
 qc-protocol.workspace = true
 usbpd.workspace = true
-usbpd-traits.workspace = true

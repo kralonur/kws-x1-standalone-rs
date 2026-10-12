@@ -25,11 +25,6 @@ pub fn decode(bytes: &[u8]) -> Result<(Frame<'_>, usize), Error> {
     decode_with(bytes, false, false)
 }
 
-/// Opt-in single-packet extended SOP'/SOP'' messages; partner frames stay unchanged.
-pub fn decode_cable_extended(bytes: &[u8]) -> Result<(Frame<'_>, usize), Error> {
-    decode_with(bytes, true, false)
-}
-
 /// Explicitly selected extended reception, as [`decode_wire_with`].
 pub fn decode_with(bytes: &[u8], cable: bool, partner: bool) -> Result<(Frame<'_>, usize), Error> {
     if bytes.len() < 3 {

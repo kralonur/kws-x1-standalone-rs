@@ -347,15 +347,10 @@ pub struct Session<'a, B: I2c, D, C, P: Platform> {
     // INTERRUPTA bits seen since the last transmission was written.
     tx_wait_flags: u8,
     request: Option<RequestStage>,
-    // Time of the Protocol Error that armed our Soft_Reset: it bounds
-    // tProtErrSoftReset/tSoftReset (Table 7.9).
-    protocol_error_at: Option<u64>,
     // From a completed Soft Reset until the renegotiated Request ends.
     recovering: bool,
-    // A mandatory Hard Reset is due (`docs/SAFETY.md`); the time of
-    // the Protocol Error bounds tHardReset/tProtErrHardReset (Table 7.9).
+    // A mandatory Hard Reset is due (`docs/SAFETY.md`).
     hard_reset_armed: bool,
-    hard_reset_error_at: Option<u64>,
     // Hard Reset Signaling written / received (I_HARDRST): the session is over.
     hard_reset_sent: bool,
     hard_reset_received: bool,
@@ -368,7 +363,6 @@ pub struct Session<'a, B: I2c, D, C, P: Platform> {
     cable_phase: CablePhase,
     cable_rx_id: u8,
     tx_revision: u8,
-    t_send: Option<u64>,
     t_ack: Option<u64>,
     t_accept: Option<u64>,
     error: Option<Error<B::Error>>,
@@ -445,10 +439,8 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             both_rp: false,
             tx_wait_flags: 0,
             request: None,
-            protocol_error_at: None,
             recovering: false,
             hard_reset_armed: false,
-            hard_reset_error_at: None,
             hard_reset_sent: false,
             hard_reset_received: false,
             unheard_restart: false,
@@ -458,7 +450,6 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             cable_phase: CablePhase::Idle,
             cable_rx_id: 0,
             tx_revision: header::REVISION_3,
-            t_send: None,
             t_ack: None,
             t_accept: None,
             error: None,
@@ -715,7 +706,6 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             if let Some(report) = selection.cable_result() {
                 self.trace().cable_report = Some(report);
             }
-            self.trace().pps_status = selection.pps_status();
             self.trace().partner = selection.partner_info();
             self.trace().epr_offer = selection.epr_offer();
         }
@@ -1368,7 +1358,6 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             t_send
         };
         // No await since the write: nothing can have polled these yet.
-        self.t_send = Some(t_send);
         if sop == Sop::Partner {
             self.tx_revision = revision;
             // Only the first Request locks SOP revision (section 6.1.3.1).
@@ -1438,9 +1427,6 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                     == status1::TX_EMPTY;
             if self.trace().tx_sent_irq && self.trace().tx_goodcrc || goodcrc_only {
                 self.trace().tx_ack_goodcrc_only = goodcrc_only;
-                if goodcrc_only {
-                    self.trace().txsent_missing = self.trace().txsent_missing.saturating_add(1);
-                }
                 let Some(t_ack) = self
                     .pending_tx
                     .as_ref()
@@ -1500,19 +1486,10 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                 if reset_accept {
                     self.reset = Some(ResetStep::WaitCapsAfterReset);
                     self.recovering = true;
-                    self.trace().soft_resets_accepted =
-                        self.trace().soft_resets_accepted.saturating_add(1);
                 }
                 if soft_reset {
                     self.reset = Some(ResetStep::AwaitAccept);
                     self.recovering = true;
-                    self.trace().soft_resets_sent = self.trace().soft_resets_sent.saturating_add(1);
-                    if let Some(at) = self.protocol_error_at.take() {
-                        let ms = t_send.saturating_sub(at).min(255) as u8;
-                        if ms > self.trace().soft_reset_ms {
-                            self.trace().soft_reset_ms = ms;
-                        }
-                    }
                 }
                 if is_request {
                     self.request = Some(RequestStage::AwaitReply);
@@ -1601,14 +1578,12 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         }
         self.begin_reset();
         self.reset = Some(ResetStep::SendSoftReset);
-        self.protocol_error_at = Some(self.clock.now_ms());
         Ok(())
     }
     /// A mandatory Hard Reset case (`docs/SAFETY.md`) was detected:
     /// it is the only permitted next step.
     fn arm_hard_reset(&mut self) {
         self.hard_reset_armed = true;
-        self.hard_reset_error_at = Some(self.clock.now_ms());
     }
     /// Record a session step (only with `trace_steps`); a new furthest step is
     /// published at once so it is on screen before a possible VBUS loss.
@@ -1671,7 +1646,6 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
     /// b'C' a SOP Message arrived and ours was dropped unsent (section 7.3).
     /// (`gated_send` records b'Q' when it sent through the stale-SinkTxNG fallback.)
     fn defer<T>(&mut self, cause: u8) -> Result<T, Error<B::Error>> {
-        self.trace().sink_tx_deferred = self.trace().sink_tx_deferred.saturating_add(1);
         self.trace().sink_tx_cause = cause;
         Err(Error::Deferred)
     }
@@ -1711,13 +1685,8 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             if sent {
                 self.register = Some(register::FIFOS);
                 self.trace().sink_tx_cause = if fallback { b'Q' } else { 0 };
-                let gate = now.saturating_sub(sampled).min(255) as u8;
-                if gate > self.trace().sink_tx_gate_ms {
-                    self.trace().sink_tx_gate_ms = gate;
-                }
                 return Ok(sampled);
             }
-            self.trace().sink_tx_refused = Some(samples);
             stale &= P::ALLOW_STALE_SINK_TX_NG
                 && (stale_sink_tx_ng(samples[0], samples[1])
                     || self.both_rp && stale_rp_default(samples[0], samples[1]));
@@ -2433,10 +2402,6 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         {
             return Err(Error::Request);
         }
-        if let Some(at) = self.hard_reset_error_at {
-            self.trace().hard_reset_ms = now.saturating_sub(at).min(255) as u8;
-        }
-        self.trace().hard_resets_sent = self.trace().hard_resets_sent.saturating_add(1);
         // Only seen if the tester stays powered through the VBUS drop.
         if let Some(publish) = self.config.publish {
             let mut observation = self.observation;
@@ -2469,7 +2434,6 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                 self.hard_reset_received = true; // the Source's crossed ours
             }
             if flags & interrupta::I_HARDSENT != 0 {
-                self.trace().hard_reset_confirmed = true;
                 return Ok(());
             }
             if self.clock.now_ms().saturating_sub(began) >= HARD_RESET_COMPLETE_MS {

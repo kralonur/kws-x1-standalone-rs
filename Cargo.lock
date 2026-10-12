@@ -544,12 +544,10 @@ dependencies = [
 name = "firmware-core"
 version = "0.1.0"
 dependencies = [
- "embassy-hc32",
  "fusb302-pd",
  "pd-protocol",
  "qc-protocol",
  "usbpd",
- "usbpd-traits",
 ]
 
 [[package]]

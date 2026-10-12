@@ -72,18 +72,10 @@ pub struct SprObservation {
     /// Operating current of the last Request sent, in mA (RDO bits 19..10 for
     /// fixed, 6..0 for PPS).
     pub request_ma: u16,
-    /// Longest STATUS0 sample to TXON write seen by the SinkTxOK gate (section 7.2).
-    pub sink_tx_gate_ms: u8,
-    /// Sink-initiated AMS starts not sent: SinkTxNG or a SOP Message first.
-    pub sink_tx_deferred: u16,
     /// Last deferral: b'G' SinkTxOK not seen in time, b'M' SOP Message first, b'C' a
     /// SOP Message arrived and ours was dropped unsent;
     /// or b'Q': the last AMS start was sent after a quiet stale SinkTxNG window.
     pub sink_tx_cause: u8,
-    /// STATUS0/STATUS1 of the most recent sample the gate refused.
-    pub sink_tx_refused: Option<[u8; 2]>,
-    /// Most recent PPS_Status of this session (section 6.5.13); not displayed.
-    pub pps_status: Option<pd_protocol::pd_spr::PpsStatus>,
     /// What the Source answered to the information requests (`pd_partner`).
     pub partner: pd_protocol::pd_partner::PartnerInfo,
     /// The Source's EPR offer, when asked (`pd_spr::Limits::EPR_OFFER`).
@@ -91,22 +83,8 @@ pub struct SprObservation {
     /// Last transmission that saw neither GoodCRC nor I_RETRYFAIL (ERR 000D).
     pub tx_timeout: Option<TxTimeout>,
     /// The last transmission was acknowledged by its GoodCRC frame without the
-    /// FUSB302's I_TXSENT (`ACK:G`), and how often that happened.
+    /// FUSB302's I_TXSENT (`ACK:G`).
     pub tx_ack_goodcrc_only: bool,
-    pub txsent_missing: u8,
-    /// Soft_Resets sent after a Protocol Error and partner Soft_Resets
-    /// accepted (`docs/SAFETY.md`); not displayed.
-    pub soft_resets_sent: u8,
-    pub soft_resets_accepted: u8,
-    /// Longest Protocol Error to Soft_Reset TX write, in ms (tProtErrSoftReset
-    /// and tSoftReset are 15 ms max, Table 7.9).
-    pub soft_reset_ms: u8,
-    /// Hard Reset Signaling we sent (`docs/SAFETY.md`), whether the
-    /// FUSB302 confirmed it (I_HARDSENT within tHardResetComplete), and the ms
-    /// from the Protocol Error that armed it to the CONTROL3 write.
-    pub hard_resets_sent: u8,
-    pub hard_reset_confirmed: bool,
-    pub hard_reset_ms: u8,
 }
 impl SprObservation {
     pub const fn pending() -> Self {
@@ -142,22 +120,11 @@ impl SprObservation {
             target_mv: 0,
             target_ma: 0,
             request_ma: 0,
-            sink_tx_gate_ms: 0,
-            sink_tx_deferred: 0,
             sink_tx_cause: 0,
-            sink_tx_refused: None,
-            pps_status: None,
             partner: pd_protocol::pd_partner::PartnerInfo::PENDING,
             epr_offer: pd_protocol::pd_spr::EprOffer::NotAsked,
             tx_timeout: None,
             tx_ack_goodcrc_only: false,
-            txsent_missing: 0,
-            soft_resets_sent: 0,
-            soft_resets_accepted: 0,
-            soft_reset_ms: 0,
-            hard_resets_sent: 0,
-            hard_reset_confirmed: false,
-            hard_reset_ms: 0,
         }
     }
 }

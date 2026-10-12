@@ -1,5 +1,5 @@
 //! The shared I2C3 bus: meter and tilt sensor access, the failure counters
-//! shown on the test page, and the latch that closes the bus after a fault.
+//! shown on the System screen, and the latch that closes the bus after a fault.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -13,17 +13,11 @@ pub static I2C3: embassy_sync::mutex::Mutex<
     Option<embassy_hc32::i2c::I2c3>,
 > = embassy_sync::mutex::Mutex::new(None);
 
-/// How many times the four I2C3 interrupt lines fired. Zero means the wake path
-/// (routing or `CR2` arming) never worked; a climbing count means the waits are
-/// woken and any failure is in the transaction logic instead.
-pub static I2C_IRQ_COUNT: AtomicU32 = AtomicU32::new(0);
-
-/// Completed async I2C3 reads and failures, shown on the test page. Timeouts
-/// (no wake at all) and bus errors (NACK/arbitration/timeout flag) are counted
-/// separately: they point at completely different faults.
+/// Completed async I2C3 reads, and failed transfers other than timeouts
+/// (NACK/arbitration/timeout flag), shown on the System screen. A timeout
+/// (no wake at all) records its step in [`I2C_FAULT_STEP`] instead.
 pub static ASYNC_READS: AtomicU32 = AtomicU32::new(0);
 pub static I2C_ERRORS: AtomicU32 = AtomicU32::new(0);
-pub static I2C_TIMEOUTS: AtomicU32 = AtomicU32::new(0);
 /// `SR` and `CR1` as they stood when the bus last failed, for diagnosis.
 pub static I2C_LAST_SR: AtomicU32 = AtomicU32::new(0);
 pub static I2C_LAST_CR1: AtomicU32 = AtomicU32::new(0);
@@ -39,11 +33,10 @@ pub fn bus_failed() -> bool {
     BUS_LATCH.is_failed()
 }
 
-/// Record a bus failure: count its kind, keep `SR` for the test page, latch off.
+/// Record a bus failure: count its kind, keep `SR` for the System screen, latch off.
 pub fn note_bus_failure(bus: &mut embassy_hc32::i2c::I2c3, error: embassy_hc32::i2c::Error) {
     match error {
         embassy_hc32::i2c::Error::Timeout(step) => {
-            I2C_TIMEOUTS.fetch_add(1, Ordering::Relaxed);
             I2C_FAULT_STEP.store(step, Ordering::Relaxed);
         }
         _ => {

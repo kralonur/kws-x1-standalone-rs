@@ -42,8 +42,8 @@ use embassy_sync::watch::Watch;
 // The `#[cortex_m_rt::interrupt]` expansion checks `interrupt::INT0xx`, and the
 // PAC exposes the generated `Interrupt` enum through that path.
 use bus::{
-    ASYNC_READS, BUS_LATCH, I2C_ERRORS, I2C_FAULT_STEP, I2C_IRQ_COUNT, I2C_LAST_CR1, I2C_LAST_CR4,
-    I2C_LAST_SR, I2C3, bus_failed, read_meter, write_meter, write_sensor,
+    ASYNC_READS, BUS_LATCH, I2C_ERRORS, I2C_FAULT_STEP, I2C_LAST_CR1, I2C_LAST_CR4, I2C_LAST_SR,
+    I2C3, bus_failed, read_meter, write_meter, write_sensor,
 };
 use button_logic::{Detail, MAX_TABS, Open, Page, QcPage, QcTarget, Tab, View};
 use embassy_time::{Instant, Timer};
@@ -277,9 +277,6 @@ mod stall {
     }
 }
 
-/// INTC validation counters, shown on the "IRQ TEST" page.
-static EIRQ_COUNT: AtomicU32 = AtomicU32::new(0);
-static SWI_COUNT: AtomicU32 = AtomicU32::new(0);
 /// Screen orientation: `tilt_task` sends it, `meter_task` applies it.
 static ORIENTATION: Watch<CriticalSectionRawMutex, Orientation, 1> = Watch::new();
 /// Line voltages: `line_task` sends each scan (`None` when one fails) while
@@ -288,8 +285,6 @@ static LINE_VOLTAGES: Watch<CriticalSectionRawMutex, Option<line_adc::LineVoltag
     Watch::new();
 /// Quick Charge trigger state: `line_task` sends it, `meter_task` draws it.
 static QC_STATUS: Watch<CriticalSectionRawMutex, qc_drive::Status, 1> = Watch::new();
-/// Completed 180-degree flips, shown next to the raw edge count.
-static TILT_FLIPS: AtomicU32 = AtomicU32::new(0);
 
 /// Failed `intc::register` calls. The INTC is not reset by a jump into this
 /// image, so a `SEL` entry left mapped by the bootloader makes routing fail;
@@ -300,12 +295,9 @@ static IRQ_REG_FAILURES: AtomicU32 = AtomicU32::new(0);
 /// the tilt sensor's INT1. Channel n is also interrupt event n (RM Table 10-2).
 const PD_EIRQ: u8 = 12;
 const TILT_EIRQ: u8 = 13;
-/// Software interrupt channel (and event) used for the dispatch self-test.
-const SWI_CHANNEL: u8 = 8;
 /// NVIC lines; each must match its `INTnnn` handler below.
 const PD_LINE: embassy_hc32::intc::Line = line(4);
 const TILT_LINE: embassy_hc32::intc::Line = line(13);
-const SWI_LINE: embassy_hc32::intc::Line = line(8);
 /// ADC2 end of scan (event 452): group 14's window is lines 116..=121
 /// (RM Table 10-2).
 const ADC2_EOCA: u16 = 452;
@@ -320,7 +312,7 @@ const PANEL_DMA_EVENTS: [(u16, embassy_hc32::intc::Line); 2] = [
     (panel::DMA_UNIT.error_event().0, line(39)),
 ];
 /// NVIC priorities (lower is more urgent). Both stay below SysTick (0), so
-/// timing never starves; bus and tilt wakes rank ahead of the PD alert and self-test.
+/// timing never starves; bus and tilt wakes rank ahead of the PD alert.
 const BUS_PRIORITY: u8 = 8;
 const PD_PRIORITY: u8 = 9;
 /// The PD session's executor: above thread mode, so a frame draw (measured
@@ -342,12 +334,10 @@ fn INT004() {
 }
 
 /// PB13 external interrupt: the async driver clears the flag and wakes
-/// `tilt_task`; the counter is the same evidence shown on the INTC page.
+/// `tilt_task`.
 #[cortex_m_rt::interrupt]
 fn INT013() {
-    if embassy_hc32::exti::on_interrupt(TILT_EIRQ) {
-        EIRQ_COUNT.fetch_add(1, Ordering::Relaxed);
-    }
+    embassy_hc32::exti::on_interrupt(TILT_EIRQ);
 }
 
 /// Runs the PD session's executor; see [`PD_EXECUTOR_PRIORITY`].
@@ -357,36 +347,25 @@ fn INT031() {
     unsafe { PD_EXECUTOR.on_interrupt() }
 }
 
-/// Software interrupt channel 8 (self-test that `SEL`/`IER`/NVIC dispatch work).
-#[cortex_m_rt::interrupt]
-fn INT008() {
-    embassy_hc32::intc::software_interrupt_clear(SWI_CHANNEL);
-    SWI_COUNT.fetch_add(1, Ordering::Relaxed);
-}
-
 /// I2C3 events (RXI 428, TXI 429, TEI 430, EEI 431) on lines 110..=113: the
 /// async driver only needs a wakeup, then it re-reads `SR` itself.
 #[cortex_m_rt::interrupt]
 fn INT110() {
-    I2C_IRQ_COUNT.fetch_add(1, Ordering::Relaxed);
     embassy_hc32::i2c::on_interrupt();
 }
 
 #[cortex_m_rt::interrupt]
 fn INT111() {
-    I2C_IRQ_COUNT.fetch_add(1, Ordering::Relaxed);
     embassy_hc32::i2c::on_interrupt();
 }
 
 #[cortex_m_rt::interrupt]
 fn INT112() {
-    I2C_IRQ_COUNT.fetch_add(1, Ordering::Relaxed);
     embassy_hc32::i2c::on_interrupt();
 }
 
 #[cortex_m_rt::interrupt]
 fn INT113() {
-    I2C_IRQ_COUNT.fetch_add(1, Ordering::Relaxed);
     embassy_hc32::i2c::on_interrupt();
 }
 
@@ -541,7 +520,6 @@ async fn tilt_task(input: InputPin) {
         if write_sensor(lis3dh::INT1_CFG, armed_position(next)).await {
             orientation = next;
             orientation_sender.send(orientation);
-            TILT_FLIPS.fetch_add(1, Ordering::Relaxed);
         }
 
         // Suppress the rest of the burst, then discard anything it latched.
@@ -1296,17 +1274,6 @@ async fn main(spawner: Spawner) {
             }
         }
 
-        // Wake-path self-test, now that the I2C3 lines are routed: arming the
-        // idle "transmit buffer empty" source must make the handler run. `I2C IRQ`
-        // reading at least 1 on the test page proves the SEL/NVIC routing works,
-        // independently of whether any transaction succeeds.
-        {
-            let mut guard = I2C3.lock().await;
-            if let Some(bus) = guard.as_mut() {
-                bus.wake_self_test();
-            }
-        }
-
         // The line ADC waits for its scans on this wake.
         if embassy_hc32::intc::register(ADC2_EOCA, ADC_LINE, BUS_PRIORITY).is_err() {
             IRQ_REG_FAILURES.fetch_add(1, Ordering::Relaxed);
@@ -1318,14 +1285,6 @@ async fn main(spawner: Spawner) {
                 IRQ_REG_FAILURES.fetch_add(1, Ordering::Relaxed);
             }
         }
-
-        // Route a software interrupt to INT008.
-        if embassy_hc32::intc::register(u16::from(SWI_CHANNEL), SWI_LINE, PD_PRIORITY).is_err() {
-            IRQ_REG_FAILURES.fetch_add(1, Ordering::Relaxed);
-        }
-        // One software interrupt at startup: if SWI ch8 reads 1 on the test
-        // page, `SEL`/`IER`/NVIC dispatch and the vector table all work.
-        embassy_hc32::intc::software_interrupt_trigger(SWI_CHANNEL);
 
         // Configure the INA226 and the LIS3DH over the async master.
         for (reg, value) in ina226::INIT {

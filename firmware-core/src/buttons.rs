@@ -4,7 +4,6 @@
 //! pull-ups: PB2, PB10, PH0 and PC14, each treating a low level as pressed.
 //! They are the Left, Right, OK and Back buttons, as identified on
 //! the device.
-#![allow(dead_code)]
 
 use crate::settings::{Item, NextBoot, QcFindings, Settings};
 use qc_protocol::detect::Report;
@@ -1031,9 +1030,4 @@ impl Navigation {
         input.page = page;
         command
     }
-}
-
-/// Convert active-low pin levels into a pressed mask.
-pub fn pressed_from_levels(low_active_levels: u8) -> u8 {
-    !low_active_levels & ((1u8 << COUNT) - 1)
 }

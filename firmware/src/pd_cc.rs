@@ -1,5 +1,4 @@
 //! Board power-on baseline and factories for the reusable FUSB startup adapters.
-#[allow(unused_imports)]
 pub use fusb302_pd::{config::Error, startup::Report};
 
 /// Verified power-on configuration in `snapshot::REGISTERS` order; dynamic

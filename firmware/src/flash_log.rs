@@ -24,7 +24,6 @@ const PER_BOOT: u8 = 40;
 pub const PANIC: u8 = 250;
 pub const FAULT: u8 = 251;
 /// `cable-log` stall detector: the display task stopped for 3 s.
-#[allow(dead_code)]
 pub const HANG: u8 = 252;
 
 #[derive(Clone, Copy)]

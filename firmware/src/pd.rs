@@ -10,11 +10,8 @@ use firmware_core::pd_sniff::Supply;
 use firmware_core::pd_spr::Advertised;
 
 use crate::ui::{self, Protocol};
-// Compatibility exports are used by different subsets of board host tests.
-#[allow(unused_imports)]
 pub use fusb302_pd::observation::{Phase, SprObservation};
-#[allow(unused_imports)]
-pub use fusb302_pd::snapshot::{ADDRESS, Failure, REGISTERS, Snapshot, snapshot};
+pub use fusb302_pd::snapshot::{Snapshot, snapshot};
 
 #[derive(Clone, Copy)]
 pub struct Observation {
