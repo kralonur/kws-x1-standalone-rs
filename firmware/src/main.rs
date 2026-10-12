@@ -184,15 +184,43 @@ impl firmware_core::pd_svids::Store for CableSvidStore {
         CABLE_SVIDS.lock(|cell| cell.borrow().contains(svid))
     }
 }
-/// Nominal timer milliseconds, not calibrated wall-clock measurements.
+/// The longest panel refresh in the last full [`PEAK_WINDOW`], in nominal
+/// timer milliseconds, not calibrated wall-clock measurements.
 static FRAME_MS: AtomicU32 = AtomicU32::new(0);
-/// The longest gap between two button polls in the last full
-/// [`BUTTON_GAP_WINDOW`].
+/// The longest gap between two button polls in the last full [`PEAK_WINDOW`].
 static BUTTON_GAP_MS: AtomicU32 = AtomicU32::new(0);
-/// How long the System page's button gap covers. A since-boot peak kept a
-/// startup or settings-save stall on screen for the whole run; two seconds
-/// still holds a short stall long enough to read. Chosen, not specified.
-const BUTTON_GAP_WINDOW: embassy_time::Duration = embassy_time::Duration::from_secs(2);
+/// How long the System page's FRAME and BUTTON GAP peaks cover. A since-boot
+/// peak kept a startup or settings-save stall on screen for the whole run,
+/// and the last value alone hid a full redraw behind the next small one; two
+/// seconds holds a short peak long enough to read. Chosen, not specified.
+const PEAK_WINDOW: embassy_time::Duration = embassy_time::Duration::from_secs(2);
+
+/// The largest sample of each [`PEAK_WINDOW`], published once it ends.
+struct WindowPeak {
+    published: &'static AtomicU32,
+    end: Instant,
+    peak: u32,
+}
+
+impl WindowPeak {
+    fn new(published: &'static AtomicU32) -> Self {
+        Self {
+            published,
+            end: Instant::now() + PEAK_WINDOW,
+            peak: 0,
+        }
+    }
+
+    /// Count `sample`, taken at `now`; a sample past the window's end closes it.
+    fn add(&mut self, now: Instant, sample: u32) {
+        self.peak = self.peak.max(sample);
+        if now >= self.end {
+            self.published.store(self.peak, Ordering::Relaxed);
+            self.peak = 0;
+            self.end = now + PEAK_WINDOW;
+        }
+    }
+}
 static PD_IRQ_COUNT: AtomicU32 = AtomicU32::new(0);
 /// Latest PD observation: the PD task sends it, the renderer reads it.
 static PD_OBSERVATION: Watch<CriticalSectionRawMutex, pd::Observation, 1> =
@@ -610,16 +638,10 @@ async fn button_task(
     let input_sender = BUTTON_STATE.sender();
     let mut qc_updates = QC_STATUS.anon_receiver();
     let mut previous = Instant::now();
-    let mut window_end = previous + BUTTON_GAP_WINDOW;
-    let mut window_gap = 0;
+    let mut gap = WindowPeak::new(&BUTTON_GAP_MS);
     loop {
         let now = Instant::now();
-        window_gap = window_gap.max(now.duration_since(previous).as_millis() as u32);
-        if now >= window_end {
-            BUTTON_GAP_MS.store(window_gap, Ordering::Relaxed);
-            window_gap = 0;
-            window_end = now + BUTTON_GAP_WINDOW;
-        }
+        gap.add(now, now.duration_since(previous).as_millis() as u32);
         previous = now;
         let raw = inputs.iter().enumerate().fold(0u8, |mask, (index, pin)| {
             mask | (u8::from(pin.is_low()) << index)
@@ -782,6 +804,7 @@ async fn meter_task(
     let mut last_secs = u32::MAX;
     let mut last_pulse = None;
     let detail_sender = DETAIL_VIEW.sender();
+    let mut frame_time = WindowPeak::new(&FRAME_MS);
 
     loop {
         let now = Instant::now();
@@ -1085,7 +1108,7 @@ async fn meter_task(
             unsafe {
                 panel::flush(fb, current_rotation).await;
             }
-            FRAME_MS.store(frame_start.elapsed().as_millis() as u32, Ordering::Relaxed);
+            frame_time.add(Instant::now(), frame_start.elapsed().as_millis() as u32);
         }
 
         Timer::after_millis(METER_TICK_MS).await;

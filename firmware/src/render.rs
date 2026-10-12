@@ -152,8 +152,8 @@ pub fn system_lines(counters: Counters, latched: bool) -> [Lines; 2] {
 
     let mut timing = [[b' '; 24]; 8];
     put(&mut timing[0], b"TIMING AND MEMORY");
-    // Last panel refresh, and the longest gap between two button polls in
-    // the last `BUTTON_GAP_WINDOW` (normally `buttons::POLL_MS`), in ms.
+    // The longest panel refresh, and the longest gap between two button
+    // polls (normally `buttons::POLL_MS`), in the last `PEAK_WINDOW`, in ms.
     put(&mut timing[1], b"FRAME: 000000 MS");
     decimal(&mut timing[1], 7, 6, FRAME_MS.load(Ordering::Relaxed));
     put(&mut timing[2], b"BUTTON GAP: 000000 MS");

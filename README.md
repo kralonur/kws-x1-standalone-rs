@@ -683,7 +683,9 @@ It scrolls (OK) through two sections.
 
 **`TIMING AND MEMORY`**
 
-- **`FRAME`**: how long the last screen refresh took, in ms.
+- **`FRAME`**: the longest screen refresh in the last 2 seconds, in ms (a few
+  ms when little changes; a full redraw, such as flipping the meter, shows
+  its own time).
 - **`BUTTON GAP`**: the longest gap between two button checks in the last 2
   seconds, in ms (normally 10).
 - **`STACK`**: the most stack used since boot / the stack size, in bytes.
