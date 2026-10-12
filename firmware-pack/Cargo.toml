@@ -16,6 +16,8 @@ bench = false
 anyhow = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 firmware-image = { workspace = true }
+miniz_oxide = { workspace = true, features = ["with-alloc"] }
+object = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }

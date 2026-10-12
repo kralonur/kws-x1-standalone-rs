@@ -7,7 +7,7 @@ MEMORY
    */
   FLASH : ORIGIN = 0x00010000, LENGTH = 0x333fc
   /* Upper code region [0x44000, 0x6c000): the update path never writes past
-   * 0x44000, so the upper installer image programs it. The sector at 0x6e000
+   * 0x44000, so the release image's unpacker programs it. The sector at 0x6e000
    * holds data that must never be erased; 0x6c000 leaves one sector of margin.
    * Matches firmware_image::UPPER_BASE/UPPER_END.
    */

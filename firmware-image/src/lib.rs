@@ -14,6 +14,8 @@
 
 #![no_std]
 
+pub mod packed;
+
 /// Observed 16-byte footer descriptor immediately before the checksum.
 /// Retained as protocol metadata; its individual fields have not been isolated.
 pub const DESCRIPTOR: [u8; 16] = [
@@ -47,18 +49,33 @@ pub const MARKER: u8 = 0x80;
 /// Matches `UPPER` in `firmware/memory.x`.
 pub const UPPER_BASE: u32 = ERASE_CEILING;
 pub const UPPER_END: u32 = 0x6c000;
-/// Marks the main image's upper-region record (magic, length, hash) for
-/// `firmware-pack`, which fills in the length and hash; random, unique.
+/// Length and hash of an upper region's bytes, as little-endian words.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct UpperRecord {
+    pub magic: [u32; 2],
+    pub len: u32,
+    pub hash: u32,
+}
+/// Marks the main image's upper record for `firmware-pack`, which fills in
+/// the length and hash; random, unique.
 pub const UPPER_ID_MAGIC: [u32; 2] = [0x5550_5052, 0x9e37_79b9];
 /// An unfilled record field.
 pub const UPPER_ID_UNSET: u32 = u32::MAX;
 
-/// FNV-1a 32-bit hash of the upper region's bytes (offset basis and prime
+/// FNV-1a 32-bit hash of a flash region's bytes (offset basis and prime
 /// from the FNV specification).
-pub fn upper_hash(bytes: &[u8]) -> u32 {
-    const OFFSET_BASIS: u32 = 0x811c_9dc5;
+pub fn region_hash(bytes: &[u8]) -> u32 {
+    region_hash_update(REGION_HASH_START, bytes)
+}
+
+/// The FNV-1a offset basis: [`region_hash`] of no bytes.
+pub const REGION_HASH_START: u32 = 0x811c_9dc5;
+
+/// Continue a [`region_hash`] over the next `bytes`.
+pub fn region_hash_update(hash: u32, bytes: &[u8]) -> u32 {
     const PRIME: u32 = 0x0100_0193;
-    bytes.iter().fold(OFFSET_BASIS, |hash, byte| {
+    bytes.iter().fold(hash, |hash, byte| {
         (hash ^ u32::from(*byte)).wrapping_mul(PRIME)
     })
 }
@@ -69,12 +86,25 @@ pub const CONTAINER_PREFIX: [u8; 2] = [0x00, 0x0a];
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageError {
     EmptyContent,
-    ContentTooLarge { len: usize },
-    WrongBufferLength { len: usize },
+    ContentTooLarge {
+        len: usize,
+    },
+    WrongBufferLength {
+        len: usize,
+    },
     WrongPrefix,
-    BadChecksum { stored: u32, computed: u32 },
-    BadMarker { found: u8 },
+    BadChecksum {
+        stored: u32,
+        computed: u32,
+    },
+    BadMarker {
+        found: u8,
+    },
     NonZeroTrailer,
+    /// A deflate stream is corrupt or truncated.
+    BadStream,
+    /// The consumer of inflated output stopped it.
+    Stopped,
 }
 
 /// Additive checksum: the sum of the content bytes, modulo 2^32.

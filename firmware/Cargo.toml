@@ -12,11 +12,10 @@ path = "src/main.rs"
 test = false
 bench = false
 
-# Programs the upper code region; needs UPPER_BIN at build time.
+# A release image's first boot: unpacks the firmware (`firmware-pack`).
 [[bin]]
-name = "upper-installer"
-path = "src/bin/upper_installer.rs"
-required-features = ["upper-installer"]
+name = "unpacker"
+path = "src/bin/unpacker.rs"
 test = false
 bench = false
 
@@ -31,8 +30,6 @@ cable-log = []
 # Read-only flash probe sections on the System page (bootloader, trailer,
 # upper sectors); never writes or erases.
 flash-probe = []
-# Build the upper installer binary.
-upper-installer = []
 
 [dependencies]
 cortex-m = { workspace = true, features = ["critical-section-single-core"] }

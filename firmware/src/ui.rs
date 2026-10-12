@@ -1322,7 +1322,7 @@ pub fn draw_upper_missing<D: DrawTarget<Color = Rgb565>>(target: &mut D) {
     notice(
         target,
         "PD CODE MISSING",
-        "flash the upper installer image",
+        "flash the release image again",
         YELLOW,
     );
 }

@@ -9,3 +9,6 @@ publish = false
 [lib]
 test = false
 bench = false
+
+[dependencies]
+miniz_oxide = { workspace = true }
