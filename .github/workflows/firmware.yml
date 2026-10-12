@@ -22,11 +22,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install current stable Rust and LLVM tools
+      - name: Install current stable Rust
         run: |
           rustup update stable --no-self-update
           rustup default stable
-          rustup component add rustfmt clippy llvm-tools
+          rustup component add rustfmt clippy
           rustup target add thumbv7em-none-eabihf
       - name: Validate firmware and packaging tools
         run: |
@@ -35,22 +35,20 @@ jobs:
           cargo clippy -p firmware-pack --all-targets --locked -- -D warnings
           cargo test -p firmware-pack --test cli --locked
       - name: Build normal release firmware without diagnostic features
-        run: |
-          cargo build --release -p firmware --target thumbv7em-none-eabihf --locked
-          mkdir -p build
-          host=$(rustc -vV | awk '/^host:/ {print $2}')
-          "$(rustc --print sysroot)/lib/rustlib/$host/bin/llvm-objcopy" \
-            -O binary target/thumbv7em-none-eabihf/release/firmware build/firmware.bin
+        run: cargo build --release -p firmware --target thumbv7em-none-eabihf --locked
       - name: Prepare and audit flashable firmware
         run: |
           mkdir -p dist
+          elf=target/thumbv7em-none-eabihf/release
           cargo run --release -p firmware-pack --locked -- pack \
-            --app build/firmware.bin --out dist/firmware.X1C \
+            --firmware "$elf/firmware" --unpacker "$elf/unpacker" \
+            --out dist/firmware.X1C \
             > dist/firmware-package.json
           image_sha256=$(sha256sum dist/firmware.X1C | cut -d ' ' -f 1)
           cargo run --release -p firmware-pack --locked -- audit \
             --image dist/firmware.X1C --confirm-sha256 "$image_sha256" \
-            --app build/firmware.bin > dist/firmware-audit.json
+            --firmware "$elf/firmware" --unpacker "$elf/unpacker" \
+            > dist/firmware-audit.json
           cargo run --release -p flasher --locked -- \
             --dry-run --image dist/firmware.X1C --confirm-sha256 "$image_sha256"
           cp LICENSE-MIT LICENSE-APACHE dist/
