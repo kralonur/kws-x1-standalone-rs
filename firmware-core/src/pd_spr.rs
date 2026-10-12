@@ -7,7 +7,7 @@ use usbpd::protocol_layer::message::data::{request, source_capabilities};
 
 pub use shared::{
     Contract, EPR_OBJECTS, EprOffer, Error, MaintainedTrace, Mode, PPS_MIN_MA, PpsStatus,
-    ReviewedRdo, Timer,
+    ReviewedRdo, Supply, Timer,
 };
 // Preserve the existing board scheduling: delays are policy, not wire timers.
 pub const PPS_STATUS_SETTLE_MS: u64 = 300;
@@ -48,6 +48,12 @@ const PPS_VOLTAGE_UNIT_MV: u16 = 100;
 /// PPS current unit: 50 mA, in the APDO and the PPS Request (USB PD Tables
 /// 6.13 and 6.21).
 const PPS_CURRENT_UNIT_MA: u16 = 50;
+/// SPR AVS APDO current unit: 10 mA; its range ends at 15 V when the 15-20 V
+/// current is 0, else at 20 V (USB PD Tables 4.3, 6.15).
+const AVS_CURRENT_UNIT_MA: u16 = 10;
+const AVS_MIN_MV: u16 = 9_000;
+const AVS_15V_RANGE_MV: u16 = 15_000;
+const AVS_20V_RANGE_MV: u16 = 20_000;
 
 /// What one advertised power data object offers, for display.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,6 +66,13 @@ pub enum Advertised {
         min_mv: u16,
         max_mv: u16,
         max_ma: u16,
+    },
+    /// SPR AVS: from `min_mv` to `max_mv`, `ma_15v` up to 15 V and `ma_20v` above.
+    Avs {
+        min_mv: u16,
+        max_mv: u16,
+        ma_15v: u16,
+        ma_20v: u16,
     },
     /// Battery, variable, EPR or unknown objects.
     Other,
@@ -77,6 +90,16 @@ pub fn advertised(raw: u32) -> Advertised {
             min_mv: pdo.raw_min_voltage() as u16 * PPS_VOLTAGE_UNIT_MV,
             max_mv: pdo.raw_max_voltage() as u16 * PPS_VOLTAGE_UNIT_MV,
             max_ma: pdo.raw_max_current() as u16 * PPS_CURRENT_UNIT_MA,
+        },
+        PowerDataObject::Augmented(Augmented::SprAvs(pdo)) => Advertised::Avs {
+            min_mv: AVS_MIN_MV,
+            max_mv: if pdo.raw_max_current_20v() == 0 {
+                AVS_15V_RANGE_MV
+            } else {
+                AVS_20V_RANGE_MV
+            },
+            ma_15v: pdo.raw_max_current_15v() * AVS_CURRENT_UNIT_MA,
+            ma_20v: pdo.raw_max_current_20v() * AVS_CURRENT_UNIT_MA,
         },
         _ => Advertised::Other,
     }
@@ -106,6 +129,9 @@ impl shared::Limits for BoardLimits {
     // Long OK on the charger page asks an EPR capable charger for its EPR
     // offer, as the source firmware's capability test did.
     const EPR_OFFER: bool = true;
+    // SPR AVS stays within the SPR 20 V the fixed profiles already reach,
+    // inside the board's 4-30 V rating.
+    const SPR_AVS: bool = true;
     fn status() -> Option<[u8; 7]> {
         // Table 6.51: DC input (VBUS), no battery; temperature reporting and
         // power-state change reporting unsupported. No qualified fault events.
@@ -174,6 +200,7 @@ impl Selection {
             PdCommand::StepFixed(step) => self.step_fixed(step),
             PdCommand::PpsVoltage(delta) => self.adjust_pps(delta, 0),
             PdCommand::PpsCurrent(delta) => self.adjust_pps(0, delta),
+            PdCommand::AvsVoltage(delta) => self.adjust_avs(delta),
             PdCommand::Confirm => {
                 self.confirm();
             }
@@ -194,8 +221,8 @@ impl Selection {
         }
         let five = self
             .options()
-            .find(|option| option.pps_object == 0 && option.mv == CABLE_QUERY_MV);
-        if self.target_mv() != CABLE_QUERY_MV || self.target_pps_object() != 0 {
+            .find(|option| option.supply == Supply::Fixed && option.mv == CABLE_QUERY_MV);
+        if self.target_mv() != CABLE_QUERY_MV || self.target_supply() != Supply::Fixed {
             let requested = five.is_some_and(|five| self.preview(five) && self.confirm());
             self.cable_after_5v.set(requested);
         }
@@ -208,9 +235,9 @@ impl Selection {
             return;
         }
         let at_5v = !self.request_in_flight()
-            && self
-                .established_target()
-                .is_some_and(|target| target.mv == CABLE_QUERY_MV && target.pps_object == 0);
+            && self.established_target().is_some_and(|target| {
+                target.mv == CABLE_QUERY_MV && target.supply == Supply::Fixed
+            });
         if !at_5v {
             self.five_volts_since.set(None);
             return;
@@ -229,14 +256,14 @@ impl Selection {
     }
 
     /// Preview the fixed profile `step` places from the previewed one (the
-    /// first one when a PPS range is previewed).
+    /// first one when a PPS or AVS range is previewed).
     fn step_fixed(&self, step: i8) {
         let mut fixed = [None; 7];
         let mut count = 0;
-        for (slot, option) in fixed
-            .iter_mut()
-            .zip(self.options().filter(|option| option.pps_object == 0))
-        {
+        for (slot, option) in fixed.iter_mut().zip(
+            self.options()
+                .filter(|option| option.supply == Supply::Fixed),
+        ) {
             *slot = Some(option);
             count += 1;
         }
@@ -244,7 +271,8 @@ impl Selection {
             return;
         }
         let current = fixed[..count].iter().position(|option| {
-            !self.candidate_is_pps() && option.is_some_and(|o| o.mv == self.candidate_mv())
+            self.candidate_supply() == Supply::Fixed
+                && option.is_some_and(|o| o.mv == self.candidate_mv())
         });
         let index = current.map_or(0, |index| {
             (index as isize + isize::from(step)).rem_euclid(count as isize) as usize
@@ -259,7 +287,10 @@ impl Selection {
     /// allows less; a change no range accepts leaves the preview unchanged.
     fn adjust_pps(&self, delta_mv: i16, delta_ma: i16) {
         if !self.candidate_is_pps() {
-            if let Some(first) = self.options().find(|option| option.pps_object != 0) {
+            if let Some(first) = self
+                .options()
+                .find(|option| matches!(option.supply, Supply::Pps(_)))
+            {
                 self.preview(first);
             }
             return;
@@ -268,11 +299,14 @@ impl Selection {
         let mut ma = (i32::from(self.candidate_ma()) + i32::from(delta_ma))
             .clamp(i32::from(PPS_MIN_MA), 0xffff) as u16;
         loop {
-            for option in self.options().filter(|option| option.pps_object != 0) {
+            for option in self
+                .options()
+                .filter(|option| matches!(option.supply, Supply::Pps(_)))
+            {
                 let target = shared::Target {
                     mv,
                     ma,
-                    pps_object: option.pps_object,
+                    supply: option.supply,
                 };
                 if self.preview(target) {
                     return;
@@ -282,6 +316,31 @@ impl Selection {
                 return;
             }
             ma = ma.saturating_sub(PPS_CURRENT_UNIT_MA).max(PPS_MIN_MA);
+        }
+    }
+
+    /// Preview an SPR AVS voltage change, in any advertised range that
+    /// accepts it, at the current that voltage allows; a change no range
+    /// accepts leaves the preview unchanged.
+    fn adjust_avs(&self, delta_mv: i16) {
+        let avs = |option: &shared::Target| match option.supply {
+            Supply::Avs(object) => Some(object),
+            Supply::Fixed | Supply::Pps(_) => None,
+        };
+        if !matches!(self.candidate_supply(), Supply::Avs(_)) {
+            if let Some(first) = self.options().find(|option| avs(option).is_some()) {
+                self.preview(first);
+            }
+            return;
+        }
+        let mv = (i32::from(self.candidate_mv()) + i32::from(delta_mv)).clamp(0, 0xffff) as u16;
+        for object in self.options().filter_map(|option| avs(&option)) {
+            if self
+                .avs_target(object, mv)
+                .is_some_and(|target| self.preview(target))
+            {
+                return;
+            }
         }
     }
 }

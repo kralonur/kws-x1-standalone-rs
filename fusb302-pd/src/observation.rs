@@ -1,6 +1,7 @@
 //! Controller/protocol telemetry; board UI and flash history stay with callers.
 use crate::snapshot::Snapshot;
 use pd_protocol::pd_cable::CableReport;
+use pd_protocol::pd_spr::Supply;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
@@ -44,7 +45,7 @@ pub struct SprObservation {
     pub vbus_live_mv: Option<u16>,
     pub selected_mv: Option<u16>,
     pub selected_ma: Option<u16>,
-    pub selected_pps: bool,
+    pub selected_supply: Supply,
     pub adjust_current: bool,
     pub cable_active: bool,
     pub vconn_on: bool,
@@ -52,7 +53,8 @@ pub struct SprObservation {
     pub bist_carriers: u8,
     pub cable_report: Option<CableReport>,
     pub cable_modes: pd_protocol::pd_cable_modes::Discovery,
-    pub pps: bool,
+    /// What the target asks for: fixed, PPS or SPR AVS.
+    pub supply: Supply,
     pub tx_off_verified: bool,
     pub tx_written: bool,
     pub tx_sent_irq: bool,
@@ -70,7 +72,7 @@ pub struct SprObservation {
     pub target_mv: u16,
     pub target_ma: u16,
     /// Operating current of the last Request sent, in mA (RDO bits 19..10 for
-    /// fixed, 6..0 for PPS).
+    /// fixed, 6..0 for PPS and SPR AVS).
     pub request_ma: u16,
     /// Last deferral: b'G' SinkTxOK not seen in time, b'M' SOP Message first, b'C' a
     /// SOP Message arrived and ours was dropped unsent;
@@ -95,14 +97,14 @@ impl SprObservation {
             vbus_live_mv: None,
             selected_mv: None,
             selected_ma: None,
-            selected_pps: false,
+            selected_supply: Supply::Fixed,
             adjust_current: false,
             cable_active: false,
             vconn_on: false,
             bist_carriers: 0,
             cable_report: None,
             cable_modes: pd_protocol::pd_cable_modes::Discovery::EMPTY,
-            pps: false,
+            supply: Supply::Fixed,
             tx_off_verified: false,
             tx_written: false,
             tx_sent_irq: false,

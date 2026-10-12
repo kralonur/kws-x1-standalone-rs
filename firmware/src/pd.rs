@@ -7,7 +7,7 @@ pub use partner::{CAPABILITY_SECTIONS, partner_lines, partner_sections};
 
 use firmware_core::pd_cable::CableStatus;
 use firmware_core::pd_sniff::Supply;
-use firmware_core::pd_spr::Advertised;
+use firmware_core::pd_spr::{Advertised, Supply as SessionSupply};
 
 use crate::ui::{self, Protocol};
 pub use fusb302_pd::observation::{Phase, SprObservation};
@@ -231,6 +231,10 @@ pub fn protocol(observation: &Observation) -> Option<Protocol> {
                     mv: mv.min(u32::from(u16::MAX)) as u16,
                     ma: ma.min(u32::from(u16::MAX)) as u16,
                 },
+                Supply::Avs { mv, ma } => Protocol::Avs {
+                    mv: mv.min(u32::from(u16::MAX)) as u16,
+                    ma: ma.min(u32::from(u16::MAX)) as u16,
+                },
                 Supply::Fixed { mv, ma } => Protocol::Pd {
                     revision: header_revision(header),
                     mv: mv.min(u32::from(u16::MAX)) as u16,
@@ -246,19 +250,15 @@ pub fn protocol(observation: &Observation) -> Option<Protocol> {
     if let Some(spr) = observation.spr
         && (spr.psrdy_seen || spr.contract_seen)
     {
-        return Some(if spr.pps {
-            Protocol::Pps {
-                mv: spr.target_mv,
-                ma: spr.target_ma,
-            }
-        } else {
-            Protocol::Pd {
+        let (mv, ma) = (spr.target_mv, spr.target_ma);
+        return Some(match spr.supply {
+            SessionSupply::Pps(_) => Protocol::Pps { mv, ma },
+            SessionSupply::Avs(_) => Protocol::Avs { mv, ma },
+            SessionSupply::Fixed => Protocol::Pd {
                 revision: spr.peer_revision,
-                mv: spr.target_mv,
-                ma: offer(observation)
-                    .fixed_current(spr.target_mv)
-                    .unwrap_or(spr.target_ma),
-            }
+                mv,
+                ma: offer(observation).fixed_current(mv).unwrap_or(ma),
+            },
         });
     }
     observation.capabilities.map(|_| Protocol::PdOffer)
@@ -296,6 +296,17 @@ pub fn offer(observation: &Observation) -> ui::Offer {
             max_mv,
             max_ma,
         }),
+        Advertised::Avs {
+            min_mv,
+            max_mv,
+            ma_15v,
+            ma_20v,
+        } => offer.push_avs(ui::AvsRange {
+            min_mv,
+            max_mv,
+            ma_15v,
+            ma_20v,
+        }),
         Advertised::Other => {}
     };
     if let Some(caps) = observation.capabilities {
@@ -315,19 +326,18 @@ pub fn offer(observation: &Observation) -> ui::Offer {
             .map(|(mv, ma)| ui::Supply {
                 mv,
                 ma,
-                pps: spr.selected_pps,
+                kind: kind(spr.selected_supply),
             });
         // A fixed Request asks for the profile's maximum current, not the
         // session's nominal target current, so show the advertised one.
-        let ma = if spr.pps {
-            spr.target_ma
-        } else {
-            offer.fixed_current(spr.target_mv).unwrap_or(spr.target_ma)
+        let ma = match spr.supply {
+            SessionSupply::Fixed => offer.fixed_current(spr.target_mv).unwrap_or(spr.target_ma),
+            SessionSupply::Pps(_) | SessionSupply::Avs(_) => spr.target_ma,
         };
         offer.contract = (spr.psrdy_seen || spr.contract_seen).then_some(ui::Supply {
             mv: spr.target_mv,
             ma,
-            pps: spr.pps,
+            kind: kind(spr.supply),
         });
     } else if let Some((_, supply)) = observation.sniff.and_then(|sniff| sniff.request) {
         // Passthrough: the device's own choice is both shown and in force.
@@ -336,18 +346,41 @@ pub fn offer(observation: &Observation) -> ui::Offer {
             Supply::Fixed { mv, ma } => Some(ui::Supply {
                 mv: to_u16(mv),
                 ma: to_u16(ma),
-                pps: false,
+                kind: ui::Kind::Fixed,
             }),
             Supply::Pps { mv, ma } => Some(ui::Supply {
                 mv: to_u16(mv),
                 ma: to_u16(ma),
-                pps: true,
+                kind: ui::Kind::Pps,
+            }),
+            Supply::Avs { mv, ma } => Some(ui::Supply {
+                mv: to_u16(mv),
+                ma: to_u16(ma),
+                kind: ui::Kind::Avs,
             }),
             Supply::Raw => None,
         };
         offer.preview = offer.contract;
     }
     offer
+}
+
+/// The selector pages' kind of a session target.
+fn kind(supply: SessionSupply) -> ui::Kind {
+    match supply {
+        SessionSupply::Fixed => ui::Kind::Fixed,
+        SessionSupply::Pps(_) => ui::Kind::Pps,
+        SessionSupply::Avs(_) => ui::Kind::Avs,
+    }
+}
+
+/// The three-letter tag of an APDO target; `None` for a fixed one.
+fn apdo_tag(supply: SessionSupply) -> Option<&'static [u8; 3]> {
+    match supply {
+        SessionSupply::Fixed => None,
+        SessionSupply::Pps(_) => Some(b"PPS"),
+        SessionSupply::Avs(_) => Some(b"AVS"),
+    }
 }
 
 /// Attached CC pin (1 or 2): the passthrough sniffer's, else this meter's.
@@ -402,19 +435,20 @@ fn phase_line(row: &mut [u8; 24], observation: Observation) {
             if let Some(spr) = observation.spr.filter(|s| s.psrdy_seen) {
                 put(row, b"--V CONTRACT LIVE");
                 decimal_voltage(row, 0, spr.target_mv);
-                if spr.pps {
+                if let Some(tag) = apdo_tag(spr.supply) {
                     row.fill(b' ');
                     put(row, b"PPS--.--V --.--A LIVE");
+                    row[..3].copy_from_slice(tag);
                     decimal2(row, 3, spr.target_mv);
                     decimal2(row, 10, spr.target_ma);
                 }
             } else {
                 put(
                     row,
-                    if observation.spr.is_some_and(|spr| spr.pps) {
-                        b"PPS NEGOTIATING"
-                    } else {
-                        b"SPR NEGOTIATING"
+                    match observation.spr.map(|spr| spr.supply) {
+                        Some(SessionSupply::Pps(_)) => b"PPS NEGOTIATING",
+                        Some(SessionSupply::Avs(_)) => b"AVS NEGOTIATING",
+                        _ => b"SPR NEGOTIATING",
                     },
                 );
             }
@@ -423,9 +457,10 @@ fn phase_line(row: &mut [u8; 24], observation: Observation) {
             put(row, b"--V SEEN ROK TX OFF");
             if let Some(spr) = observation.spr {
                 decimal_voltage(row, 0, spr.target_mv);
-                if spr.pps {
+                if let Some(tag) = apdo_tag(spr.supply) {
                     row.fill(b' ');
                     put(row, b"PPS--.--V --.--A TX OFF");
+                    row[..3].copy_from_slice(tag);
                     decimal2(row, 3, spr.target_mv);
                     decimal2(row, 10, spr.target_ma);
                 }
@@ -759,8 +794,8 @@ fn spr_lines(observation: Observation, spr: SprObservation) -> [[u8; 24]; 8] {
         },
     );
     decimal_voltage(&mut rows[0], 7, spr.target_mv);
-    if spr.pps {
-        rows[0][3..6].copy_from_slice(b"PPS");
+    if let Some(tag) = apdo_tag(spr.supply) {
+        rows[0][3..6].copy_from_slice(tag);
     }
     if let Some(cc) = observation.selected_cc {
         rows[0][12] = b'0' + cc;
@@ -768,11 +803,10 @@ fn spr_lines(observation: Observation, spr: SprObservation) -> [[u8; 24]; 8] {
     put(&mut rows[1], b"REQ:--.--V -.-A N- R- I-");
     decimal2(&mut rows[1], 4, spr.target_mv);
     // The current in the last Request sent (fixed: the object's maximum up to the
-    // board rating; PPS: the operating current setpoint).
-    let ma = if spr.pps {
-        spr.target_ma
-    } else {
-        spr.request_ma
+    // board rating; PPS and AVS: the operating current).
+    let ma = match spr.supply {
+        SessionSupply::Fixed => spr.request_ma,
+        SessionSupply::Pps(_) | SessionSupply::Avs(_) => spr.target_ma,
     };
     if ma != 0 {
         rows[1][11] = b'0' + (ma / 1000).min(9) as u8;
@@ -873,20 +907,23 @@ fn spr_lines(observation: Observation, spr: SprObservation) -> [[u8; 24]; 8] {
         rows[6] = [b' '; 24];
         put(&mut rows[6], b"SEL:--V");
         decimal_voltage(&mut rows[6], 4, mv);
-        if spr.selected_pps {
+        if let Some(tag) = apdo_tag(spr.selected_supply) {
             rows[6].fill(b' ');
             if spr.adjust_current {
                 put(&mut rows[6], b"SEL:P--.-- --.--A [I] OK");
             } else {
                 put(&mut rows[6], b"SEL:P--.-- --.--A [V] OK");
             }
+            rows[6][4] = tag[0];
             decimal2(&mut rows[6], 5, mv);
             if let Some(ma) = spr.selected_ma {
                 decimal2(&mut rows[6], 11, ma);
             }
         }
     }
-    if observation.phase == Phase::Negotiating && !spr.selected_pps && spr.selected_mv == Some(5000)
+    if observation.phase == Phase::Negotiating
+        && spr.selected_supply == SessionSupply::Fixed
+        && spr.selected_mv == Some(5000)
     {
         if spr.cable_active {
             rows[5].fill(b' ');

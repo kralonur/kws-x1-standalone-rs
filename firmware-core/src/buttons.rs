@@ -76,6 +76,10 @@ const PPS_MV_STEP: i16 = 20;
 const PPS_MV_REPEAT: i16 = 100;
 const PPS_MA_STEP: i16 = 50;
 const PPS_MA_REPEAT: i16 = 250;
+/// SPR AVS voltage steps per press and per repeat: 100 mV is its effective
+/// resolution (USB PD Table 6.22).
+const AVS_MV_STEP: i16 = 100;
+const AVS_MV_REPEAT: i16 = 500;
 
 /// The screen and what its Left, Right and OK act on, one level at a time:
 /// Left/Right move between groups, OK goes into a group's tabs, OK again
@@ -117,14 +121,14 @@ impl Page {
 pub enum Group {
     /// Live readings.
     Monitor,
-    /// Fixed PD, PPS and Quick Charge requests.
+    /// Fixed PD, PPS, AVS and Quick Charge requests.
     Trigger,
     /// The detail lists.
     Info,
 }
 
 /// The most tabs a group has.
-pub const MAX_TABS: usize = 4;
+pub const MAX_TABS: usize = 5;
 
 impl Group {
     pub const ALL: [Self; 3] = [Self::Monitor, Self::Trigger, Self::Info];
@@ -132,8 +136,8 @@ impl Group {
     /// The group's tabs, in Left/Right order.
     const fn tabs(self) -> &'static [Tab] {
         const MONITOR: [Tab; 2] = [Tab::Overview, Tab::Lines];
-        const TRIGGER: [Tab; 4] = [Tab::Fixed, Tab::Pps, Tab::Qc2, Tab::Qc3];
-        const INFO: [Tab; MAX_TABS] = [
+        const TRIGGER: [Tab; MAX_TABS] = [Tab::Fixed, Tab::Pps, Tab::Avs, Tab::Qc2, Tab::Qc3];
+        const INFO: [Tab; 4] = [
             Tab::detail(Detail::Pd),
             Tab::detail(Detail::Charger),
             Tab::detail(Detail::Cable),
@@ -176,6 +180,8 @@ pub enum Tab {
     Fixed,
     /// PPS voltage and current selector.
     Pps,
+    /// SPR AVS voltage selector.
+    Avs,
     /// Quick Charge 2.0 fixed voltages and the probe.
     Qc2,
     /// Quick Charge 3.0 continuous mode.
@@ -192,6 +198,7 @@ impl From<Tab> for Screen {
             Tab::Lines => Self::Lines,
             Tab::Fixed => Self::Fixed,
             Tab::Pps => Self::Pps,
+            Tab::Avs => Self::Avs,
             Tab::Qc2 => Self::Qc2,
             Tab::Qc3 => Self::Qc3,
             Tab::Detail { page, .. } => match page {
@@ -211,6 +218,7 @@ impl From<Screen> for Tab {
             Screen::Lines => Self::Lines,
             Screen::Fixed => Self::Fixed,
             Screen::Pps => Self::Pps,
+            Screen::Avs => Self::Avs,
             Screen::Qc2 => Self::Qc2,
             Screen::Qc3 => Self::Qc3,
             Screen::PdDetails => Self::detail(Detail::Pd),
@@ -230,7 +238,7 @@ impl Tab {
     pub const fn group(self) -> Group {
         match self {
             Self::Overview | Self::Lines => Group::Monitor,
-            Self::Fixed | Self::Pps | Self::Qc2 | Self::Qc3 => Group::Trigger,
+            Self::Fixed | Self::Pps | Self::Avs | Self::Qc2 | Self::Qc3 => Group::Trigger,
             Self::Detail { .. } => Group::Info,
         }
     }
@@ -276,6 +284,8 @@ pub enum Open {
     Fixed,
     /// Left/Right change the PPS voltage or current.
     Pps(PpsFocus),
+    /// Left/Right change the SPR AVS voltage.
+    Avs,
     /// The Quick Charge probe runs; `page` then opens with what it found.
     Probe(QcPage),
     /// Left/Right preview the Quick Charge 2.0 voltages the charger takes,
@@ -293,6 +303,7 @@ impl Open {
         match self {
             Self::Fixed => Tab::Fixed,
             Self::Pps(_) => Tab::Pps,
+            Self::Avs => Tab::Avs,
             Self::Probe(page) => page.tab(),
             Self::Qc2(_) => Tab::Qc2,
             Self::Qc3 => Tab::Qc3,
@@ -319,6 +330,10 @@ pub enum View {
         choosing: bool,
     },
     Pps(Option<PpsFocus>),
+    /// Whether Left/Right change the voltage.
+    Avs {
+        adjusting: bool,
+    },
     /// The previewed row, while choosing.
     Qc2(Option<Qc2Choice>),
     /// The Quick Charge probe runs, on either Quick Charge tab.
@@ -598,6 +613,7 @@ impl Page {
                 Tab::Lines => View::Lines,
                 Tab::Fixed => View::Fixed { choosing: false },
                 Tab::Pps => View::Pps(None),
+                Tab::Avs => View::Avs { adjusting: false },
                 Tab::Qc2 => View::Qc2(None),
                 Tab::Qc3 => View::Qc3 { adjusting: false },
                 Tab::Detail { page, top } => View::Detail {
@@ -609,6 +625,7 @@ impl Page {
             Self::Open(open) => match open {
                 Open::Fixed => View::Fixed { choosing: true },
                 Open::Pps(focus) => View::Pps(Some(focus)),
+                Open::Avs => View::Avs { adjusting: true },
                 Open::Probe(_) => View::Probe,
                 Open::Qc2(preview) => View::Qc2(Some(preview)),
                 Open::Qc3 => View::Qc3 { adjusting: true },
@@ -642,8 +659,14 @@ impl Page {
     pub fn editing(self) -> bool {
         matches!(
             self,
-            Self::Open(Open::Fixed | Open::Pps(_) | Open::Qc2(_) | Open::Qc3 | Open::Detail { .. })
-                | Self::Settings(SettingsFocus::Brightness | SettingsFocus::Rotation)
+            Self::Open(
+                Open::Fixed
+                    | Open::Pps(_)
+                    | Open::Avs
+                    | Open::Qc2(_)
+                    | Open::Qc3
+                    | Open::Detail { .. }
+            ) | Self::Settings(SettingsFocus::Brightness | SettingsFocus::Rotation)
         )
     }
 }
@@ -659,6 +682,8 @@ pub enum PdCommand {
     PpsVoltage(i16),
     /// Preview a PPS current change in mA.
     PpsCurrent(i16),
+    /// Preview an SPR AVS voltage change in mV; 0 previews the first AVS range.
+    AvsVoltage(i16),
     /// Request the previewed profile.
     Confirm,
     /// Ask the cable for its E-marker identity (from fixed 5 V only).
@@ -749,7 +774,7 @@ impl Navigation {
         if selectable {
             self.input.trigger = None;
         }
-        if let Page::Open(open @ (Open::Fixed | Open::Pps(_))) = self.input.page
+        if let Page::Open(open @ (Open::Fixed | Open::Pps(_) | Open::Avs)) = self.input.page
             && !selectable
         {
             self.input.page = Page::Tabs(open.tab());
@@ -882,7 +907,7 @@ impl Navigation {
                 && (self.held - REPEAT_DELAY_SAMPLES).is_multiple_of(REPEAT_SAMPLES)
                 && matches!(
                     self.input.page,
-                    Page::Open(Open::Pps(_) | Open::Qc3 | Open::Detail { .. })
+                    Page::Open(Open::Pps(_) | Open::Avs | Open::Qc3 | Open::Detail { .. })
                 )
             {
                 self.repeated = true;
@@ -1037,6 +1062,10 @@ impl Navigation {
                 let step = if repeat { PPS_MA_REPEAT } else { PPS_MA_STEP };
                 return Some(PdCommand::PpsCurrent(sign * step));
             }
+            Page::Open(Open::Avs) => {
+                let step = if repeat { AVS_MV_REPEAT } else { AVS_MV_STEP };
+                return Some(PdCommand::AvsVoltage(sign * step));
+            }
         }
         None
     }
@@ -1047,18 +1076,19 @@ impl Navigation {
             Page::Groups(tab) => (Page::Tabs(tab), None),
             page @ Page::Tabs(Tab::Overview | Tab::Lines) => (page, None),
             // Quick Charge holds the charger: restart into PD, back on this tab.
-            page @ Page::Tabs(tab @ (Tab::Fixed | Tab::Pps)) if self.silent => {
+            page @ Page::Tabs(tab @ (Tab::Fixed | Tab::Pps | Tab::Avs)) if self.silent => {
                 input
                     .settings
                     .set_next_boot(NextBoot::Normal, Some(tab.into()));
                 (page, Some(PdCommand::Restart))
             }
-            page @ Page::Tabs(Tab::Fixed | Tab::Pps) if !self.selectable => (page, None),
+            page @ Page::Tabs(Tab::Fixed | Tab::Pps | Tab::Avs) if !self.selectable => (page, None),
             Page::Tabs(Tab::Fixed) => (Page::Open(Open::Fixed), Some(PdCommand::StepFixed(0))),
             Page::Tabs(Tab::Pps) => (
                 Page::Open(Open::Pps(PpsFocus::Voltage)),
                 Some(PdCommand::PpsVoltage(0)),
             ),
+            Page::Tabs(Tab::Avs) => (Page::Open(Open::Avs), Some(PdCommand::AvsVoltage(0))),
             Page::Tabs(Tab::Qc2) if !self.selectable => (QcPage::Qc2.open(input), None),
             Page::Tabs(Tab::Qc3) if !self.selectable => (QcPage::Qc3.open(input), None),
             // A PD contract hides Quick Charge: restart into a silent boot,
@@ -1077,6 +1107,7 @@ impl Navigation {
             Page::Open(Open::Pps(PpsFocus::Current)) => {
                 (Page::Tabs(Tab::Pps), Some(PdCommand::Confirm))
             }
+            Page::Open(Open::Avs) => (Page::Tabs(Tab::Avs), Some(PdCommand::Confirm)),
             Page::Open(Open::Qc2(preview)) => {
                 input.trigger = preview.target();
                 (Page::Tabs(Tab::Qc2), None)

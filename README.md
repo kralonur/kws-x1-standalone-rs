@@ -90,7 +90,8 @@ This is **kws-x1-standalone-rs**.
 - Voltage, current and power in either direction, with peaks and a flow
   direction indicator.
 - D+, D-, CC1 and CC2 line voltages.
-- USB PD sink: fixed profiles up to 20 V and PPS, chosen on the meter.
+- USB PD sink: fixed profiles up to 20 V, PPS and SPR AVS (9-20 V), chosen
+  on the meter.
 - Quick Charge trigger: 5, 9, 12 or 20 V over D+/D−, or
   Quick Charge 3.0 0.2 V steps from 3.6 V, checked against VBUS, and a probe
   that reports Quick Charge 2.0 or 3.0 and Class A or B. On USB-C the meter
@@ -99,7 +100,8 @@ This is **kws-x1-standalone-rs**.
   offer, the EPR offer and, with the plug in the charger, the 5 A offer, on
   one page.
 - Everything the charger says about itself: its full offer (EPR included),
-  identity, ratings and status.
+  identity, ratings and status, and for a battery-powered charger (a power
+  bank) its battery's capacity and charge.
 - Cable e-marker reading, and a 5 A cable test for the meter's plug.
 - Passthrough mode: listens to the PD messages between a charger and a device
   without taking part.
@@ -116,10 +118,12 @@ What this firmware does **not** do, for now:
   current (`DIVIDER`, `1.2V DCP`) and the BC1.2 short once the Quick Charge
   test found it; a BC1.2 port looks like a plain USB port until then.
 - **No EPR.** The meter can ask for and list the EPR offer (28 V and up), but
-  it never enters EPR mode and cannot request an EPR voltage. Requests stay
-  within the standard range: fixed profiles up to 20 V and PPS.
-- **No AVS requests.** AVS and EPR AVS ranges are listed when the charger
-  offers them, but cannot be requested.
+  it never enters EPR mode and cannot request an EPR voltage or EPR AVS.
+  Requests stay within the standard range: fixed profiles up to 20 V, PPS
+  and SPR AVS.
+- **SPR AVS and the battery readout untested on hardware.** Both are built
+  from the USB PD 3.2 specification and checked in the library tests, but no
+  SPR AVS charger or battery-reporting power bank has been tried yet.
 - **Quick Charge partly tested.** Tested on one Quick Charge 3.0 Class A
   charger, on a USB-A port and on USB-C switched out of PD: fixed 9 and
   12 V, the 0.2 V steps and the probe. 20 V and Class B chargers are
@@ -160,12 +164,12 @@ What this firmware does **not** do, for now:
 
 | Button | Short press | Hold |
 | ------ | ----------- | ---- |
-| Left / Right | previous / next group, or tab once in a group's tabs; on a framed value, change it; while scrolling, scroll | repeats on PPS and QC 3.0 values and while scrolling |
+| Left / Right | previous / next group, or tab once in a group's tabs; on a framed value, change it; while scrolling, scroll | repeats on PPS, AVS and QC 3.0 values and while scrolling |
 | OK | go into the group's tabs; on a tab, select, confirm, scroll or start (see each page) | 0.5 s: page action (cable query, full charger scan) |
 | Back | up one level: cancel the edit or scroll, leave the tabs; from a group, back to the overview; on the overview, open the settings | – |
 
 The pages sit in three groups: **Monitor** (Overview, Lines), **Trigger**
-(PD Profiles, PPS, QC 2.0, QC 3.0) and **Info** (PD Session, Charger, Cable,
+(PD Profiles, PPS, AVS, QC 2.0, QC 3.0) and **Info** (PD Session, Charger, Cable,
 System). The header shows the group's tabs as a strip, each in its own
 colour: the shown tab is named, the others fold to thin bars. A dot per group
 sits on the right. The shown tab marks what Left/Right move: a bar beside its
@@ -183,7 +187,7 @@ meter in again.
 
 - **Sink** (`PC13:0 SINK MODE` on the PD session page). The meter is the PD
   sink: it negotiates with the charger itself, starting at 5 V, and you pick a
-  fixed or PPS voltage. **Whatever is plugged into the other side gets that
+  fixed, PPS or AVS voltage. **Whatever is plugged into the other side gets that
   voltage**, so only raise it for a device or load that accepts it.
 - **Passthrough** (`PC13:1 PASSTHROUGH`). The meter turns its own CC
   pull-downs off and sits between a charger and a device, which negotiate with
@@ -214,14 +218,15 @@ point the way it flows (they follow the screen rotation).
 
 | Page | Shows | Buttons |
 | ---- | ----- | ------- |
-| **Overview** | voltage, current, power; the highest of each since boot (`MAX`); protocol (`USB`, `TYPE-C`, `PD 2.0`, `PD 3.0`, `PPS`, `QC 2.0`, `QC 3.0`, `DIVIDER`, `1.2V DCP`, `BC1.2`) with the CC pin and contract; flow chevrons; a heartbeat dot | Back: settings |
+| **Overview** | voltage, current, power; the highest of each since boot (`MAX`); protocol (`USB`, `TYPE-C`, `PD 2.0`, `PD 3.0`, `PPS`, `AVS`, `QC 2.0`, `QC 3.0`, `DIVIDER`, `1.2V DCP`, `BC1.2`) with the CC pin and contract; flow chevrons; a heartbeat dot | Back: settings |
 | **Lines** | D+, D-, CC1 and CC2 voltages | |
 | **PD Profiles** | the charger's fixed profiles, `ACTIVE` on the one in force; with PD off for Quick Charge only `QC MODE` | OK, Left/Right to choose, OK requests it, Back cancels; in `QC MODE` OK switches back to PD |
 | **PPS** | the charger's PPS ranges, the set voltage and current limit, the live output; `ACTIVE` or `NOT APPLIED`; with PD off for Quick Charge only `QC MODE` | OK, Left/Right voltage (20 mV, 100 mV held), OK, current limit (50 mA, 250 mA held), OK requests; in `QC MODE` OK switches back to PD |
+| **AVS** | the charger's SPR AVS ranges, the set voltage and the current the meter asks for at it, the live output; `ACTIVE` or `NOT APPLIED`; with PD off for Quick Charge only `QC MODE` | OK, Left/Right voltage (100 mV, 500 mV held), OK requests; in `QC MODE` OK switches back to PD |
 | **QC 2.0** | 5, 9, 12 and 20 V and `OFF`, the voltages the charger ignored greyed out, the status on its row; under a PD contract only `PD MODE` | OK tests the charger, then opens at 5 V with the choice open (under a PD contract it first switches the charger out of PD); Left/Right choose, OK requests and closes the choice, Back closes it; the request stays in force on other screens until `OFF` |
 | **QC 3.0** | the step range, the set voltage, VBUS, D+ and D−; under a PD contract only `PD MODE` | OK tests the charger, then starts continuous mode at 5 V (under a PD contract it first switches the charger out of PD); Left/Right move it by 0.2 V (repeats held); OK or Back closes it; the steps stay in force on other screens until `OFF` on QC 2.0 |
 | **PD Session** | sink: session state, CC levels and the charger's offer as received. Passthrough: CC pin, Rp level and the latest PD messages | OK to scroll |
-| **Charger** | the offer (`*` = needs a 5 A cable), the charger's identity, maker and peak ratings, power status and source info, the Quick Charge detection result | OK to scroll; hold OK: full scan (Quick Charge, PD, EPR, and the 5 A cable test with the plug in the charger) |
+| **Charger** | the offer (`*` = needs a 5 A cable), the charger's identity, maker and peak ratings, power status and source info, a power bank's battery, the Quick Charge detection result | OK to scroll; hold OK: full scan (Quick Charge, PD, EPR, and the 5 A cable test with the plug in the charger) |
 | **Cable** | the cable's e-marker: identity, ratings, status and modes | OK to scroll; hold OK to read the e-marker (drops to fixed 5 V first) |
 | **System** | I2C bus state and counters, frame and button timing, stack use, `LAST RESET:` cause | OK to scroll |
 | **Settings** | `BRIGHTNESS` (5 levels, 60% at first), `ROTATION` (`AUTO` follows the tilt sensor, `NORMAL`, `FLIPPED`), `RESET MAX`, `VERSION` (shown only) | Left/Right row, OK change it, Left/Right value, OK or Back done |
@@ -282,6 +287,7 @@ is the protocol status instead of a hint row.
   - `PD`: the charger sent an offer, no contract known yet.
   - `PD 2.0` / `PD 3.0`: fixed PD contract and its PD revision.
   - `PPS`: a PPS contract.
+  - `AVS`: an SPR AVS contract.
   - `QC 2.0` / `QC 3.0` again: Quick Charge another device drives, read from
     D+/D-. A raised request counts once the output moved past halfway to
     it; continuous mode shows `continuous`.
@@ -369,7 +375,27 @@ programmable ranges, to request a voltage and current limit.
   `< > amps    OK request`, or `waiting for the charger    < > tabs`; in
   `QC MODE`, `OK switch back to PD`.
 
-#### 5. QC 2.0
+#### 5. AVS
+
+This is the **AVS** screen (tab `AVS` in Trigger): the charger's SPR
+adjustable voltage ranges (USB PD 3.2), to request a voltage from 9 V. Unlike
+PPS, the charger does not limit the current: the meter asks for the most the
+range allows at the set voltage, at most 100 W.
+
+- **Range row**: each SPR AVS range, for example
+  `9.00-20.00V  3.00A / 2.25A`: the current up to 15 V, then above 15 V
+  (only on a range that reaches 20 V).
+- **`SET VOLTAGE`**: the voltage to request, in 100 mV steps (500 mV while
+  held), framed with arrows while Left/Right change it.
+- **`CURRENT`**: the current the request asks for at that voltage.
+- **`OUT`** and **state**: as on the PPS screen.
+- **`NO AVS` / `this charger offers no AVS range`**: nothing to set.
+- **`QC MODE`**: as on the PD Profiles screen.
+- **Hint row**: `OK adjust AVS    < > tabs`, `< > volts    OK request`, or
+  `waiting for the charger    < > tabs`; in `QC MODE`,
+  `OK switch back to PD`.
+
+#### 6. QC 2.0
 
 <img src="pictures/qc2_screen.webp" width="360" alt="QC 2.0 screen">
 
@@ -401,7 +427,7 @@ the requests.
   `up to 20V on the output    BACK stop` (`BACK` once it failed); in
   `PD MODE`, `OK switch to QC, tests up to 20V`.
 
-#### 6. QC 3.0
+#### 7. QC 3.0
 
 <img src="pictures/qc3_screen.webp" width="360" alt="QC 3.0 screen">
 
@@ -425,7 +451,7 @@ screen; see [Quick Charge](#quick-charge).
   handshake, test and `PD MODE` hints as on the QC 2.0 screen, and `< > tabs`
   after `NO QC 3.0`.
 
-#### 7. PD Session
+#### 8. PD Session
 
 <img src="pictures/pd_session_screen.webp" width="360" alt="PD Session screen">
 
@@ -434,7 +460,7 @@ own PD negotiation. It scrolls (OK) through three sections.
 
 **Session section**
 
-- **`PD SPR 05V C1 TX ON`**: the session kind (`SPR` fixed, `PPS`), the target
+- **`PD SPR 05V C1 TX ON`**: the session kind (`SPR` fixed, `PPS`, `AVS`), the target
   voltage, the CC pin, and the transmitter state: `TX ON` (contract live),
   `TX OFF` (finished and verified off) or `TX UNKNOWN`.
 - **`REQ:05.00V 3.0A N6 R3 I5`**: the last request: voltage, current,
@@ -462,14 +488,15 @@ own PD negotiation. It scrolls (OK) through three sections.
     `SPD`/`S` speed code).
 - **Row 7**, one of:
   - `SEL:P07.02 05.00A [V] OK`: the selection being prepared (`P` for PPS,
-    `[V]` or `[I]` for the value being changed).
+    `A` for AVS; `[V]` or `[I]` for the value being changed).
   - `SEL:09V`: the fixed profile being prepared.
   - `HOLD BACK TO STOP`, `POST S1:---- C3:----` (controller registers after
     the session), `RESTORE NOT VERIFIED`, `VCONN STATE UNVERIFIED`,
     `VALUE:----` (an unexpected register value), or a cable `VID`/`PID`.
 - **Last row**, the session state:
-  - `05V CONTRACT LIVE` / `PPS07.02V 05.00A LIVE`: a contract is in force.
-  - `SPR NEGOTIATING` / `PPS NEGOTIATING`: asking for it.
+  - `05V CONTRACT LIVE` / `PPS07.02V 05.00A LIVE` (`AVS…` likewise): a
+    contract is in force.
+  - `SPR NEGOTIATING` / `PPS NEGOTIATING` / `AVS NEGOTIATING`: asking for it.
   - `05V SEEN ROK TX OFF`: the session finished cleanly.
   - `NO CAPS / HALTED` / `NO CAPS RESTORED`: the charger sent no offer
     (a port without PD).
@@ -528,7 +555,7 @@ own PD negotiation. It scrolls (OK) through three sections.
 | `002B` | session ended without a contract |
 | `002C` | Hard Reset sent |
 
-#### 8. Charger
+#### 9. Charger
 
 <img src="pictures/charger_screen.webp" width="360" alt="Charger screen">
 
@@ -543,8 +570,8 @@ scrolls (OK) through the parts; a long offer takes two screens.
   - `FIX 9.00V 3.00A`: a fixed voltage.
   - `PPS 3.3-21.0V 5.00A`: a PPS range.
   - `AVS …A/…A`, `EAVS 15.0-48.0V 140W`: adjustable voltage (AVS) ranges,
-    shown when the charger offers them. The meter cannot request AVS; it
-    requests only fixed and PPS objects.
+    shown when the charger offers them. The meter requests SPR AVS on the
+    AVS screen; it never requests EPR AVS.
   - `RAW xxxxxxxx`: an object type the meter does not decode.
 - **`*`** after a row: offered at that current only with a 5 A cable. Then
   the note `* ONLY WITH 5A CABLE`.
@@ -609,10 +636,22 @@ with `HOLD OK: FULL SCAN`, or without a PD contract `NOT TESTED YET` with
 - `TEMP:` `NORMAL`, `WARNING`, `OVERTEMP` or `N/A`; `LIM:CPXET` power
   limited by Cable, other Ports, eXternal power, Events, Temperature.
 
+**`BATTERY`**, only when the charger reports a battery (a power bank): its
+first battery, as the charger describes it.
+
+- `CAPS:` the outcome of asking for its capabilities, then `VID:---- PID:----`,
+  `DESIGN:` the design capacity and `FULL:` the last full-charge capacity,
+  in Wh (`UNKNOWN`, or `NONE` with no battery in place).
+- `STATUS:` the outcome of asking for its status, then `CHARGE:` the energy
+  it holds now, in Wh, and `CHARGING`, `DISCHARGING`, `IDLE`, `PRESENT` or
+  `NOT PRESENT`.
+- `NO SUCH BATTERY`: the charger did not know the battery the meter asked
+  about.
+
 **Answer words** used in these sections: `OK`, `WAITING`, `NOT SUPPORTED`,
 `NO REPLY`, `BLOCKED`, `RESET`, `PD2 N/A` (not available under PD 2.0).
 
-#### 9. Cable
+#### 10. Cable
 
 <img src="pictures/cable_screen.webp" width="360" alt="Cable screen">
 
@@ -660,7 +699,7 @@ GET_STATUS`, `SECOND PLUG NO DATA`).
 **Status words**: `NOT QUERIED`, `ACK`, `NAK`, `BUSY NO RETRY`,
 `TIMEOUT NO RETRY`, `LIST INCOMPLETE`, `NOT SUPPORTED`.
 
-#### 10. System
+#### 11. System
 
 <img src="pictures/system_screen.webp" width="360" alt="System screen">
 
@@ -936,7 +975,9 @@ Sink (slider at sink, then power up from a PD charger through a cable):
 5. PD Profiles page (Trigger group, OK to reach its tabs): step through the
    profiles, confirm one, check the overview voltage, then go back to 5 V.
 6. PPS page (PPS charger): step voltage and current, confirm, check the
+   overview. AVS page (SPR AVS charger): step the voltage, confirm, check the
    overview.
+   Charger page with a PD power bank: the `BATTERY` section lists its charge.
 7. Charger page (Info group): it lists the offer. With an EPR charger, hold OK: the 28 V and
    higher objects appear. With a 3 A cable, objects that need 5 A carry `*`.
 8. Cable page with an e-marked cable, from 9 V or higher: hold OK drops to 5 V

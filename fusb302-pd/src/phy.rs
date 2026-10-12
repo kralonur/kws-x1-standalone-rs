@@ -22,7 +22,7 @@ use crate::{config as pd_cc, observation as pd, service as pd_service};
 use embedded_hal_async::{delay::DelayNs, i2c::I2c};
 use pd_cc::ConfigRegister;
 use pd_protocol::pd_rx::Sop;
-use pd_protocol::pd_spr::Limits;
+use pd_protocol::pd_spr::{Limits, Supply};
 use usbpd_traits::{Driver, DriverRxError, DriverTxError};
 
 mod tx;
@@ -696,12 +696,12 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             }
             self.trace().selected_mv = Some(selection.candidate_mv());
             self.trace().selected_ma = Some(selection.candidate_ma());
-            self.trace().selected_pps = selection.candidate_is_pps();
+            self.trace().selected_supply = selection.candidate_supply();
             self.trace().adjust_current = selection.adjusting_current();
             if !selection.request_in_flight() && selection.established_target().is_some() {
                 self.trace().target_mv = selection.target_mv();
                 self.trace().target_ma = selection.target_ma();
-                self.trace().pps = selection.target_pps_object() != 0;
+                self.trace().supply = selection.target_supply();
             }
             if let Some(report) = selection.cable_result() {
                 self.trace().cable_report = Some(report);
@@ -890,7 +890,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         packet
     }
     /// Independent re-check of an outgoing Request against the parsed
-    /// advertisement: exact fixed/PPS target and reviewed current, valid APDO
+    /// advertisement: exact fixed/PPS/SPR AVS target and reviewed current, valid APDO
     /// range/type, and no dangerous or reserved RDO/APDO flags.
     fn request_is_reviewed(&self, rdo: u32) -> bool {
         let Some(capabilities) = self.observation.capabilities else {
@@ -902,7 +902,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             .map(|selection| pd_protocol::pd_spr::Target {
                 mv: selection.target_mv(),
                 ma: selection.target_ma(),
-                pps_object: selection.target_pps_object(),
+                supply: selection.target_supply(),
             });
         pd_protocol::pd_spr::review_rdo::<P::Limits>(&capabilities, rdo, target)
     }
@@ -922,7 +922,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             trace.elapsed_ack_ms = before.elapsed_ack_ms;
             trace.elapsed_accept_ms = before.elapsed_accept_ms;
             trace.elapsed_psrdy_ms = before.elapsed_psrdy_ms;
-            trace.pps = before.pps;
+            trace.supply = before.supply;
             trace.target_mv = before.target_mv;
             trace.target_ma = before.target_ma;
         }
@@ -1109,13 +1109,13 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             && !self.reset_in_progress()
             && self.cable_phase == CablePhase::Idle
             && self.config.selection.is_some_and(|s| {
-                s.target_pps_object() != 0
+                matches!(s.target_supply(), Supply::Pps(_))
                     && !s.request_in_flight()
                     && s.established_target()
                         == Some(pd_protocol::pd_spr::Target {
                             mv: s.target_mv(),
                             ma: s.target_ma(),
-                            pps_object: s.target_pps_object(),
+                            supply: s.target_supply(),
                         })
             });
         // Information requests (`pd_partner`): exactly one of the three, PD3
@@ -1241,7 +1241,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             && self
                 .config
                 .selection
-                .is_some_and(|s| s.target_pps_object() != 0)
+                .is_some_and(|s| s.target_supply() != Supply::Fixed)
             && revision != header::REVISION_3
         {
             return Err(Error::Request);
@@ -1260,10 +1260,10 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             self.trace().elapsed_psrdy_ms = None;
             self.t_ack = None;
             self.t_accept = None;
-            self.trace().pps = self
+            self.trace().supply = self
                 .config
                 .selection
-                .is_some_and(|s| s.target_pps_object() != 0);
+                .map_or(Supply::Fixed, |s| s.target_supply());
             self.trace().target_mv = self
                 .config
                 .selection
@@ -1296,7 +1296,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                 && self
                     .config
                     .selection
-                    .is_some_and(|s| s.target_pps_object() != 0)
+                    .is_some_and(|s| s.target_supply() != Supply::Fixed)
                 && header & header::OBJECT_COUNT != 0
                 && header & header::MESSAGE_TYPE == 1
                 && (header >> 6) & 3 != 2
@@ -1474,7 +1474,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                         if self
                             .config
                             .selection
-                            .is_some_and(|s| s.target_pps_object() != 0)
+                            .is_some_and(|s| s.target_supply() != Supply::Fixed)
                         {
                             (rdo & PPS_RDO_CURRENT) as u16 * PPS_RDO_CURRENT_MA
                         } else {
@@ -2161,9 +2161,9 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             || last_id.is_some_and(|id| id > 7)
             || !self.trace().contract_seen
             || self.trace().target_mv != 5000
-            || self.trace().pps
+            || self.trace().supply != Supply::Fixed
             || !self.config.selection.is_some_and(|s| {
-                s.cable_active() && s.target_mv() == 5000 && s.target_pps_object() == 0
+                s.cable_active() && s.target_mv() == 5000 && s.target_supply() == Supply::Fixed
             })
             || self.trace().peer_revision != Some(3)
             || self.pending_tx.is_some()
@@ -2613,7 +2613,7 @@ impl pd_discovery::Packet for pd_service::Packet {
 /// (sections 6.2.1, 6.4), if the message is long enough to hold one.
 // Request Data Object Operating Current fields: Fixed and Variable RDO bits
 // 19:10 in 10 mA units (USB PD Table 6.19); PPS RDO bits 6:0 in 50 mA units
-// (USB PD Table 6.21).
+// (USB PD Table 6.21), as in the SPR AVS RDO (Table 6.22).
 const FIXED_RDO_CURRENT_SHIFT: u32 = 10;
 const FIXED_RDO_CURRENT: u32 = 0x3ff;
 const FIXED_RDO_CURRENT_MA: u16 = 10;

@@ -90,12 +90,13 @@ pub enum Screen {
     Charger,
     Cable,
     System,
+    Avs,
 }
 
 impl Screen {
     /// Record values, by position; new values go last, so older records
     /// still decode.
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 11] = [
         Self::Overview,
         Self::Lines,
         Self::Fixed,
@@ -106,6 +107,7 @@ impl Screen {
         Self::Charger,
         Self::Cable,
         Self::System,
+        Self::Avs,
     ];
 
     /// 0 for none, else the position in [`Self::ALL`] plus one.

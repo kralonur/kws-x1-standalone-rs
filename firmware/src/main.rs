@@ -878,8 +878,10 @@ async fn meter_task(
         let mut changed = false;
         // Pages showing live values read the meter; the PD details page reads
         // only the bus voltage, as before.
-        let reads_current = matches!(view, View::Overview | View::Fixed { .. } | View::Pps(_))
-            || view.quick_charge();
+        let reads_current = matches!(
+            view,
+            View::Overview | View::Fixed { .. } | View::Pps(_) | View::Avs { .. }
+        ) || view.quick_charge();
         let pd_details = matches!(
             view,
             View::Detail {
@@ -1032,6 +1034,16 @@ async fn meter_task(
                         &header,
                         &pd::offer(&latest_observation()),
                         focus,
+                        reading(last_raw_v, last_raw_i),
+                    );
+                }
+                View::Avs { adjusting } => {
+                    render::clear(frame);
+                    ui::draw_avs(
+                        &mut Canvas(frame),
+                        &header,
+                        &pd::offer(&latest_observation()),
+                        adjusting,
                         reading(last_raw_v, last_raw_i),
                     );
                 }

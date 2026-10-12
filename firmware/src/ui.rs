@@ -1,4 +1,4 @@
-//! Graphical pages: overview, line voltages, PD profile and PPS selectors,
+//! Graphical pages: overview, line voltages, PD profile, PPS and AVS selectors,
 //! Quick Charge trigger, settings and the scrolling detail lists, drawn with
 //! `embedded-graphics` primitives and `u8g2-fonts` text on any RGB565 target.
 //! The renderer gathers the values; nothing here touches hardware.
@@ -131,6 +131,8 @@ pub enum Protocol {
     },
     /// Programmable power supply contract.
     Pps { mv: u16, ma: u16 },
+    /// SPR adjustable voltage supply contract.
+    Avs { mv: u16, ma: u16 },
     /// Quick Charge 2.0 at this requested output, in mV.
     Qc2 { mv: u16 },
     /// Quick Charge 3.0 continuous mode; `mv` is the output the steps set,
@@ -143,12 +145,21 @@ pub enum Protocol {
     Bc12,
 }
 
-/// A supply level: fixed or PPS, in mV and mA.
+/// What kind of supply a level is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Kind {
+    #[default]
+    Fixed,
+    Pps,
+    Avs,
+}
+
+/// A supply level, in mV and mA.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Supply {
     pub mv: u16,
     pub ma: u16,
-    pub pps: bool,
+    pub kind: Kind,
 }
 
 /// One PPS range the charger offers.
@@ -157,6 +168,16 @@ pub struct PpsRange {
     pub min_mv: u16,
     pub max_mv: u16,
     pub max_ma: u16,
+}
+
+/// One SPR AVS range the charger offers: its current up to 15 V, and above
+/// 15 V when the range reaches 20 V.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AvsRange {
+    pub min_mv: u16,
+    pub max_mv: u16,
+    pub ma_15v: u16,
+    pub ma_20v: u16,
 }
 
 /// Most power objects one Source_Capabilities message can carry (USB PD
@@ -175,6 +196,8 @@ pub struct Offer {
     fixed_count: usize,
     pps: [PpsRange; MAX_OBJECTS],
     pps_count: usize,
+    avs: [AvsRange; MAX_OBJECTS],
+    avs_count: usize,
     /// The profile Left/Right previewed; nothing is sent before OK.
     pub preview: Option<Supply>,
     /// The contract in force.
@@ -184,7 +207,11 @@ pub struct Offer {
 impl Offer {
     pub fn push_fixed(&mut self, mv: u16, ma: u16) {
         if let Some(slot) = self.fixed.get_mut(self.fixed_count) {
-            *slot = Supply { mv, ma, pps: false };
+            *slot = Supply {
+                mv,
+                ma,
+                kind: Kind::Fixed,
+            };
             self.fixed_count += 1;
         }
     }
@@ -193,6 +220,13 @@ impl Offer {
         if let Some(slot) = self.pps.get_mut(self.pps_count) {
             *slot = range;
             self.pps_count += 1;
+        }
+    }
+
+    pub fn push_avs(&mut self, range: AvsRange) {
+        if let Some(slot) = self.avs.get_mut(self.avs_count) {
+            *slot = range;
+            self.avs_count += 1;
         }
     }
 
@@ -210,6 +244,10 @@ impl Offer {
 
     fn pps(&self) -> &[PpsRange] {
         &self.pps[..self.pps_count]
+    }
+
+    fn avs(&self) -> &[AvsRange] {
+        &self.avs[..self.avs_count]
     }
 }
 
@@ -241,6 +279,7 @@ fn tab_style(tab: Tab, passthrough: bool) -> (&'static str, Rgb565) {
         Tab::Lines => ("LINES", YELLOW),
         Tab::Fixed => ("PD PROFILES", GREEN),
         Tab::Pps => ("PPS", MAGENTA),
+        Tab::Avs => ("AVS", YELLOW),
         Tab::Qc2 => ("QC 2.0", ORANGE),
         Tab::Qc3 => ("QC 3.0", CYAN),
         Tab::Detail { page, .. } => match page {
@@ -558,6 +597,7 @@ fn protocol_badge(protocol: Protocol) -> (&'static str, Rgb565) {
         } => ("PD 3.0", GREEN),
         Protocol::Pd { .. } => ("PD 2.0", CYAN),
         Protocol::Pps { .. } => ("PPS", MAGENTA),
+        Protocol::Avs { .. } => ("AVS", YELLOW),
         Protocol::Qc2 { .. } => ("QC 2.0", ORANGE),
         Protocol::Qc3 { .. } => ("QC 3.0", ORANGE),
         Protocol::Dcp(Dcp::Bias1V2) => ("1.2V DCP", YELLOW),
@@ -750,7 +790,7 @@ fn status(protocol: Protocol, cc: Option<u8>) -> Label {
         Protocol::TypeC { ma: 0 } => label.push(b"5V default"),
         Protocol::TypeC { ma } => label.push(b"5V ").hundredths(u32::from(ma)).push(b"A"),
         Protocol::PdOffer => label.push(b"offer, 5V"),
-        Protocol::Pd { mv, ma, .. } | Protocol::Pps { mv, ma } => label
+        Protocol::Pd { mv, ma, .. } | Protocol::Pps { mv, ma } | Protocol::Avs { mv, ma } => label
             .volts(mv)
             .push(b" ")
             .hundredths(u32::from(ma))
@@ -1380,7 +1420,7 @@ pub fn draw_fixed<D: DrawTarget<Color = Rgb565>>(
     }
     let preview = offer
         .preview
-        .filter(|preview| editing && !preview.pps)
+        .filter(|preview| editing && preview.kind == Kind::Fixed)
         .and_then(|preview| profiles.iter().position(|p| p.mv == preview.mv));
     // Keep the previewed row in view when there are more rows than fit.
     let first = preview.map_or(0, |index| {
@@ -1400,7 +1440,7 @@ pub fn draw_fixed<D: DrawTarget<Color = Rgb565>>(
         let watts = Label::new().fixed(watts, 0).push(b"W");
         let active = offer
             .contract
-            .is_some_and(|contract| !contract.pps && contract.mv == profile.mv);
+            .is_some_and(|contract| contract.kind == Kind::Fixed && contract.mv == profile.mv);
         selector_row(
             target,
             row,
@@ -1480,54 +1520,158 @@ pub fn draw_pps<D: DrawTarget<Color = Rgb565>>(
         );
     }
 
-    let set = offer.preview.filter(|preview| preview.pps);
-    let (volts, amps) = match set {
+    let set = offer.preview.filter(|preview| preview.kind == Kind::Pps);
+    let (volts, amps) = set_values(set);
+    value_box(
+        target,
+        PPS_VOLTS,
+        "SET VOLTAGE",
+        volts,
+        "V",
+        YELLOW,
+        focus == Some(PpsFocus::Voltage),
+    );
+    value_box(
+        target,
+        PPS_AMPS,
+        "CURRENT LIMIT",
+        amps,
+        "A",
+        CYAN,
+        focus == Some(PpsFocus::Current),
+    );
+    supply_status(target, offer, set, live);
+    hint(
+        target,
+        header,
+        match focus {
+            _ if !offer.session => VIEW_ONLY,
+            Some(PpsFocus::Voltage) => "< > volts    OK next: current",
+            Some(PpsFocus::Current) => "< > amps    OK request",
+            None => "OK adjust PPS    < > tabs",
+        },
+    );
+}
+
+/// The SPR AVS selector: the advertised ranges, the voltage box (framed while
+/// Left/Right change it), the current that voltage asks for, and the live
+/// reading. The meter asks for the most the range allows at the set voltage.
+pub fn draw_avs<D: DrawTarget<Color = Rgb565>>(
+    target: &mut D,
+    header: &Header<'_>,
+    offer: &Offer,
+    adjusting: bool,
+    live: Option<Reading>,
+) {
+    draw_header(target, header);
+    if offer.quick_charge {
+        qc_mode(target, header);
+        return;
+    }
+    let ranges = offer.avs();
+    if ranges.is_empty() {
+        notice(target, "NO AVS", "this charger offers no AVS range", YELLOW);
+        return;
+    }
+    for (index, range) in ranges.iter().take(2).enumerate() {
+        let line = Label::new()
+            .hundredths(u32::from(range.min_mv))
+            .push(b"-")
+            .hundredths(u32::from(range.max_mv))
+            .push(b"V  ")
+            .hundredths(u32::from(range.ma_15v))
+            .push(b"A");
+        let line = if range.ma_20v == 0 {
+            line
+        } else {
+            line.push(b" / ")
+                .hundredths(u32::from(range.ma_20v))
+                .push(b"A")
+        };
+        text(
+            target,
+            &PLAIN,
+            line.as_str(),
+            Point::new(LEFT, RANGE_BASELINE + RANGE_PITCH * index as i32),
+            HorizontalAlignment::Left,
+            YELLOW,
+        );
+    }
+    let set = offer.preview.filter(|preview| preview.kind == Kind::Avs);
+    let (volts, amps) = set_values(set);
+    value_box(
+        target,
+        PPS_VOLTS,
+        "SET VOLTAGE",
+        volts,
+        "V",
+        YELLOW,
+        adjusting,
+    );
+    value_box(target, PPS_AMPS, "CURRENT", amps, "A", CYAN, false);
+    supply_status(target, offer, set, live);
+    hint(
+        target,
+        header,
+        if !offer.session {
+            VIEW_ONLY
+        } else if adjusting {
+            "< > volts    OK request"
+        } else {
+            "OK adjust AVS    < > tabs"
+        },
+    );
+}
+
+/// The set voltage and current, or placeholders before a preview.
+fn set_values(set: Option<Supply>) -> (Label, Label) {
+    match set {
         Some(set) => (
             Label::new().hundredths(u32::from(set.mv)),
             Label::new().hundredths(u32::from(set.ma)),
         ),
         None => (Label::new().push(b"--.--"), Label::new().push(b"-.--")),
-    };
-    let boxes = [
-        (
-            PPS_VOLTS,
-            "SET VOLTAGE",
-            volts,
-            "V",
-            PpsFocus::Voltage,
-            YELLOW,
-        ),
-        (
-            PPS_AMPS,
-            "CURRENT LIMIT",
-            amps,
-            "A",
-            PpsFocus::Current,
-            CYAN,
-        ),
-    ];
-    for (area, label, value, unit, field, color) in &boxes {
-        let focused = focus == Some(*field);
-        let (tint, border) = if focused {
-            (RULE, Some(*color))
-        } else {
-            (BLACK, Some(RULE))
-        };
-        card(target, *area, tint, border);
-        card_label(target, *area, label, *color);
-        value_with_unit(
-            target,
-            &READING,
-            value,
-            unit,
-            area.top_left + PPS_VALUE,
-            if focused { WHITE } else { *color },
-        );
-        if focused {
-            arrows(target, *area, *color);
-        }
     }
+}
 
+/// One PPS/AVS value box, framed with arrows while Left/Right change it.
+fn value_box<D: DrawTarget<Color = Rgb565>>(
+    target: &mut D,
+    area: Rectangle,
+    label: &str,
+    value: Label,
+    unit: &str,
+    color: Rgb565,
+    focused: bool,
+) {
+    let (tint, border) = if focused {
+        (RULE, Some(color))
+    } else {
+        (BLACK, Some(RULE))
+    };
+    card(target, area, tint, border);
+    card_label(target, area, label, color);
+    value_with_unit(
+        target,
+        &READING,
+        &value,
+        unit,
+        area.top_left + PPS_VALUE,
+        if focused { WHITE } else { color },
+    );
+    if focused {
+        arrows(target, area, color);
+    }
+}
+
+/// The line under the PPS/AVS boxes: the live output and whether the set
+/// level is the contract in force.
+fn supply_status<D: DrawTarget<Color = Rgb565>>(
+    target: &mut D,
+    offer: &Offer,
+    set: Option<Supply>,
+    live: Option<Reading>,
+) {
     let applied = set.is_some() && offer.contract == set;
     let state = match (set, applied) {
         (_, true) => ("ACTIVE", GREEN),
@@ -1557,16 +1701,6 @@ pub fn draw_pps<D: DrawTarget<Color = Rgb565>>(
         Point::new(RIGHT, PPS_STATUS_BASELINE),
         HorizontalAlignment::Right,
         state.1,
-    );
-    hint(
-        target,
-        header,
-        match focus {
-            _ if !offer.session => VIEW_ONLY,
-            Some(PpsFocus::Voltage) => "< > volts    OK next: current",
-            Some(PpsFocus::Current) => "< > amps    OK request",
-            None => "OK adjust PPS    < > tabs",
-        },
     );
 }
 

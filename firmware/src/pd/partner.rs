@@ -3,13 +3,20 @@
 use super::{Observation, decimal3, decimal4, hex, hex8, put};
 
 /// Sections of the charger list: with a PD session the capabilities (two
-/// sections, the second often empty) and the three answer sections; else one.
+/// sections, the second often empty), the three answer sections and, for a
+/// Source that reports a Battery, a battery section; else one.
 pub fn partner_sections(observation: Observation) -> u32 {
-    if observation.spr.is_some() && observation.sniff.is_none() {
-        CAPABILITY_SECTIONS + 3
-    } else {
-        1
+    match observation.spr.filter(|_| observation.sniff.is_none()) {
+        Some(spr) => CAPABILITY_SECTIONS + 3 + u32::from(reports_battery(spr.partner)),
+        None => 1,
     }
+}
+
+/// The Source's extended capabilities report a Battery, so the battery
+/// requests are asked (`pd_partner::PartnerInfo::battery_query`).
+fn reports_battery(partner: firmware_core::pd_partner::PartnerInfo) -> bool {
+    matches!(partner.source_extended, firmware_core::pd_partner::Answer::Value(source)
+        if source.first_battery().is_some())
 }
 
 /// Section `page` of [`partner_sections`]: what the Source offers, then what
@@ -24,14 +31,15 @@ pub fn partner_lines(observation: Observation, page: u32) -> [[u8; 24]; 8] {
         return section;
     }
     let mut rows = [[b' '; 24]; 8];
-    let sub = (page - CAPABILITY_SECTIONS) % 3;
+    let sub = page - CAPABILITY_SECTIONS;
     let second = sub == 1;
     put(
         &mut rows[0],
         match sub {
             0 => b"IDENTITY",
             1 => b"PEAKS AND MAKER",
-            _ => b"POWER STATUS",
+            2 => b"POWER STATUS",
+            _ => b"BATTERY",
         },
     );
     let Some(spr) = observation.spr.filter(|_| observation.sniff.is_none()) else {
@@ -39,8 +47,10 @@ pub fn partner_lines(observation: Observation, page: u32) -> [[u8; 24]; 8] {
         return rows;
     };
     let partner = spr.partner;
-    if sub == 2 {
-        return status_rows(rows, partner);
+    match sub {
+        2 => return status_rows(rows, partner),
+        3 => return battery_rows(rows, partner),
+        _ => {}
     }
     let source = match partner.source_extended {
         Answer::Value(source) => Some(source),
@@ -385,6 +395,63 @@ fn status_rows(
                     b'-'
                 };
             }
+        }
+    }
+    rows
+}
+
+/// Fourth charger section: the first Battery the Source reports, as its
+/// Battery_Capabilities and Battery_Status describe it (capacities in 0.1 Wh).
+fn battery_rows(
+    mut rows: [[u8; 24]; 8],
+    partner: firmware_core::pd_partner::PartnerInfo,
+) -> [[u8; 24]; 8] {
+    use firmware_core::pd_partner::{Answer, Capacity, Charging};
+    // "----.-WH" from 0.1 Wh, or "UNKNOWN".
+    let capacity = |row: &mut [u8; 24], at: usize, capacity: Option<Capacity>| match capacity {
+        Some(Capacity::DeciWattHours(tenths)) => {
+            row[at..at + 8].copy_from_slice(b"----.-WH");
+            decimal4(row, at, tenths / 10);
+            row[at + 5] = b'0' + (tenths % 10) as u8;
+        }
+        Some(Capacity::Unknown) => row[at..at + 7].copy_from_slice(b"UNKNOWN"),
+        None => row[at..at + 4].copy_from_slice(b"NONE"),
+    };
+    put(&mut rows[1], b"CAPS:");
+    let text = answer_caption(&partner.battery_capabilities);
+    rows[1][5..5 + text.len()].copy_from_slice(text);
+    if let Answer::Value(caps) = partner.battery_capabilities {
+        if caps.invalid_reference {
+            put(&mut rows[2], b"NO SUCH BATTERY");
+        } else {
+            put(&mut rows[2], b"VID:---- PID:----");
+            hex(&mut rows[2], 4, caps.vid);
+            hex(&mut rows[2], 13, caps.pid);
+            put(&mut rows[3], b"DESIGN:");
+            capacity(&mut rows[3], 9, caps.design);
+            put(&mut rows[4], b"FULL:");
+            capacity(&mut rows[4], 9, caps.last_full);
+        }
+    }
+    put(&mut rows[5], b"STATUS:");
+    let text = answer_caption(&partner.battery_status);
+    rows[5][7..7 + text.len()].copy_from_slice(text);
+    if let Answer::Value(status) = partner.battery_status {
+        if status.invalid_reference {
+            put(&mut rows[6], b"NO SUCH BATTERY");
+        } else {
+            put(&mut rows[6], b"CHARGE:");
+            capacity(&mut rows[6], 9, Some(status.present));
+            put(
+                &mut rows[7],
+                match status.battery {
+                    None => b"NOT PRESENT",
+                    Some(Some(Charging::Charging)) => b"CHARGING",
+                    Some(Some(Charging::Discharging)) => b"DISCHARGING",
+                    Some(Some(Charging::Idle)) => b"IDLE",
+                    Some(None) => b"PRESENT",
+                },
+            );
         }
     }
     rows
