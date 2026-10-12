@@ -30,6 +30,7 @@ is not affiliated with or endorsed by KOWSI.
 - [Screens](#screens)
   - [Sink mode](#sink-mode)
   - [Passthrough mode](#passthrough-mode)
+- [Quick Charge](#quick-charge)
 - [Full charger offer and 5 A without a cable](#full-charger-offer-and-5-a-without-a-cable)
 - [Hand-test checklist](#hand-test-checklist)
 - [Safety](#safety)
@@ -90,7 +91,7 @@ This is **kws-x1-standalone-rs**.
   direction indicator.
 - D+, D-, CC1 and CC2 line voltages.
 - USB PD sink: fixed profiles up to 20 V and PPS, chosen on the meter.
-- Quick Charge trigger (work in progress): 5, 9, 12 or 20 V over D+/D−, or
+- Quick Charge trigger: 5, 9, 12 or 20 V over D+/D−, or
   Quick Charge 3.0 0.2 V steps from 3.6 V, checked against VBUS, and a probe
   that reports Quick Charge 2.0 or 3.0 and Class A or B. On USB-C the meter
   switches the charger out of PD for it by itself.
@@ -246,9 +247,16 @@ but are no longer saved. The bootloader and its region are never written.
 
 ## Screens
 
-Every screen, group by group in Left/Right order, with each field it can show.
-`-` or `--.--` in a field means "not known yet". Hexadecimal values are raw
-register or message contents, shown for diagnosis.
+Every screen, group by group in Left/Right order. Each one gives a photo,
+what the screen is for, each field it can show, then its hint row (the
+bottom line). `-` or `--.--` in a field means "not known yet". Hexadecimal
+values are raw register or message contents, shown for diagnosis.
+
+While Left/Right move between groups, every hint row reads
+`< > groups    OK tabs`. The scrolling screens (PD Session, Charger, Cable,
+System, PD Sniff) share one hint row: `OK scroll    < > tabs`, then
+`< > scroll    OK done` while scrolling, or `< > tabs    BACK groups` when
+everything fits on one screen.
 
 ### Sink mode
 
@@ -256,8 +264,9 @@ register or message contents, shown for diagnosis.
 
 <img src="pictures/overview_screen.webp" width="360" alt="Overview screen">
 
-This is the **Overview** screen (tab `OVERVIEW` in Monitor), the one the
-meter starts on.
+This is the **Overview** screen (tab `OVERVIEW` in Monitor): the live bus
+readings and the protocol in use. The meter starts on it, and its bottom line
+is the protocol status instead of a hint row.
 
 - **`VOLTAGE`**: bus voltage, in volts. `--.--` until the first reading, or
   while the sensor bus is closed.
@@ -298,9 +307,13 @@ meter starts on.
 
 #### 2. Lines
 
-This is the **Lines** screen (tab `LINES` in Monitor): the voltages on the USB data and
-configuration lines, read by the MCU's own ADC against its internal
-reference, independently of the bus sensor and the PD controller.
+<img src="pictures/lines_screen.webp" width="360" alt="Lines screen">
+
+This is the **Lines** screen (tab `LINES` in Monitor): the voltages on the
+USB data and configuration lines, read by the MCU's own ADC against its
+internal reference, independently of the bus sensor and the PD controller.
+The lines are sampled only while this screen, the overview or a Quick Charge
+screen shows, or while Quick Charge runs.
 
 - **`D+`** / **`D-`**: the USB 2.0 data lines, in volts. Chargers that
   identify themselves on these lines (BC 1.2, Apple and similar dividers) show
@@ -309,18 +322,16 @@ reference, independently of the bus sensor and the PD controller.
   in use carries the Type-C pull-up/pull-down level; a cable's VCONN shows on
   the other one.
 - `-.--`: no reading yet, or the last ADC scan failed.
-- **`approximate`** (hint row): the internal reference was measured on one
-  unit, and another unit's may differ by a few percent (see
+- **Hint row**: `approximate    < > tabs`. The internal reference was
+  measured on one unit, and another unit's may differ by a few percent (see
   [Limitations](#limitations)).
-
-The lines are sampled only while this screen, the overview or a Quick
-Charge screen is shown, or while Quick Charge runs.
 
 #### 3. PD Profiles
 
 <img src="pictures/pd_profiles_screen.webp" width="360" alt="PD Profiles screen">
 
-This is the **PD Profiles** screen (tab `PD PROFILES` in Trigger): the charger's fixed profiles.
+This is the **PD Profiles** screen (tab `PD PROFILES` in Trigger): the
+charger's fixed profiles, to request one.
 
 - **Each row**: voltage, the charger's maximum current at it, and that power
   in watts. The voltage is coloured from cool (low) to warm (high).
@@ -329,17 +340,18 @@ This is the **PD Profiles** screen (tab `PD PROFILES` in Trigger): the charger's
 - **`NO PD CHARGER` / `plug in a PD source`**: the charger offered no
   fixed profiles.
 - **`QC MODE` / `PD is off while Quick Charge runs`**: this boot keeps PD
-  silent for Quick Charge, so there is no offer; the PPS screen shows the
-  same. OK (`OK switch back to PD`) switches back to PD.
+  silent for [Quick Charge](#quick-charge), so there is no offer.
 - **Hint row**: `OK select a profile    < > tabs`, then while choosing
   `< > choose  OK request  BACK cancel`. Before the charger's offer arrives it
-  reads `waiting for the charger    < > tabs`.
+  reads `waiting for the charger    < > tabs`; in `QC MODE`,
+  `OK switch back to PD`.
 
 #### 4. PPS
 
 <img src="pictures/pps_screen.webp" width="360" alt="PPS screen">
 
-This is the **PPS** screen (tab `PPS` in Trigger): programmable voltage.
+This is the **PPS** screen (tab `PPS` in Trigger): the charger's
+programmable ranges, to request a voltage and current limit.
 
 - **Range row**: each PPS range the charger offers, for example
   `3.30-21.00V  up to 5.00A`.
@@ -351,45 +363,19 @@ This is the **PPS** screen (tab `PPS` in Trigger): programmable voltage.
 - **State**: `ACTIVE` (this setting is the contract in force), `NOT APPLIED`
   (set but not requested yet), or empty.
 - **`NO PPS` / `this charger offers no PPS range`**: nothing to set.
+- **`QC MODE`**: as on the PD Profiles screen.
 - **Hint row**: `OK adjust PPS    < > tabs`, `< > volts    OK next: current`,
-  `< > amps    OK request`, or `waiting for the charger    < > tabs`.
+  `< > amps    OK request`, or `waiting for the charger    < > tabs`; in
+  `QC MODE`, `OK switch back to PD`.
 
 #### 5. QC 2.0
 
-This is the **QC 2.0** screen (tab `QC 2.0` in Trigger), laid out as the PD
-Profiles screen.
+<img src="pictures/qc2_screen.webp" width="360" alt="QC 2.0 screen">
 
-**Under a PD contract** a USB-C charger ignores Quick Charge, so the screen
-shows only `PD MODE` / `the charger ignores QC under PD`, and the PD
-Profiles and PPS screens stay in use. OK (`OK switch to QC, tests up to
-20V`) switches: the meter restarts the charger with a Hard Reset and boots
-with PD silent (Rd held, nothing acknowledged), so the charger falls back to
-non-PD 5 V and takes Quick Charge. The charger may restart one or two more
-times before it settles. The meter comes back on the Quick Charge screen it
-left and tests the charger at once. OK on the PD Profiles or PPS screen
-switches back the same way, into PD. The meter stops saving the switch once the charger
-had 10 s to settle, so the next plug-in starts with PD again.
-
-**The test** (`TESTING THE CHARGER`) runs the first time Quick Charge starts
-in a boot, without a PD contract on OK, or straight after the switch out of
-PD. It holds D+ at 0.6 V until the charger releases D−, then requests Quick
-Charge 3.0 continuous mode and three 200 mV steps up from 5 V, then 5 V
-again (a charger ignored fixed requests sent straight from continuous mode),
-9, 12 and 20 V, and ends at 5 V. The checked requests all raise the output,
-so a slowly falling VBUS cannot hide the steps. **It puts up to 20 V on the
-output port**, so disconnect anything that cannot take that first. It ends
-in `NO CHARGING PORT` (D+ and D− are not shorted) or `NO QUICK CHARGE` (D−
-never went low) when the charger has no Quick Charge.
-
-After the test the choice opens at 5 V: Left/Right choose among the
-voltages the charger took, and OK requests one and closes the choice; Back
-closes it without a request. OK reopens it at the voltage in force. The
-request stays in force while other screens show, so the overview can watch
-it. `OFF` releases D+/D−, and the charger returns to plain USB at 5 V.
-
-Quick Charge never confirms a request, so the meter watches VBUS: a request
-whose output has not moved halfway after 610 ms (the charger's 60 ms filter
-plus PD's 550 ms supply transition limit) shows `IGNORED`.
+This is the **QC 2.0** screen (tab `QC 2.0` in Trigger): Quick Charge 2.0
+fixed voltages, to request one. It is laid out as the PD Profiles screen;
+[Quick Charge](#quick-charge) explains the switch out of PD, the test and
+the requests.
 
 - **Rows**: 5, 9, 12 and 20 V, then `OFF` (`plain USB`). Before the test
   20 V reads `Class B only`; after it a voltage the charger ignored is greyed
@@ -398,18 +384,29 @@ plus PD's 550 ms supply transition limit) shows `IGNORED`.
   result.
 - **Status pill** on the row it concerns: `WAIT` (handshake), `SETTING`
   (waiting for VBUS), `ACTIVE`, `IGNORED`, `NO DCP` or `NO QC`.
+- **`PD MODE` / `the charger ignores QC under PD`**: a PD contract holds the
+  charger.
+- **`TESTING THE CHARGER`**: the test runs, with the step it is on
+  (`Quick Charge handshake`, `asking for 9V`, `QC 3.0 continuous mode`,
+  `QC 3.0 steps +0.40V`, `back to 5V`). It ends in `NO CHARGING PORT` /
+  `D+ and D- are not shorted` or `NO QUICK CHARGE` / `D- stayed high` when
+  the charger has no Quick Charge.
+- **Hint row**: `OK choose a voltage    < > tabs`, then while choosing
+  `< > choose  OK request  BACK cancel`, and `OK change    < > tabs` once a
+  request runs. Until the charger follows it: `handshake    < > tabs`,
+  `waiting for VBUS    < > tabs`, `charger kept its output    OK change`,
+  `D+ D- not shorted    OK change` or `D- stayed high    OK change`. Before
+  the test `OK test the charger, up to 20V`, during it
+  `up to 20V on the output    BACK stop` (`BACK` once it failed); in
+  `PD MODE`, `OK switch to QC, tests up to 20V`.
 
 #### 6. QC 3.0
 
-This is the **QC 3.0** screen (tab `QC 3.0` in Trigger), laid out as the PPS
-screen. Under a PD contract it shows only `PD MODE`, and switches as the
-QC 2.0 screen does. OK runs the same test the first time, then starts Quick
-Charge 3.0 continuous mode at 5 V; Left/Right then move the output by 0.2 V
-(held, they repeat), from 3.6 V up to 12 V (20 V on a Class B charger), one
-step per 100 ms scan. OK or Back stops adjusting; the output stays where
-the steps put it while other screens show. OK reopens it there, and `OFF`
-on the QC 2.0 screen ends the steps.
-A charger that ignored the steps in the test shows `NO QC 3.0`.
+<img src="pictures/qc3_screen.webp" width="360" alt="QC 3.0 screen">
+
+This is the **QC 3.0** screen (tab `QC 3.0` in Trigger): Quick Charge 3.0
+continuous mode, to set the output in 0.2 V steps. It is laid out as the PPS
+screen; see [Quick Charge](#quick-charge).
 
 - **Step range** (top): what the test found, else
   `3.6-12V by 0.2V  Class A` and `3.6-20V by 0.2V  Class B`.
@@ -419,13 +416,20 @@ A charger that ignored the steps in the test shows `NO QC 3.0`.
 - **`D+ … D- …`**: the lines as measured, to check the driven levels.
 - **State** (bottom right): `WAIT`, `STEPPING`, `ACTIVE` (the steps reached
   the set voltage), `NO DCP` or `NO QC`.
+- **`PD MODE`** and **`TESTING THE CHARGER`**: as on the QC 2.0 screen.
+- **`NO QC 3.0` / `the charger ignored the steps`**: the test found no
+  steps.
+- **Hint row**: `OK start at 5V    < > tabs`, then `< > 0.2V    OK done`
+  while adjusting, and `OK adjust    < > tabs` once the steps run; the
+  handshake, test and `PD MODE` hints as on the QC 2.0 screen, and `< > tabs`
+  after `NO QC 3.0`.
 
 #### 7. PD Session
 
 <img src="pictures/pd_session_screen.webp" width="360" alt="PD Session screen">
 
-This is the **PD Session** screen (tab `PD SESSION` in Info): the meter's own PD negotiation.
-It scrolls (OK) through three sections.
+This is the **PD Session** screen (tab `PD SESSION` in Info): the meter's
+own PD negotiation. It scrolls (OK) through three sections.
 
 **Session section**
 
@@ -527,8 +531,8 @@ It scrolls (OK) through three sections.
 
 <img src="pictures/charger_screen.webp" width="360" alt="Charger screen">
 
-This is the **Charger** screen (tab `CHARGER` in Info): what the charger says about
-itself, then what Quick Charge detection found. The PD parts are the
+This is the **Charger** screen (tab `CHARGER` in Info): what the charger says
+about itself, then what Quick Charge detection found. The PD parts are the
 charger's claims, not measurements, then the Quick Charge result. It
 scrolls (OK) through the parts; a long offer takes two screens.
 
@@ -545,7 +549,8 @@ scrolls (OK) through the parts; a long offer takes two screens.
   the note `* ONLY WITH 5A CABLE`.
 - **Notes**:
   - `HOLD OK: FULL SCAN` / `QC AND EPR; RESTARTS` (`QC, EPR, 5A; RESTARTS`
-    with the plug in the charger): hold OK for the full scan.
+    with the plug in the charger): hold OK for the
+    [full scan](#full-charger-offer-and-5-a-without-a-cable).
   - After the scan, the EPR (28 V and up) request: `ASKING CHARGER`,
     `NO ANSWER, HOLD OK AGAIN`, `LINE BUSY, HOLD OK AGAIN`, or in the 5 A
     cable test `HOLD OK FOR ALL`.
@@ -606,26 +611,12 @@ with `HOLD OK: FULL SCAN`, or without a PD contract `NOT TESTED YET` with
 **Answer words** used in these sections: `OK`, `WAITING`, `NOT SUPPORTED`,
 `NO REPLY`, `BLOCKED`, `RESET`, `PD2 N/A` (not available under PD 2.0).
 
-**Full scan.** Hold OK on this screen (`HOLD OK: FULL SCAN`). A charger
-ignores Quick Charge under a PD contract, so the meter:
-
-1. Restarts the charger with a Hard Reset into a boot with PD silent, and
-   runs the Quick Charge test on the QC 2.0 screen (it may restart once or
-   twice more first; it carries on). Back abandons the scan.
-2. Saves the result, restarts the charger into PD, asks for the EPR offer by
-   itself, and opens this screen with everything: the offer, the EPR offer,
-   the Quick Charge sections and the charger's answers. With the plug in the
-   charger that boot is the
-   [5 A cable test](#full-charger-offer-and-5-a-without-a-cable).
-
-The output goes up to 20 V during the scan.
-
 #### 9. Cable
 
 <img src="pictures/cable_screen.webp" width="360" alt="Cable screen">
 
-This is the **Cable** screen (tab `CABLE` in Info): the cable's e-marker. Hold OK at
-fixed 5 V to read it. It scrolls (OK) through several sections.
+This is the **Cable** screen (tab `CABLE` in Info): the cable's e-marker.
+Hold OK at fixed 5 V to read it. It scrolls (OK) through several sections.
 
 **Before or instead of a reading**
 
@@ -672,6 +663,7 @@ GET_STATUS`, `SECOND PLUG NO DATA`).
 <img src="pictures/system_screen.webp" width="360" alt="System screen">
 
 This is the **System** screen (tab `SYSTEM` in Info): the meter's own health.
+It scrolls (OK) through two sections.
 
 **Sensor bus**
 
@@ -704,7 +696,8 @@ This is the **System** screen (tab `SYSTEM` in Info): the meter's own health.
 
 <img src="pictures/settings_screen.webp" width="360" alt="Settings screen">
 
-This is the **Settings** screen (Back on the overview).
+This is the **Settings** screen (Back on the overview): display preferences
+and the overview's peaks.
 
 - **`BRIGHTNESS`**: five bars, 20%, 40%, 60%, 80% and 95%. Saved.
 - **`ROTATION`**: `AUTO` (follows the tilt sensor), `NORMAL` or `FLIPPED`.
@@ -723,16 +716,18 @@ screens read as in sink mode.
 
 <img src="pictures/passthrough_overview_screen.webp" width="360" alt="Overview screen in passthrough">
 
-This is the **Overview** screen while a charger and a phone negotiate through
-the meter. The badge and status (`PD 3.0`, `CC1 9V 3.00A`) come from the
-messages the meter overheard, and the chevrons show which way power flows.
+This is the **Overview** screen (tab `OVERVIEW` in Monitor) while a charger
+and a phone negotiate through the meter. The badge and status (`PD 3.0`,
+`CC2 9V 3.00A`) come from the messages the meter overheard, and the chevrons
+show which way power flows.
 
 #### 2. PD Sniff
 
 <img src="pictures/pd_sniff_screen.webp" width="360" alt="PD Sniff screen">
 
-This is the **PD Sniff** screen (tab `PD SNIFF` in Info): the PD messages between the
-charger and the device, oldest first. The meter only listens.
+This is the **PD Sniff** screen (tab `PD SNIFF` in Info): the PD messages
+between the charger and the device, oldest first. The meter only listens. It
+scrolls (OK) through two sections.
 
 - **`SNIFF CC1 RP3.0A M:9`**: the CC pin carrying PD, the charger's Type-C
   current advertisement (`RPDEF`, `RP1.5A`, `RP3.0A`), and `M` the number of
@@ -758,7 +753,67 @@ charger and the device, oldest first. The meter only listens.
 - Before any message: `PASSTHROUGH RX ONLY`, `NO TX NO GOODCRC`, and
   `STARTING` or `WAITING FOR PD TRAFFIC`.
 
+## Quick Charge
+
+Quick Charge asks the charger for a higher voltage over D+ and D− instead of
+PD. The QC 2.0 and QC 3.0 screens drive it; the overview names it while the
+charger follows.
+
+**Switching out of PD.** Under a PD contract a USB-C charger ignores Quick
+Charge, so the Quick Charge screens show only `PD MODE`, and the PD Profiles
+and PPS screens stay in use. OK there (`OK switch to QC, tests up to 20V`)
+switches: the meter restarts the charger with a Hard Reset and boots with PD
+silent (Rd held, nothing acknowledged), so the charger falls back to non-PD
+5 V and takes Quick Charge. The charger may restart one or two more times
+before it settles. The meter comes back on the Quick Charge screen it left
+and tests the charger at once. OK on the PD Profiles or PPS screen
+(`QC MODE`) switches back the same way, into PD. The meter stops saving the
+switch once the charger had 10 s to settle, so the next plug-in starts with
+PD again.
+
+**The test** (`TESTING THE CHARGER`) runs the first time Quick Charge starts
+in a boot, without a PD contract on OK, or straight after the switch out of
+PD. It holds D+ at 0.6 V until the charger releases D−, then requests Quick
+Charge 3.0 continuous mode and three 200 mV steps up from 5 V, then 5 V
+again (a charger ignored fixed requests sent straight from continuous mode),
+9, 12 and 20 V, and ends at 5 V. The checked requests all raise the output,
+so a slowly falling VBUS cannot hide the steps. **It puts up to 20 V on the
+output port**, so disconnect anything that cannot take that first. It ends
+in `NO CHARGING PORT` (D+ and D− are not shorted) or `NO QUICK CHARGE` (D−
+never went low) when the charger has no Quick Charge.
+
+**Fixed voltages (2.0).** After the test the QC 2.0 choice opens at 5 V:
+Left/Right choose among the voltages the charger took, and OK requests one and
+closes the choice; Back closes it without a request. OK reopens it at the
+voltage in force. The request stays in force while other screens show, so the
+overview can watch it. `OFF` releases D+/D−, and the charger returns to plain
+USB at 5 V.
+
+**Steps (3.0).** On the QC 3.0 screen OK starts continuous mode at 5 V;
+Left/Right then move the output by 0.2 V (held, they repeat), from 3.6 V up
+to 12 V (20 V on a Class B charger), one step per 100 ms scan. OK or Back
+stops adjusting; the output stays where the steps put it while other screens
+show. OK reopens it there, and `OFF` on the QC 2.0 screen ends the steps.
+
+**Checking the output.** Quick Charge never confirms a request, so the meter
+watches VBUS: a request whose output has not moved halfway after 610 ms (the
+charger's 60 ms filter plus PD's 550 ms supply transition limit) shows
+`IGNORED`.
+
 ## Full charger offer and 5 A without a cable
+
+**The full scan.** Hold OK on the Charger screen (`HOLD OK: FULL SCAN`). A
+charger ignores Quick Charge under a PD contract, so the meter:
+
+1. Restarts the charger with a Hard Reset into a boot with PD silent, and
+   runs the Quick Charge test on the QC 2.0 screen (it may restart once or
+   twice more first; it carries on). Back abandons the scan.
+2. Saves the result, restarts the charger into PD, asks for the EPR offer by
+   itself, and opens the Charger screen with everything: the offer, the EPR
+   offer, the Quick Charge sections and the charger's answers. With the plug
+   in the charger that boot is the 5 A cable test below.
+
+The output goes up to 20 V during the scan.
 
 USB PD chargers only offer more than 3 A (for example 20 V 5 A, or PPS 5 A)
 when they know the cable can carry it. A 5 A cable proves that with an
