@@ -11,29 +11,29 @@ hidapi = "2.6.7"
 miniz_oxide = { version = "0.9.1", default-features = false }
 object = "0.40.0"
 serde = "1.0.229"
-serde_json = "1.0.151"
-sha2 = "0.11.0"
+serde_json = "1.0.154"
+sha2 = "0.11.1"
 tempfile = "3.27.0"
 tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
 cortex-m = "0.7.9"
 cortex-m-rt = "0.7.7"
 embassy-executor = "0.10.0"
-embassy-hc32 = { git = "https://github.com/kralonur/hc32f460-embassy-rs", rev = "467b3087eb8951019e6eda90e78122d94c566b73" }
-embassy-sync = "0.6.2"
+embassy-hc32 = { git = "https://github.com/kralonur/hc32f460-embassy-rs", rev = "bca14239e0adf13a9177d0468d7110b16951ecd5" }
+embassy-sync = "0.8.0"
 embassy-time = "0.5.1"
 embedded-graphics = "0.8.2"
 embedded-hal-async = "1.0.0"
 firmware-core = { path = "firmware-core" }
 firmware-image = { path = "firmware-image" }
 fusb302-pd = { path = "fusb302-pd" }
-hc32f460-pac = { git = "https://github.com/kralonur/hc32f460-embassy-rs", rev = "467b3087eb8951019e6eda90e78122d94c566b73" }
+hc32f460-pac = { git = "https://github.com/kralonur/hc32f460-embassy-rs", rev = "bca14239e0adf13a9177d0468d7110b16951ecd5" }
 panic-halt = "1.0.0"
-pd-protocol = { git = "https://github.com/kralonur/embedded-charging-protocols-rs", rev = "6b2d8b18b377289360b32c3c64d57cebf0670275" }
-qc-protocol = { git = "https://github.com/kralonur/embedded-charging-protocols-rs", rev = "6b2d8b18b377289360b32c3c64d57cebf0670275" }
+pd-protocol = { git = "https://github.com/kralonur/embedded-charging-protocols-rs", rev = "8bb4a12936ed642da6c886587df36bf2e08c6632" }
+qc-protocol = { git = "https://github.com/kralonur/embedded-charging-protocols-rs", rev = "8bb4a12936ed642da6c886587df36bf2e08c6632" }
 u8g2-fonts = "0.8.0"
-usbpd = { git = "https://github.com/kralonur/usbpd", rev = "01d5b6e49051af09d314dfee7be7596167b4ba16" }
-usbpd-traits = { git = "https://github.com/kralonur/usbpd", rev = "01d5b6e49051af09d314dfee7be7596167b4ba16" }
+usbpd = { git = "https://github.com/kralonur/usbpd", rev = "9c1325e1ecf6be5f5f53be656ae3658dd7131101" }
+usbpd-traits = { git = "https://github.com/kralonur/usbpd", rev = "9c1325e1ecf6be5f5f53be656ae3658dd7131101" }
 
 # Size optimization keeps the application below the preserved graphics bank.
 # This is the source firmware's release profile, not a new hardware qualification.
