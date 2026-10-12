@@ -16,7 +16,7 @@ tracing-subscriber = "0.3.23"
 cortex-m = "0.7.9"
 cortex-m-rt = "0.7.7"
 embassy-executor = "0.10.0"
-embassy-hc32 = { git = "https://github.com/kralonur/hc32f460-embassy-rs", rev = "a61525380066778cf8fa0062ebf1a61d2842c270" }
+embassy-hc32 = { git = "https://github.com/kralonur/hc32f460-embassy-rs", rev = "ceca2399aba3d71d0394fe89de4fe9e08ebfbb0c" }
 embassy-sync = "0.6.2"
 embassy-time = "0.5.1"
 embedded-graphics = "0.8.2"
@@ -24,7 +24,7 @@ embedded-hal-async = "1.0.0"
 firmware-core = { path = "firmware-core" }
 firmware-image = { path = "firmware-image" }
 fusb302-pd = { path = "fusb302-pd" }
-hc32f460-pac = { git = "https://github.com/kralonur/hc32f460-embassy-rs", rev = "a61525380066778cf8fa0062ebf1a61d2842c270" }
+hc32f460-pac = { git = "https://github.com/kralonur/hc32f460-embassy-rs", rev = "ceca2399aba3d71d0394fe89de4fe9e08ebfbb0c" }
 panic-halt = "1.0.0"
 pd-protocol = { git = "https://github.com/kralonur/embedded-charging-protocols-rs", rev = "c41cb5bf7f1a4ac2ccc763df60426db7a5ac4bc0" }
 qc-protocol = { git = "https://github.com/kralonur/embedded-charging-protocols-rs", rev = "c41cb5bf7f1a4ac2ccc763df60426db7a5ac4bc0" }
