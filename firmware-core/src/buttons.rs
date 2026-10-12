@@ -805,6 +805,17 @@ impl Navigation {
         }
     }
 
+    /// The probe found no Quick Charge. Quick Charge mode then ends with this
+    /// boot: a charger still retrying PD would otherwise keep restarting the
+    /// meter into the same failed probe. The next boot runs PD and reopens
+    /// this tab, which keeps the result (the scan keeps its own steps).
+    pub fn fail_probe(&mut self) {
+        if self.silent && self.input.settings.next_boot == NextBoot::QuickCharge {
+            let tab = self.input.page.tab().map(Screen::from);
+            self.input.settings.set_next_boot(NextBoot::Normal, tab);
+        }
+    }
+
     /// This boot runs the full scan's Quick Charge part, which keeps the
     /// probe on screen until it ends; Back abandons the scan.
     fn scanning(&self) -> bool {

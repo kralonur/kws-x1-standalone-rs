@@ -683,6 +683,7 @@ async fn button_task(
                 navigation.finish_scan(QcFindings::Detected(report))
             }
             Some(qc_drive::Status::Failed(failure)) => {
+                navigation.fail_probe();
                 navigation.finish_scan(QcFindings::Failed(failure))
             }
             _ => None,
