@@ -1023,14 +1023,18 @@ register map, bit fields and FIFO tokens come directly from the data sheet below
 
 - `firmware/`: startup, peripheral ownership, async tasks, meter/UI and PD routing.
 - `firmware-core/`: board limits, buttons and panel geometry.
-- `firmware-image/`: shared container layout, builder and checksum validation.
-- `firmware-pack/`: host-only Rust container generation and application auditing.
+- `firmware-image/`: shared container layout, builder, checksum validation and
+  the self-unpacking release format.
+- `firmware-pack/`: host-only Rust release packing and auditing.
 - `flasher/`: host-only Rust USB flashing.
 - `fusb302-pd/`: checked controller configuration, FIFO transport, gated sink
   sessions and receive-only passthrough.
 
-The firmware starts at the existing bootloader's application entry. It does not
-use the original graphics bank and may grow into it; "standalone" does not mean
+The firmware starts at the existing bootloader's application entry. The PD
+stack runs from upper flash (`0x44000`–`0x6c000`), which the bootloader's
+update never writes; a release image fills it on its first boot (see
+[Package and audit offline](#package-and-audit-offline)). It does not use the
+original graphics bank and may grow into it; "standalone" does not mean
 a replacement bootloader or a self-contained whole-flash image. Legacy hybrid overlays, offline firmware
 experiments and historical test suites are not included. `firmware-pack` reuses
 the shared `firmware-image` builder for standalone generation and offline auditing;
@@ -1128,28 +1132,36 @@ so diagnostic images are not interchangeable with the normal build.
 
 ### Package and audit offline
 
-Uses current stable Rust and its bundled LLVM tools. The `firmware-pack` CLI
-generates `.X1C` directly from the built application, zero fill and a fixed
-16-byte footer descriptor. No baseline image, template file or download is
-required. `pack` refuses existing outputs rather than overwriting them;
-`audit` checks an exact hash-confirmed image against the built application.
-Both emit JSON reports to stdout and never access USB hardware.
+Uses current stable Rust. `cargo fw` builds two programs: the `firmware` and
+the `unpacker`. `firmware-pack` packs them into one release image: the unpacker,
+followed by the PD code (upper flash) and the main firmware, both compressed
+with deflate. No baseline image, template file or download is required. `pack`
+refuses existing outputs rather than overwriting them; `audit` checks an exact
+hash-confirmed image against the same two builds. Both emit JSON reports to
+stdout and never access USB hardware.
 
 ```sh
-rustup component add llvm-tools
 mkdir -p build
-HOST=$(rustc -vV | awk '/^host:/ {print $2}')
-"$(rustc --print sysroot)/lib/rustlib/$HOST/bin/llvm-objcopy" \
-  -O binary target/thumbv7em-none-eabihf/release/firmware build/firmware.bin
+ELF=target/thumbv7em-none-eabihf/release
 cargo run --release -p firmware-pack --locked -- pack \
-  --app build/firmware.bin --out build/firmware.X1C > build/package.json
+  --firmware "$ELF/firmware" --unpacker "$ELF/unpacker" \
+  --out build/firmware.X1C > build/package.json
 IMAGE_SHA256=$(sha256sum build/firmware.X1C | cut -d ' ' -f 1)
 cargo run --release -p firmware-pack --locked -- audit \
   --image build/firmware.X1C --confirm-sha256 "$IMAGE_SHA256" \
-  --app build/firmware.bin > build/audit.json
+  --firmware "$ELF/firmware" --unpacker "$ELF/unpacker" > build/audit.json
 cargo run --release -p flasher --locked -- \
   --dry-run --image build/firmware.X1C --confirm-sha256 "$IMAGE_SHA256"
 ```
+
+The bootloader only writes the 26 sectors at `0x10000`–`0x44000`, so the
+release is packed to fit there. On its first boot the unpacker runs from RAM:
+it inflates both streams and checks their lengths and hashes, writes the PD
+code to upper flash, then writes the main firmware over itself and resets into
+it. Sectors that already hold the right bytes are skipped. `pack` replays the
+same unpacking to prove the main firmware never erases stream bytes it has
+yet to read. Its report's `unused_content_bytes` is the compressed room left
+in the release, and `release` breaks the sizes down per region.
 
 The container uses the layout implemented by `firmware-image::build_container`:
 the two-byte prefix, application bytes, zero fill, a 16-byte descriptor at
@@ -1172,9 +1184,9 @@ or safety qualification; neither an audit nor a matching hash authorizes flashin
 runs and **`firmware-v*` tags**, independently of flasher releases. It checks
 formatting, firmware Clippy (including diagnostics), and the offline packaging
 regressions, then builds normal release firmware **without diagnostic features**
-for `thumbv7em-none-eabihf` and extracts its application binary.
+for `thumbv7em-none-eabihf`.
 
-Every run generates `.X1C` from that application, runs the offline image audit,
+Every run packs the release `.X1C` from those builds, runs the offline image audit,
 and validates it with the Rust flasher's `--dry-run`. No original firmware file,
 download URL, firmware-specific repository variables or secrets are needed.
 It never opens USB hardware or flashes a device. Invalid applications, containers
@@ -1312,6 +1324,14 @@ A partial final report is zero-padded for transport without changing the image
 or its checksum. The bootloader and storage above the erase envelope are not
 written by this update sequence.
 
+**First boot after flashing:** the backlight comes on for a few seconds with a
+blank screen while the release unpacks itself, then the meter restarts into
+the firmware. Keep it powered until then. If the backlight **blinks**, the
+image was damaged or flash could not be written: enter bootloader mode and
+flash the release again. If power is lost while it unpacks, it either resumes
+on the next power-up or stays dark; for a dark screen, flash the release
+again the same way. The bootloader itself is never written.
+
 **On a write or verification error, stop and leave the device in bootloader
 mode.** The tool does not automatically reboot, retry or restore another image.
 Successful batch checksums alone are not a successful update. Investigation,
@@ -1380,7 +1400,8 @@ crate keeps the host flasher independent of the embedded runtime dependencies.
 ### Going back to stock
 
 You can. The bootloader is never touched, so Back + OK still works after this
-firmware has run. Flashing the stock V1.0.5V image back over it was tested on a
+firmware has run. The PD code this firmware unpacked into upper flash stays
+there; stock does not use that range. Flashing the stock V1.0.5V image back over it was tested on a
 real meter: stock booted, and its settings and PD triggering worked normally.
 This firmware's saved settings records stay in flash, and stock ran fine with
 them there.

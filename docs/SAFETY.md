@@ -178,13 +178,31 @@ fit below the footer descriptor at `0x433fc` (209916 bytes), enforced by the
 FLASH length in `memory.x` and by the packager. This layout reserves 16 bytes
 before the checksum at `0x4340c`; it is not a measured bootloader size limit.
 Standalone packaging uses the established checksum/trailer offsets and
-`0x44000` erase ceiling. It generates the container directly from the built
+`0x44000` erase ceiling. It generates the container directly from the release
 application, zero fill and the fixed descriptor. No copied baseline application
 code or data is embedded. The descriptor fields remain undecoded. The canonical
 payload length is `0x33640` (210,496 bytes, 3,289 chunks), producing the 26-sector
 erase range `[0x10000, 0x44000)`. Bootloader and settings regions remain outside
 that range. The generated layout passed batch checks and final bootloader
-verification on Linux. This result does not qualify every build's runtime
+verification on Linux.
+
+The PD stack runs from upper flash, `[0x44000, 0x6c000)`, outside the update
+erase range. A release's application is the unpacker followed by two deflate
+streams: the upper region's and the main firmware's. On its first boot the
+unpacker runs entirely from RAM with interrupts disabled. It inflates both
+streams and checks their lengths and hashes before writing anything, then
+programs the upper region, then the main firmware over itself, and resets.
+Writes are fenced to `[0x44000, 0x6c000)` and the application erase range; a
+sector that already holds its bytes is skipped, and one is erased only when a
+word is neither wanted nor blank. A main firmware sector is erased only when it
+lies wholly below the stream bytes still to be read; `firmware-pack` replays
+the same unpacking to prove this before it packs. The backlight is lit while it
+works and blinks on a failed check or write. Device data at `0x6e000` and
+above is never touched. Power loss during the upper writes is resumed on the
+next boot; power loss during the main writes leaves the application unusable
+until the release is flashed again from bootloader mode. Startup hashes the
+upper region against the main firmware's record before anything calls into it,
+and shows a missing-code screen rather than running a mismatched region. This result does not qualify every build's runtime
 behavior. Image framing and matching hashes do not authorize flashing.
 
 Normal firmware saves its settings (brightness, rotation) and does not program
@@ -200,11 +218,11 @@ the programming routine runs from RAM with interrupts disabled, and error flags
 fail the write without retries. These sectors are outside the update erase
 range, so saved settings survive firmware updates.
 
-The Rust `firmware-pack` CLI takes only the built application, validates its
-vectors and size, generates the standalone layout using
+The Rust `firmware-pack` CLI takes the built firmware and unpacker, validates
+their vectors and sizes, packs the release, generates the standalone layout using
 `firmware-image::build_container`, and exclusively creates a new output file.
 No original firmware or scripting runtime is required. Its offline audit checks
-the confirmed image hash, validates the supplied application, and requires the
+the confirmed image hash, repacks the supplied builds, and requires the
 image to match the reconstructed canonical container byte-for-byte, including
 length, zero fill, descriptor, checksum, marker and zero trailer/alignment.
 The generated erase envelope is checked against the application ceiling.
