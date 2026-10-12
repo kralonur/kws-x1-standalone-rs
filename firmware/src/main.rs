@@ -186,7 +186,13 @@ impl firmware_core::pd_svids::Store for CableSvidStore {
 }
 /// Nominal timer milliseconds, not calibrated wall-clock measurements.
 static FRAME_MS: AtomicU32 = AtomicU32::new(0);
-static BUTTON_GAP_MAX_MS: AtomicU32 = AtomicU32::new(0);
+/// The longest gap between two button polls in the last full
+/// [`BUTTON_GAP_WINDOW`].
+static BUTTON_GAP_MS: AtomicU32 = AtomicU32::new(0);
+/// How long the System page's button gap covers. A since-boot peak kept a
+/// startup or settings-save stall on screen for the whole run; two seconds
+/// still holds a short stall long enough to read. Chosen, not specified.
+const BUTTON_GAP_WINDOW: embassy_time::Duration = embassy_time::Duration::from_secs(2);
 static PD_IRQ_COUNT: AtomicU32 = AtomicU32::new(0);
 /// Latest PD observation: the PD task sends it, the renderer reads it.
 static PD_OBSERVATION: Watch<CriticalSectionRawMutex, pd::Observation, 1> =
@@ -607,12 +613,16 @@ async fn button_task(
     let input_sender = BUTTON_STATE.sender();
     let mut qc_updates = QC_STATUS.anon_receiver();
     let mut previous = Instant::now();
+    let mut window_end = previous + BUTTON_GAP_WINDOW;
+    let mut window_gap = 0;
     loop {
         let now = Instant::now();
-        BUTTON_GAP_MAX_MS.fetch_max(
-            now.duration_since(previous).as_millis() as u32,
-            Ordering::Relaxed,
-        );
+        window_gap = window_gap.max(now.duration_since(previous).as_millis() as u32);
+        if now >= window_end {
+            BUTTON_GAP_MS.store(window_gap, Ordering::Relaxed);
+            window_gap = 0;
+            window_end = now + BUTTON_GAP_WINDOW;
+        }
         previous = now;
         let raw = inputs.iter().enumerate().fold(0u8, |mask, (index, pin)| {
             mask | (u8::from(pin.is_low()) << index)

@@ -684,8 +684,8 @@ It scrolls (OK) through two sections.
 **`TIMING AND MEMORY`**
 
 - **`FRAME`**: how long the last screen refresh took, in ms.
-- **`BUTTON GAP`**: the longest gap between two button checks since boot, in
-  ms (normally 10).
+- **`BUTTON GAP`**: the longest gap between two button checks in the last 2
+  seconds, in ms (normally 10).
 - **`STACK`**: the most stack used since boot / the stack size, in bytes.
 - **`LAST RESET`**: the reset cause flags in hexadecimal, then their names:
   `POWER`, `PIN`, `BROWNOUT`, `PVD1`, `PVD2`, `WDT`, `SWDT`, `PDOWN`, `SOFT`,

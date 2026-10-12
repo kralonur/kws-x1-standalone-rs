@@ -7,7 +7,7 @@ use embedded_graphics::pixelcolor::raw::RawU16;
 use embedded_graphics::prelude::*;
 
 use crate::ui::Lines;
-use crate::{BUTTON_GAP_MAX_MS, FRAME_MS};
+use crate::{BUTTON_GAP_MS, FRAME_MS};
 
 /// One full RGB565 frame in memory order.
 pub type Frame = [u16; firmware_core::panel::PIXELS];
@@ -152,17 +152,12 @@ pub fn system_lines(counters: Counters, latched: bool) -> [Lines; 2] {
 
     let mut timing = [[b' '; 24]; 8];
     put(&mut timing[0], b"TIMING AND MEMORY");
-    // Last panel refresh, and the longest gap between two button polls
-    // since boot (normally `buttons::POLL_MS`), in ms.
+    // Last panel refresh, and the longest gap between two button polls in
+    // the last `BUTTON_GAP_WINDOW` (normally `buttons::POLL_MS`), in ms.
     put(&mut timing[1], b"FRAME: 000000 MS");
     decimal(&mut timing[1], 7, 6, FRAME_MS.load(Ordering::Relaxed));
     put(&mut timing[2], b"BUTTON GAP: 000000 MS");
-    decimal(
-        &mut timing[2],
-        12,
-        6,
-        BUTTON_GAP_MAX_MS.load(Ordering::Relaxed),
-    );
+    decimal(&mut timing[2], 12, 6, BUTTON_GAP_MS.load(Ordering::Relaxed));
     // Peak stack bytes since boot / stack size: the margin left before an
     // overflow into `.bss` (see docs/SAFETY.md).
     put(&mut timing[3], b"STACK: 000000/000000");
