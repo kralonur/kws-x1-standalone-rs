@@ -45,11 +45,11 @@ use bus::{
     ASYNC_READS, BUS_LATCH, I2C_ERRORS, I2C_FAULT_STEP, I2C_LAST_CR1, I2C_LAST_CR4, I2C_LAST_SR,
     I2C3, bus_failed, read_meter, write_meter, write_sensor,
 };
-use button_logic::{Detail, MAX_TABS, Open, Page, QcPage, QcTarget, Tab, View};
+use button_logic::{Detail, MAX_TABS, Page, QcTarget, Tab, View};
 use embassy_time::{Instant, Timer};
 use embedded_graphics::pixelcolor::{Rgb565, RgbColor};
 use firmware_core::buttons as button_logic;
-use firmware_core::settings::{NextBoot, QcFindings, Rotation};
+use firmware_core::settings::{NextBoot, QcFindings, Rotation, Screen};
 use hc32f460_pac::interrupt;
 use panel::Orientation;
 #[cfg(not(any(feature = "pd-boot-diagnostic", feature = "cable-log")))]
@@ -634,10 +634,9 @@ async fn button_task(
     inputs: [InputPin; 4],
     mut store: settings_store::Store,
     saved: firmware_core::settings::Settings,
-    // What the previous boot asked this one to be: the cable test and the
-    // scan's PD part open the charger page (which says why a test did not
-    // run), the silent boots the Quick Charge page.
+    // What the previous boot asked this one to be, and the screen it opens on.
     requested: NextBoot,
+    resume: Option<Screen>,
 ) {
     // `pd-boot-diagnostic`: open on the PD page so the state before a
     // source Hard Reset is on screen (docs/SAFETY.md).
@@ -652,14 +651,8 @@ async fn button_task(
     let fatal = false;
     let mut navigation = if cfg!(feature = "pd-boot-diagnostic") || fatal {
         button_logic::Navigation::new(Page::Groups(Tab::detail(Detail::Pd)), saved)
-    } else if matches!(requested, NextBoot::CableTest | NextBoot::ScanPd) {
-        button_logic::Navigation::new(Page::Tabs(Tab::detail(Detail::Charger)), saved)
-    } else if let NextBoot::QuickCharge { steps } = requested {
-        // The switch out of PD runs the probe at once.
-        let page = if steps { QcPage::Qc3 } else { QcPage::Qc2 };
-        button_logic::Navigation::new(Page::Open(Open::Probe(page)), saved)
-    } else if matches!(requested, NextBoot::ScanQuickCharge { .. }) {
-        button_logic::Navigation::new(Page::Open(Open::Probe(QcPage::Qc2)), saved)
+    } else if let Some(screen) = resume {
+        button_logic::Navigation::new(Page::resume(screen, requested.silent()), saved)
     } else {
         button_logic::Navigation::new(Page::default(), saved)
     };
@@ -1216,18 +1209,17 @@ async fn main(spawner: Spawner) {
     // token is always free (`SpawnError::Busy` needs a second instance).
     const ONE_SPAWN: &str = "each task is spawned once into its one-slot pool";
 
-    // A restart (`PdCommand::Restart`) left the mode of this boot in the
-    // saved settings. One-boot modes and the carried Quick Charge result are
-    // cleared here, before any task: the flash write masks interrupts, which
-    // must not happen in the PD session's start window, when the charger
-    // asks the cable question.
+    // A restart (`PdCommand::Restart`) left the mode of this boot and the
+    // screen it opens on in the saved settings. What only this boot needed
+    // and the carried Quick Charge result are cleared here, before any task:
+    // the flash write masks interrupts, which must not happen in the PD
+    // session's start window, when the charger asks the cable question.
     let (mut store, saved) = settings_store::Store::open();
     let mut settings = saved.unwrap_or_default();
     let requested = settings.next_boot;
+    let resume = settings.resume;
     let qc_findings = settings.qc_findings.take();
-    if requested.one_boot() {
-        settings.next_boot = NextBoot::Normal;
-    }
+    settings.finish_boot();
     let cleared = store.save(settings);
     // The cable test runs only on a boot after a power-up (the restart's power
     // cycle), with its request verifiably cleared first. A reset during that
@@ -1379,6 +1371,6 @@ async fn main(spawner: Spawner) {
     spawner.spawn(pulse_task().expect(ONE_SPAWN));
     spawner.spawn(tilt_task(tilt_input).expect(ONE_SPAWN));
     spawner.spawn(line_task(line_adc, qc_trigger).expect(ONE_SPAWN));
-    spawner.spawn(button_task(button_inputs, store, settings, requested).expect(ONE_SPAWN));
+    spawner.spawn(button_task(button_inputs, store, settings, requested, resume).expect(ONE_SPAWN));
     spawner.spawn(meter_task(backlight_pwm, qc_findings).expect(ONE_SPAWN));
 }

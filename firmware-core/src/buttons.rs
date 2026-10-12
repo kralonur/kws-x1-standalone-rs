@@ -5,7 +5,7 @@
 //! They are the Left, Right, OK and Back buttons, as identified on
 //! the device.
 
-use crate::settings::{Item, NextBoot, QcFindings, Settings};
+use crate::settings::{Item, NextBoot, QcFindings, Screen, Settings};
 use qc_protocol::detect::Report;
 use qc_protocol::qc2::Voltage;
 use qc_protocol::qc3::{MIN_MV, STEP_MV};
@@ -100,6 +100,18 @@ impl Default for Page {
     }
 }
 
+impl Page {
+    /// Where a boot opens for its saved `screen`: that tab, or, for a Quick
+    /// Charge tab in a PD-silent boot, its probe, which runs at once.
+    pub fn resume(screen: Screen, silent: bool) -> Self {
+        match Tab::from(screen) {
+            Tab::Qc2 if silent => Self::Open(Open::Probe(QcPage::Qc2)),
+            Tab::Qc3 if silent => Self::Open(Open::Probe(QcPage::Qc3)),
+            tab => Self::Tabs(tab),
+        }
+    }
+}
+
 /// The page groups, in Left/Right order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Group {
@@ -170,6 +182,43 @@ pub enum Tab {
     Qc3,
     /// A detail list shown from row `top`.
     Detail { page: Detail, top: u16 },
+}
+
+impl From<Tab> for Screen {
+    /// The screen to come back to; a detail list comes back at its top.
+    fn from(tab: Tab) -> Self {
+        match tab {
+            Tab::Overview => Self::Overview,
+            Tab::Lines => Self::Lines,
+            Tab::Fixed => Self::Fixed,
+            Tab::Pps => Self::Pps,
+            Tab::Qc2 => Self::Qc2,
+            Tab::Qc3 => Self::Qc3,
+            Tab::Detail { page, .. } => match page {
+                Detail::Pd => Self::PdDetails,
+                Detail::Charger => Self::Charger,
+                Detail::Cable => Self::Cable,
+                Detail::System => Self::System,
+            },
+        }
+    }
+}
+
+impl From<Screen> for Tab {
+    fn from(screen: Screen) -> Self {
+        match screen {
+            Screen::Overview => Self::Overview,
+            Screen::Lines => Self::Lines,
+            Screen::Fixed => Self::Fixed,
+            Screen::Pps => Self::Pps,
+            Screen::Qc2 => Self::Qc2,
+            Screen::Qc3 => Self::Qc3,
+            Screen::PdDetails => Self::detail(Detail::Pd),
+            Screen::Charger => Self::detail(Detail::Charger),
+            Screen::Cable => Self::detail(Detail::Cable),
+            Screen::System => Self::detail(Detail::System),
+        }
+    }
 }
 
 impl Tab {
@@ -740,8 +789,8 @@ impl Navigation {
     /// later plug-in starts with PD again.
     pub fn set_silent(&mut self, silent: bool, settled: bool) {
         self.silent = silent;
-        if settled && matches!(self.input.settings.next_boot, NextBoot::QuickCharge { .. }) {
-            self.input.settings.next_boot = NextBoot::Normal;
+        if settled && self.input.settings.next_boot == NextBoot::QuickCharge {
+            self.input.settings.set_next_boot(NextBoot::Normal, None);
         }
     }
 
@@ -777,11 +826,14 @@ impl Navigation {
             return None;
         };
         settings.qc_findings = Some(findings);
-        settings.next_boot = if then_cable_test {
+        let boot = if then_cable_test {
             NextBoot::CableTest
         } else {
             NextBoot::ScanPd
         };
+        // The PD part ends on the charger page, which says why a test did
+        // not run.
+        settings.set_next_boot(boot, Some(Screen::Charger));
         Some(PdCommand::Restart)
     }
 
@@ -849,7 +901,7 @@ impl Navigation {
             if self.cable_test && self.input.page.is_charger() {
                 command = Some(PdCommand::Restart);
             } else if self.scanning() {
-                self.input.settings.next_boot = NextBoot::Normal;
+                self.input.settings.set_next_boot(NextBoot::Normal, None);
                 command = Some(PdCommand::Restart);
             } else {
                 self.back();
@@ -895,9 +947,12 @@ impl Navigation {
             // ignores it under a PD contract), then PD again with its EPR
             // offer, ending here.
             Detail::Charger if self.selectable => {
-                self.input.settings.next_boot = NextBoot::ScanQuickCharge {
-                    then_cable_test: self.plug_in_charger,
-                };
+                self.input.settings.set_next_boot(
+                    NextBoot::ScanQuickCharge {
+                        then_cable_test: self.plug_in_charger,
+                    },
+                    Some(Screen::Qc2),
+                );
                 Some(Some(PdCommand::Restart))
             }
             // Without PD, Quick Charge answers directly.
@@ -980,9 +1035,11 @@ impl Navigation {
         let (page, command) = match input.page {
             Page::Groups(tab) => (Page::Tabs(tab), None),
             page @ Page::Tabs(Tab::Overview | Tab::Lines) => (page, None),
-            // Quick Charge holds the charger: restart into PD.
-            page @ Page::Tabs(Tab::Fixed | Tab::Pps) if self.silent => {
-                input.settings.next_boot = NextBoot::Normal;
+            // Quick Charge holds the charger: restart into PD, back on this tab.
+            page @ Page::Tabs(tab @ (Tab::Fixed | Tab::Pps)) if self.silent => {
+                input
+                    .settings
+                    .set_next_boot(NextBoot::Normal, Some(tab.into()));
                 (page, Some(PdCommand::Restart))
             }
             page @ Page::Tabs(Tab::Fixed | Tab::Pps) if !self.selectable => (page, None),
@@ -993,11 +1050,12 @@ impl Navigation {
             ),
             Page::Tabs(Tab::Qc2) if !self.selectable => (QcPage::Qc2.open(input), None),
             Page::Tabs(Tab::Qc3) if !self.selectable => (QcPage::Qc3.open(input), None),
-            // A PD contract hides Quick Charge: restart into a silent boot.
+            // A PD contract hides Quick Charge: restart into a silent boot,
+            // back on this tab.
             page @ Page::Tabs(tab @ (Tab::Qc2 | Tab::Qc3)) => {
-                input.settings.next_boot = NextBoot::QuickCharge {
-                    steps: tab == Tab::Qc3,
-                };
+                input
+                    .settings
+                    .set_next_boot(NextBoot::QuickCharge, Some(tab.into()));
                 (page, Some(PdCommand::Restart))
             }
             Page::Tabs(Tab::Detail { page, top }) => (Page::Open(Open::Detail { page, top }), None),

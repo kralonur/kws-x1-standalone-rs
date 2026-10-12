@@ -771,9 +771,9 @@ silent (Rd held, nothing acknowledged), so the charger falls back to non-PD
 5 V and takes Quick Charge. The charger may restart one or two more times
 before it settles. The meter comes back on the Quick Charge screen it left
 and tests the charger at once. OK on the PD Profiles or PPS screen
-(`QC MODE`) switches back the same way, into PD. The meter stops saving the
-switch once the charger had 10 s to settle, so the next plug-in starts with
-PD again.
+(`QC MODE`) switches back the same way, into PD, and the meter comes back on
+that screen. The meter stops saving the switch once the charger had 10 s to
+settle, so the next plug-in starts with PD again.
 
 **The test** (`TESTING THE CHARGER`) runs the first time Quick Charge starts
 in a boot, without a PD contract on OK, or straight after the switch out of

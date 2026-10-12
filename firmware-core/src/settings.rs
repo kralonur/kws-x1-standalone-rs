@@ -25,7 +25,8 @@ impl Rotation {
     const ALL: [Self; 3] = [Self::Auto, Self::Normal, Self::Flipped];
 }
 
-/// What the next boot starts as. Set just before the meter restarts the
+/// What session the next boot runs. Set, with the screen it opens on
+/// ([`Settings::set_next_boot`]), just before the meter restarts the
 /// charger (and with it itself) into that mode.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum NextBoot {
@@ -35,9 +36,8 @@ pub enum NextBoot {
     CableTest,
     /// PD silent: the sink holds Rd but never acknowledges the charger, so a
     /// USB-C charger falls back to its non-PD mode, where it takes Quick
-    /// Charge requests. Kept until OK on a PD tab leaves it; `steps`
-    /// reopens the Quick Charge 3.0 tab rather than 2.0.
-    QuickCharge { steps: bool },
+    /// Charge requests. Kept until OK on a PD tab leaves it.
+    QuickCharge,
     /// The full charger scan's first part: PD silent, the Quick Charge probe
     /// runs. Kept until it ends (a charger may restart the meter meanwhile),
     /// then `then_cable_test` picks the PD part.
@@ -49,11 +49,12 @@ pub enum NextBoot {
 
 impl NextBoot {
     /// Record values, by position; new values go last, so older records
-    /// still decode.
+    /// still decode. The last held Quick Charge with its 3.0 tab, which
+    /// [`Screen`] now carries; it still reads as Quick Charge.
     const ALL: [Self; 7] = [
         Self::Normal,
         Self::CableTest,
-        Self::QuickCharge { steps: false },
+        Self::QuickCharge,
         Self::ScanQuickCharge {
             then_cable_test: false,
         },
@@ -61,20 +62,69 @@ impl NextBoot {
             then_cable_test: true,
         },
         Self::ScanPd,
-        Self::QuickCharge { steps: true },
+        Self::QuickCharge,
     ];
 
     /// PD stays silent in this boot's sink session.
     pub fn silent(self) -> bool {
-        matches!(
-            self,
-            Self::QuickCharge { .. } | Self::ScanQuickCharge { .. }
-        )
+        matches!(self, Self::QuickCharge | Self::ScanQuickCharge { .. })
     }
 
     /// The mode lasts one boot, which clears it before any task starts.
-    pub fn one_boot(self) -> bool {
+    fn one_boot(self) -> bool {
         matches!(self, Self::CableTest | Self::ScanPd)
+    }
+}
+
+/// A screen the next boot opens on, as the settings keep it: each of the
+/// navigation's tabs, the detail lists at their top.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Screen {
+    Overview,
+    Lines,
+    Fixed,
+    Pps,
+    Qc2,
+    Qc3,
+    PdDetails,
+    Charger,
+    Cable,
+    System,
+}
+
+impl Screen {
+    /// Record values, by position; new values go last, so older records
+    /// still decode.
+    const ALL: [Self; 10] = [
+        Self::Overview,
+        Self::Lines,
+        Self::Fixed,
+        Self::Pps,
+        Self::Qc2,
+        Self::Qc3,
+        Self::PdDetails,
+        Self::Charger,
+        Self::Cable,
+        Self::System,
+    ];
+
+    /// 0 for none, else the position in [`Self::ALL`] plus one.
+    fn encode(screen: Option<Self>) -> u32 {
+        screen.map_or(0, |screen| {
+            Self::ALL
+                .iter()
+                .position(|known| *known == screen)
+                .map_or(0, |index| index as u32 + 1)
+        })
+    }
+
+    /// Unpack [`Self::encode`]: the screen, `Some(None)` for none, or `None`
+    /// for an unused value.
+    fn decode(bits: u32) -> Option<Option<Self>> {
+        match bits {
+            0 => Some(None),
+            bits => Self::ALL.get(bits as usize - 1).copied().map(Some),
+        }
     }
 }
 
@@ -132,6 +182,14 @@ const NEXT_BOOT_SHIFT: u32 = 16;
 const NEXT_BOOT_MASK: u32 = 0b111;
 const FINDINGS_SHIFT: u32 = 19;
 const FINDINGS_MASK: u32 = 0b1_1111;
+/// Rotation's position in [`Rotation::ALL`] (two bits), and above it the
+/// resume screen (six bits). Earlier records kept rotation, at most 2, in
+/// the whole byte, so their resume bits read as none.
+const ROTATION_SHIFT: u32 = 8;
+const ROTATION_MASK: u32 = 0b11;
+const RESUME_SHIFT: u32 = 10;
+const RESUME_MASK: u32 = 0b11_1111;
+const _: () = assert!(Screen::ALL.len() <= RESUME_MASK as usize);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Settings {
@@ -142,6 +200,9 @@ pub struct Settings {
     /// The full scan's Quick Charge result, for its PD part to show; that
     /// boot clears it.
     pub qc_findings: Option<QcFindings>,
+    /// The screen the next boot opens on; it lasts as long as `next_boot`
+    /// (see [`Self::finish_boot`]).
+    pub resume: Option<Screen>,
 }
 
 impl Default for Settings {
@@ -151,6 +212,7 @@ impl Default for Settings {
             rotation: Rotation::Auto,
             next_boot: NextBoot::Normal,
             qc_findings: None,
+            resume: None,
         }
     }
 }
@@ -160,6 +222,23 @@ impl Default for Settings {
 const RECORD_TAG: u32 = 0x5e;
 
 impl Settings {
+    /// Restart into `boot`, opening on `resume`.
+    pub fn set_next_boot(&mut self, boot: NextBoot, resume: Option<Screen>) {
+        self.next_boot = boot;
+        self.resume = resume;
+    }
+
+    /// Clear what only this boot needed: a one-boot mode, and the resume
+    /// screen unless the mode outlasts the charger's restarts.
+    pub fn finish_boot(&mut self) {
+        if self.next_boot.one_boot() {
+            self.next_boot = NextBoot::Normal;
+        }
+        if self.next_boot == NextBoot::Normal {
+            self.resume = None;
+        }
+    }
+
     /// One level brighter (`brighter`) or dimmer, stopping at either end.
     pub fn step_brightness(&mut self, brighter: bool) {
         let top = BRIGHTNESS_PERCENT.len() as u8 - 1;
@@ -187,7 +266,8 @@ impl Settings {
     }
 
     /// Pack into one word: tag in bits 31..24, Quick Charge findings in
-    /// 23..19, the next boot in 18..16, rotation in 15..8, brightness in 7..0.
+    /// 23..19, the next boot in 18..16, the resume screen in 15..10, rotation
+    /// in 9..8, brightness in 7..0.
     /// Earlier records kept the cable test in bit 16 and Quick Charge mode in
     /// 17, which read as the same next boot here.
     pub fn encode(&self) -> u32 {
@@ -202,7 +282,8 @@ impl Settings {
         RECORD_TAG << 24
             | QcFindings::encode(self.qc_findings) << FINDINGS_SHIFT
             | next_boot << NEXT_BOOT_SHIFT
-            | rotation << 8
+            | Screen::encode(self.resume) << RESUME_SHIFT
+            | rotation << ROTATION_SHIFT
             | u32::from(self.brightness)
     }
 
@@ -212,14 +293,16 @@ impl Settings {
             return None;
         }
         let brightness = word as u8;
-        let rotation = *Rotation::ALL.get(usize::from((word >> 8) as u8))?;
+        let rotation = *Rotation::ALL.get((word >> ROTATION_SHIFT & ROTATION_MASK) as usize)?;
         let next_boot = *NextBoot::ALL.get((word >> NEXT_BOOT_SHIFT & NEXT_BOOT_MASK) as usize)?;
         let qc_findings = QcFindings::decode(word >> FINDINGS_SHIFT & FINDINGS_MASK)?;
+        let resume = Screen::decode(word >> RESUME_SHIFT & RESUME_MASK)?;
         (usize::from(brightness) < BRIGHTNESS_PERCENT.len()).then_some(Self {
             brightness,
             rotation,
             next_boot,
             qc_findings,
+            resume,
         })
     }
 }
