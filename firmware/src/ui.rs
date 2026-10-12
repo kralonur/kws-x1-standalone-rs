@@ -1597,6 +1597,11 @@ fn arrows<D: DrawTarget<Color = Rgb565>>(target: &mut D, area: Rectangle, color:
 /// Settings rows: first baseline and pitch.
 const SETTINGS_BASELINE: i32 = 44;
 const SETTINGS_PITCH: i32 = 27;
+/// Baseline of the firmware version line: below the last row's highlight
+/// (which ends 7 px under its baseline, 98) and above the hint at 131.
+const VERSION_BASELINE: i32 = 117;
+/// This firmware's version, from its Cargo package.
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// The settings page: the cursor row is highlighted, and the value being
 /// changed is framed.
@@ -1682,6 +1687,23 @@ pub fn draw_settings<D: DrawTarget<Color = Rgb565>>(
             }
         }
     }
+    // Shown only, never a cursor row: it is not one of `Item::ALL`.
+    text(
+        target,
+        &PLAIN,
+        "VERSION",
+        Point::new(LEFT + 14, VERSION_BASELINE),
+        HorizontalAlignment::Left,
+        MUTED,
+    );
+    text(
+        target,
+        &PLAIN,
+        VERSION,
+        Point::new(RIGHT - 4, VERSION_BASELINE),
+        HorizontalAlignment::Right,
+        MUTED,
+    );
     hint(
         target,
         header,

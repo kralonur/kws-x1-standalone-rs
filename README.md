@@ -223,7 +223,7 @@ point the way it flows (they follow the screen rotation).
 | **Charger** | the offer (`*` = needs a 5 A cable), the charger's identity, maker and peak ratings, power status and source info, the Quick Charge detection result | OK to scroll; hold OK: full scan (Quick Charge, PD, EPR, and the 5 A cable test with the plug in the charger) |
 | **Cable** | the cable's e-marker: identity, ratings, status and modes | OK to scroll; hold OK at fixed 5 V to read the e-marker |
 | **System** | I2C bus state and counters, frame and button timing, stack use, `LAST RESET:` cause | OK to scroll |
-| **Settings** | `BRIGHTNESS` (5 levels, 60% at first), `ROTATION` (`AUTO` follows the tilt sensor, `NORMAL`, `FLIPPED`), `RESET MAX` | Left/Right row, OK change it, Left/Right value, OK or Back done |
+| **Settings** | `BRIGHTNESS` (5 levels, 60% at first), `ROTATION` (`AUTO` follows the tilt sensor, `NORMAL`, `FLIPPED`), `RESET MAX`, `VERSION` (shown only) | Left/Right row, OK change it, Left/Right value, OK or Back done |
 
 The selector pages only show the offer until a sink session has one. A
 profile is requested only after the final OK; Left/Right alone just preview.
@@ -706,6 +706,7 @@ and the overview's peaks.
   turned for 0.3 s, so a jolt from a button press does not flip it),
   `NORMAL` or `FLIPPED`. Saved.
 - **`RESET MAX`**: OK clears the overview's `MAX` values.
+- **`VERSION`**: the firmware version, shown only; the cursor skips it.
 - **Hint row**: `< > choose  OK change  BACK exit`, then
   `< > dimmer/brighter    OK done` or `< > auto/normal/flipped  OK done`.
 
