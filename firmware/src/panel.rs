@@ -20,6 +20,9 @@ struct Spi {
     _mosi: AlternatePin,
     _sck: AlternatePin,
     _backlight_pin: AlternatePin,
+    /// [`row_hash`] of each row the panel holds, or `None` when the panel's
+    /// contents are unknown and the next flush sends every row.
+    shown: Option<[u32; HEIGHT]>,
 }
 static DISPLAY: embassy_sync::mutex::Mutex<
     embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
@@ -166,6 +169,7 @@ pub async unsafe fn init(mut backlight_pin: AlternatePin) -> bool {
             _mosi: mosi,
             _sck: sck,
             _backlight_pin: backlight_pin,
+            shown: None,
         };
         bus.reset.set_low();
         if !delay(10).await {
@@ -186,6 +190,27 @@ pub async unsafe fn init(mut backlight_pin: AlternatePin) -> bool {
 /// Bytes in one RGB565 panel row. The frame goes out a row per SPI write,
 /// since the SPI driver faults a single write that runs past its timeout.
 const ROW_BYTES: usize = panel::WIDTH as usize * 2;
+// `row_hash` reads whole 32-bit words; a partial word at a row's end would be skipped.
+const _: () = assert!(ROW_BYTES.is_multiple_of(4));
+/// Panel rows, as frame row indices.
+const HEIGHT: usize = panel::HEIGHT as usize;
+
+/// FNV-1a 32-bit offset basis and prime (FNV specification,
+/// draft-eastlake-fnv), applied a 32-bit word at a time instead of a byte:
+/// byte steps measured 13 ms per frame. Each step is a bijection (XOR, then
+/// multiplying by an odd prime), so a row with one changed word always hashes
+/// differently; other changes match the old hash only by a 1 in 2^32 chance,
+/// and then the row stays stale only until it changes again.
+const FNV_OFFSET: u32 = 0x811c_9dc5;
+const FNV_PRIME: u32 = 0x0100_0193;
+
+/// Word-wise FNV-1a hash of one row's wire bytes.
+fn row_hash(row: &[u8]) -> u32 {
+    let (words, _) = row.as_chunks::<4>();
+    words.iter().fold(FNV_OFFSET, |hash, &word| {
+        (hash ^ u32::from_le_bytes(word)).wrapping_mul(FNV_PRIME)
+    })
+}
 
 /// CASET/RASET parameters: first and last address, big-endian (ST 9.1.20, 9.1.21).
 const fn span(start: u16, length: u16) -> [u8; 4] {
@@ -194,8 +219,6 @@ const fn span(start: u16, length: u16) -> [u8; 4] {
     [start_high, start_low, end_high, end_low]
 }
 const COLUMNS: [u8; 4] = span(panel::X_OFFSET, panel::WIDTH);
-const ROWS: [u8; 4] = span(panel::Y_OFFSET, panel::HEIGHT);
-const ROWS_INVERTED: [u8; 4] = span(panel::Y_OFFSET_INVERTED, panel::HEIGHT);
 
 /// Landscape orientation of the displayed frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -221,36 +244,79 @@ impl Orientation {
         }
     }
 
-    fn rows(self) -> [u8; 4] {
+    /// Controller row address of the frame's first row.
+    fn first_row(self) -> u16 {
         match self {
-            Self::Normal => ROWS,
-            Self::Inverted => ROWS_INVERTED,
+            Self::Normal => panel::Y_OFFSET,
+            Self::Inverted => panel::Y_OFFSET_INVERTED,
         }
     }
 }
 
-/// # Safety
-/// `frame` must point to [`panel::PIXELS`] readable RGB565 wire-swapped
-/// halfwords that nothing modifies during the transfer.
-async unsafe fn stream(bus: &mut impl Bus, frame: *const u16, orientation: Orientation) -> bool {
+/// Write `rows` (whole wire-order rows) to the panel from controller row
+/// address `first_row`.
+async fn send_rows(bus: &mut impl Bus, first_row: u16, rows: &[u8]) -> bool {
+    let count = (rows.len() / ROW_BYTES) as u16;
     if !command(bus, panel::CMD_COLUMN_ADDRESS, &COLUMNS).await
-        || !command(bus, panel::CMD_ROW_ADDRESS, &orientation.rows()).await
+        || !command(bus, panel::CMD_ROW_ADDRESS, &span(first_row, count)).await
         || !command(bus, panel::CMD_MEMORY_WRITE, &[]).await
         || !bus.idle().await
     {
         return false;
     }
     bus.dc(true);
-    // SAFETY: the caller guarantees `frame` holds PIXELS halfwords that stay
-    // unmodified for this transfer. They are already in wire byte order, so
-    // their memory bytes go out unchanged.
-    let wire = unsafe { core::slice::from_raw_parts(frame.cast::<u8>(), panel::PIXELS * 2) };
-    for row in wire.chunks(ROW_BYTES) {
+    for row in rows.chunks(ROW_BYTES) {
         if !bus.bytes(row).await {
             return false;
         }
     }
-    bus.idle().await
+    true
+}
+
+/// Send the rows whose [`row_hash`] differs from `shown`, in runs of
+/// adjacent changed rows, and leave `shown` holding the frame's hashes.
+/// Every row goes out while `shown` is `None`, and a failed transfer leaves
+/// it `None`.
+///
+/// # Safety
+/// `frame` must point to [`panel::PIXELS`] readable RGB565 wire-swapped
+/// halfwords that nothing modifies during the transfer.
+async unsafe fn stream(
+    bus: &mut impl Bus,
+    frame: *const u16,
+    orientation: Orientation,
+    shown: &mut Option<[u32; HEIGHT]>,
+) -> bool {
+    // SAFETY: the caller guarantees `frame` holds PIXELS halfwords that stay
+    // unmodified for this transfer. They are already in wire byte order, so
+    // their memory bytes go out unchanged.
+    let wire = unsafe { core::slice::from_raw_parts(frame.cast::<u8>(), panel::PIXELS * 2) };
+    let previous = shown.take();
+    let mut hashes = [0; HEIGHT];
+    for (hash, row) in hashes.iter_mut().zip(wire.chunks(ROW_BYTES)) {
+        *hash = row_hash(row);
+    }
+    let changed = |row: usize| previous.is_none_or(|previous| previous[row] != hashes[row]);
+    let mut row = 0;
+    while row < HEIGHT {
+        if !changed(row) {
+            row += 1;
+            continue;
+        }
+        let start = row;
+        while row < HEIGHT && changed(row) {
+            row += 1;
+        }
+        let first_row = orientation.first_row() + start as u16;
+        if !send_rows(bus, first_row, &wire[start * ROW_BYTES..row * ROW_BYTES]).await {
+            return false;
+        }
+    }
+    if !bus.idle().await {
+        return false;
+    }
+    *shown = Some(hashes);
+    true
 }
 
 /// Change ST7789V memory access control (MADCTL) orientation.
@@ -259,6 +325,8 @@ pub async unsafe fn set_orientation(orientation: Orientation) -> bool {
     let Some(bus) = owner.as_mut() else {
         return false;
     };
+    // The new orientation shows the old contents flipped: send every row.
+    bus.shown = None;
     command(
         bus,
         panel::CMD_MEMORY_ACCESS_CONTROL,
@@ -275,5 +343,8 @@ pub async unsafe fn flush(frame: *const u16, orientation: Orientation) -> bool {
     let Some(bus) = owner.as_mut() else {
         return false;
     };
-    unsafe { stream(bus, frame, orientation).await }
+    let mut shown = bus.shown.take();
+    let sent = unsafe { stream(bus, frame, orientation, &mut shown).await };
+    bus.shown = shown;
+    sent
 }
