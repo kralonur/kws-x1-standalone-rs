@@ -661,12 +661,14 @@ pub fn startup_lines(observation: Observation) -> Option<[[u8; 24]; 8]> {
     };
     put(
         &mut rows[2],
-        match (listen.vconn, listen.traffic) {
-            (Some(1), _) => &b"BOTH RP: VCONN ON CC1"[..],
-            (Some(_), _) => b"BOTH RP: VCONN ON CC2",
-            (None, Some(1)) => b"BOTH RP: TRAFFIC ON CC1",
-            (None, Some(_)) => b"BOTH RP: TRAFFIC ON CC2",
-            (None, None) => b"BOTH RP: NO SINGLE LINE",
+        match (listen.vconn, listen.traffic, listen.by_level) {
+            (Some(1), _, _) => &b"BOTH RP: VCONN ON CC1"[..],
+            (Some(_), _, _) => b"BOTH RP: VCONN ON CC2",
+            (None, Some(1), true) => b"BOTH RP: LEVEL ON CC1",
+            (None, Some(_), true) => b"BOTH RP: LEVEL ON CC2",
+            (None, Some(1), false) => b"BOTH RP: TRAFFIC ON CC1",
+            (None, Some(_), false) => b"BOTH RP: TRAFFIC ON CC2",
+            (None, None, _) => b"BOTH RP: NO SINGLE LINE",
         },
     );
     if listen.vconn.is_some() {

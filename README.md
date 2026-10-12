@@ -511,9 +511,12 @@ own PD negotiation. It scrolls (OK) through three sections.
 
 - **`CC1:-- CC2:--`**: both CC pins' status at startup.
 - `ONE CC WITH RP`: a normal attach through a cable.
-- `BOTH RP: VCONN ON CC1/CC2`, `BOTH RP: TRAFFIC ON CC1/CC2` or
-  `BOTH RP: NO SINGLE LINE`: the meter's plug sits in the charger, and how
-  it picked the line to talk on.
+- `BOTH RP: VCONN ON CC1/CC2`, `BOTH RP: TRAFFIC ON CC1/CC2`,
+  `BOTH RP: LEVEL ON CC1/CC2` or `BOTH RP: NO SINGLE LINE`: the meter's plug
+  sits in the charger, and how it picked the line to talk on. `LEVEL`: the
+  charger's packets arrived on both pins, so either works and the meter took
+  the one with the higher Rp level (tested with a power bank, in both
+  orientations); `NO SINGLE LINE`: it could not pick one and did not start.
 - `CC1 SOP:--- CABLE:---` and `CC2 …`: messages heard on each pin for the
   charger and for a cable.
 

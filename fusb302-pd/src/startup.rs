@@ -98,8 +98,11 @@ pub struct Report {
 pub struct Listen {
     /// The CC (1 or 2) the source talks on: the one CC that received
     /// CRC-valid packets or, when neither or both did, the one CC that showed
-    /// BMC activity.
+    /// BMC activity or, when both received packets, the one with the higher
+    /// Rp level (`by_level`).
     pub traffic: Option<u8>,
+    /// `traffic` was chosen by Rp level: both CCs received packets.
+    pub by_level: bool,
     /// Per CC: CRC-valid packets addressed to the port partner (SOP) and to a
     /// cable plug (SOP' or SOP''), counted from the RX FIFO after its window.
     pub partner: [u8; 2],
@@ -118,6 +121,20 @@ pub struct Listen {
 fn vconn_line(cc: [u8; 2]) -> Option<u8> {
     let high = cc.map(|status| status & (status0::COMP | status0::ACTIVITY) == status0::COMP);
     only_one(high)
+}
+
+/// The CC with the higher Rp level (STATUS0 BC_LVL) when both received the
+/// source's packets. A source heard on both pins of its receptacle carries
+/// its signal on both (a power bank that did worked on either pin), so this
+/// only picks one; a source heard on one pin never gets here. Equal levels
+/// give no answer.
+fn stronger_line(cc: [u8; 2]) -> Option<u8> {
+    let [cc1, cc2] = cc.map(|status| status & status0::BC_LVL);
+    match cc1.cmp(&cc2) {
+        core::cmp::Ordering::Greater => Some(1),
+        core::cmp::Ordering::Less => Some(2),
+        core::cmp::Ordering::Equal => None,
+    }
 }
 
 /// Largest FIFO frame the listen counts: token, header, seven data objects
@@ -211,7 +228,14 @@ impl Diagnostic {
                     vconn: Some(vconn),
                     ..Listen::default()
                 },
-                None => listen(bus, delay).await?,
+                None => {
+                    let mut heard = listen(bus, delay).await?;
+                    if heard.traffic.is_none() && heard.partner.iter().all(|&count| count > 0) {
+                        heard.traffic = stronger_line([cc1, cc2]);
+                        heard.by_level = heard.traffic.is_some();
+                    }
+                    heard
+                }
             })
         } else {
             None
