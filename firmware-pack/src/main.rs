@@ -2,7 +2,7 @@ use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
 use firmware_image::{
     self as image, APP_BASE, APP_LIMIT, CONTAINER_PREFIX, ERASE_CEILING, EXTENDED_PAYLOAD_LEN,
-    SECTOR_BYTES,
+    SECTOR_BYTES, UPPER_BASE, UPPER_END, UPPER_ID_MAGIC, UPPER_ID_UNSET,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -33,6 +33,8 @@ enum Command {
         app: PathBuf,
         #[arg(long)]
         out: PathBuf,
+        #[command(flatten)]
+        layout: Layout,
     },
     /// Audit the exact hash-confirmed container against its built application.
     Audit {
@@ -42,7 +44,22 @@ enum Command {
         image: PathBuf,
         #[arg(long)]
         confirm_sha256: String,
+        #[command(flatten)]
+        layout: Layout,
     },
+}
+
+/// Which application this is: the main firmware with its upper region, or
+/// the upper installer.
+#[derive(clap::Args)]
+struct Layout {
+    /// This build's upper region (`objcopy --only-section=.upper`): its
+    /// length and hash are written into the application's upper record.
+    #[arg(long, conflicts_with = "installer")]
+    upper: Option<PathBuf>,
+    /// The upper installer: it keeps the default interrupt handlers.
+    #[arg(long)]
+    installer: bool,
 }
 
 #[derive(Serialize)]
@@ -77,7 +94,7 @@ fn digest(data: &[u8]) -> String {
         .collect()
 }
 
-fn check_application(app: &[u8]) -> Result<Application> {
+fn check_application(app: &[u8], installer: bool) -> Result<Application> {
     ensure!(
         (VECTOR_COUNT * size_of::<u32>()..=APP_LIMIT).contains(&app.len()),
         "Application is truncated or overlaps the container descriptor"
@@ -111,14 +128,16 @@ fn check_application(app: &[u8]) -> Result<Application> {
         .filter(|index| vectors[*index] != default)
         .map(|index| index - FIRST_IRQ)
         .collect();
-    ensure!(
-        custom_irq_lines.as_slice() == CUSTOM_IRQS,
-        "Unexpected custom IRQ lines: {custom_irq_lines:?}"
-    );
-    ensure!(
-        vectors[SYSTICK_EXCEPTION] != default,
-        "SysTick uses the default interrupt handler"
-    );
+    if !installer {
+        ensure!(
+            custom_irq_lines.as_slice() == CUSTOM_IRQS,
+            "Unexpected custom IRQ lines: {custom_irq_lines:?}"
+        );
+        ensure!(
+            vectors[SYSTICK_EXCEPTION] != default,
+            "SysTick uses the default interrupt handler"
+        );
+    }
     Ok(Application {
         initial_sp: vectors[0],
         reset_vector: vectors[1],
@@ -127,8 +146,56 @@ fn check_application(app: &[u8]) -> Result<Application> {
     })
 }
 
-fn prepare(app: &[u8]) -> Result<(Vec<u8>, Report)> {
-    let application = check_application(app)?;
+/// The application with its upper record filled from `upper`. A build that
+/// links the record needs its upper region, and only such a build takes one.
+fn with_upper(app: &[u8], upper: Option<&[u8]>) -> Result<Vec<u8>> {
+    let magic: Vec<u8> = UPPER_ID_MAGIC
+        .iter()
+        .flat_map(|word| word.to_le_bytes())
+        .collect();
+    let found: Vec<_> = app
+        .windows(magic.len())
+        .enumerate()
+        .filter(|(_, window)| *window == magic.as_slice())
+        .map(|(offset, _)| offset)
+        .collect();
+    let mut app = app.to_vec();
+    match (found.as_slice(), upper) {
+        ([], None) => {}
+        ([offset], Some(upper)) => {
+            let fields = offset + magic.len();
+            let unset: Vec<u8> = [UPPER_ID_UNSET; 2]
+                .iter()
+                .flat_map(|word| word.to_le_bytes())
+                .collect();
+            ensure!(
+                app.get(fields..fields + unset.len()) == Some(unset.as_slice()),
+                "Upper record is already filled or truncated"
+            );
+            ensure!(
+                upper.len() <= (UPPER_END - UPPER_BASE) as usize,
+                "Upper region exceeds its flash range"
+            );
+            let len = u32::try_from(upper.len())?;
+            app[fields..fields + 4].copy_from_slice(&len.to_le_bytes());
+            app[fields + 4..fields + 8].copy_from_slice(&image::upper_hash(upper).to_le_bytes());
+        }
+        ([_], None) => anyhow::bail!("This build runs code from the upper region; pass --upper"),
+        ([], Some(_)) => anyhow::bail!("This build has no upper record; --upper does not apply"),
+        _ => anyhow::bail!("Upper record magic appears more than once"),
+    }
+    Ok(app)
+}
+
+fn prepare(app: &[u8], layout: &Layout) -> Result<(Vec<u8>, Report)> {
+    let upper = layout
+        .upper
+        .as_ref()
+        .map(|path| fs::read(path).context("Reading upper region"))
+        .transpose()?;
+    let app = with_upper(app, upper.as_deref())?;
+    let app = app.as_slice();
+    let application = check_application(app, layout.installer)?;
     let sectors = image::erase_sectors_for(EXTENDED_PAYLOAD_LEN);
     let end = APP_BASE + sectors * SECTOR_BYTES;
     ensure!(
@@ -158,9 +225,9 @@ fn prepare(app: &[u8]) -> Result<(Vec<u8>, Report)> {
 
 fn run(args: Args) -> Result<()> {
     let report = match args.command {
-        Command::Pack { app, out } => {
+        Command::Pack { app, out, layout } => {
             let app = fs::read(app).context("Reading application")?;
-            let (container, mut report) = prepare(&app)?;
+            let (container, mut report) = prepare(&app, &layout)?;
             if let Some(parent) = out.parent() {
                 fs::create_dir_all(parent).context("Creating output directory")?;
             }
@@ -177,6 +244,7 @@ fn run(args: Args) -> Result<()> {
             app,
             image,
             confirm_sha256,
+            layout,
         } => {
             let candidate = fs::read(image).context("Reading image")?;
             let actual = digest(&candidate);
@@ -185,7 +253,7 @@ fn run(args: Args) -> Result<()> {
                 "Image SHA-256 is {actual}, not the confirmed {confirm_sha256}"
             );
             let app = fs::read(app).context("Reading application")?;
-            let (expected, mut report) = prepare(&app)?;
+            let (expected, mut report) = prepare(&app, &layout)?;
             image::verify_container(&candidate)
                 .map_err(|error| anyhow::anyhow!("Invalid container: {error:?}"))?;
             ensure!(

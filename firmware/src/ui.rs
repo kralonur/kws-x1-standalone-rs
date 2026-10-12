@@ -1316,6 +1316,17 @@ pub fn qc_charger_lines(findings: Option<QcFindings>, mode: QcMode, section: u32
 }
 
 /// Centred notice for a selector page with nothing to select.
+/// Startup found the upper code region missing or from another build: the
+/// PD stack cannot run, so only this screen is shown.
+pub fn draw_upper_missing<D: DrawTarget<Color = Rgb565>>(target: &mut D) {
+    notice(
+        target,
+        "PD CODE MISSING",
+        "flash the upper installer image",
+        YELLOW,
+    );
+}
+
 fn notice<D: DrawTarget<Color = Rgb565>>(target: &mut D, title: &str, detail: &str, color: Rgb565) {
     text(
         target,

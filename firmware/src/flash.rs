@@ -74,11 +74,18 @@ unsafe extern "C" fn program(address: u32, words: *const u32, count: u32, window
 }
 
 pub fn write(base: usize, address: usize, words: &[u32]) -> bool {
-    let inside = SECTORS.contains(&base)
+    SECTORS.contains(&base) && program_blank(base, address, words)
+}
+
+/// Program `words` at `address` inside the sector at `base` if every target
+/// word reads blank, then read them back. The caller fences `base` to the
+/// sectors it may use.
+pub fn program_blank(base: usize, address: usize, words: &[u32]) -> bool {
+    let inside = base.is_multiple_of(SECTOR)
         && address.is_multiple_of(4)
         && address >= base
         && address + 4 * words.len() <= base + SECTOR;
-    if !inside || (0..words.len()).any(|i| read(address + 4 * i) != !0) {
+    if !inside || (0..words.len()).any(|i| read(address + 4 * i) != BLANK) {
         return false;
     }
     let program: unsafe extern "C" fn(u32, *const u32, u32, u32) -> u32 =

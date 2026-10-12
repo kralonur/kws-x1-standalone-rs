@@ -533,6 +533,7 @@ dependencies = [
  "embedded-graphics",
  "embedded-hal-async",
  "firmware-core",
+ "firmware-image",
  "fusb302-pd",
  "hc32f460-pac",
  "panic-halt",

@@ -32,6 +32,7 @@ mod pd_sniff;
 mod render;
 mod settings_store;
 mod ui;
+mod upper;
 
 use core::ptr::addr_of_mut;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -793,11 +794,15 @@ fn backlight_compare(settings: firmware_core::settings::Settings) -> u16 {
     (u32::from(BACKLIGHT_PERIOD) * u32::from(settings.brightness_percent()) / 100) as u16
 }
 
+/// How long the missing-upper notice sleeps between wakes; it never changes.
+const UPPER_MISSING_IDLE_S: u64 = 3600;
+
 #[embassy_executor::task]
 async fn meter_task(
     mut backlight: embassy_hc32::pwm::TimerA4Pwm,
     // The full scan's Quick Charge result, carried into its PD part.
     mut qc_findings: Option<QcFindings>,
+    upper_installed: bool,
 ) {
     let fb = framebuffer();
     let mut input_updates = BUTTON_STATE.anon_receiver();
@@ -829,6 +834,20 @@ async fn meter_task(
     let mut last_pulse = None;
     let detail_sender = DETAIL_VIEW.sender();
     let mut frame_time = WindowPeak::new(&FRAME_MS);
+
+    // Without this build's upper region the pages would call the PD stack's
+    // missing code: show only the notice.
+    if !upper_installed {
+        let frame = unsafe { &mut *(fb as *mut Frame) };
+        render::clear(frame);
+        ui::draw_upper_missing(&mut Canvas(frame));
+        unsafe {
+            panel::flush(fb, current_rotation).await;
+        }
+        loop {
+            Timer::after_secs(UPPER_MISSING_IDLE_S).await;
+        }
+    }
 
     loop {
         let now = Instant::now();
@@ -1215,6 +1234,8 @@ async fn main(spawner: Spawner) {
     unsafe {
         cortex_m::interrupt::enable();
     }
+    // Checked before any task: the PD stack's code lives in the upper region.
+    let upper_installed = upper::installed();
 
     // Each task is spawned once, here, into its default one-slot pool, so a
     // token is always free (`SpawnError::Busy` needs a second instance).
@@ -1366,9 +1387,11 @@ async fn main(spawner: Spawner) {
             PD_EXECUTOR_LINE,
             PD_EXECUTOR_PRIORITY << (u8::BITS as u8 - hc32f460_pac::NVIC_PRIO_BITS),
         );
-        PD_EXECUTOR
-            .start(PD_EXECUTOR_LINE)
-            .spawn(pd_task::run(pd_input, pc13_input, boot, cable_test_skipped).expect(ONE_SPAWN));
+        if upper_installed {
+            PD_EXECUTOR.start(PD_EXECUTOR_LINE).spawn(
+                pd_task::run(pd_input, pc13_input, boot, cable_test_skipped).expect(ONE_SPAWN),
+            );
+        }
         backlight_pwm = backlight.0;
         if !panel::init(backlight.1).await {
             // Backlight is already on, so a lit blank screen means the panel
@@ -1379,9 +1402,13 @@ async fn main(spawner: Spawner) {
         }
     }
 
+    spawner.spawn(meter_task(backlight_pwm, qc_findings, upper_installed).expect(ONE_SPAWN));
+    // The other tasks reach PD state and pages; none runs without the upper region.
+    if !upper_installed {
+        return;
+    }
     spawner.spawn(pulse_task().expect(ONE_SPAWN));
     spawner.spawn(tilt_task(tilt_input).expect(ONE_SPAWN));
     spawner.spawn(line_task(line_adc, qc_trigger).expect(ONE_SPAWN));
     spawner.spawn(button_task(button_inputs, store, settings, requested, resume).expect(ONE_SPAWN));
-    spawner.spawn(meter_task(backlight_pwm, qc_findings).expect(ONE_SPAWN));
 }

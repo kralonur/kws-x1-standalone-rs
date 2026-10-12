@@ -6,6 +6,12 @@ MEMORY
    * Bootloader below 0x10000 and settings at [0x72000, 0x80000) are untouched.
    */
   FLASH : ORIGIN = 0x00010000, LENGTH = 0x333fc
+  /* Upper code region [0x44000, 0x6c000): the update path never writes past
+   * 0x44000, so the upper installer image programs it. The sector at 0x6e000
+   * holds data that must never be erased; 0x6c000 leaves one sector of margin.
+   * Matches firmware_image::UPPER_BASE/UPPER_END.
+   */
+  UPPER : ORIGIN = 0x00044000, LENGTH = 0x28000
   /* SRAMH (32 KiB) upper half + SRAM1 (64 KiB). The origin leaves the original
    * firmware's clock bookkeeping words at 0x1FFF82A4/0x1FFF8C54 outside this image's
    * .bss, and the length stops 256 bytes short of SRAM1's exclusive end so the
@@ -34,3 +40,21 @@ SECTIONS
  * now in SRAM2: keep the stack (and the unused heap start) in RAM. */
 _stack_end = __euninit;
 __sheap = __euninit;
+
+/* The PD stack's code and constants (crates usbpd, usbpd-traits,
+ * pd-protocol and fusb302-pd, selected by their v0 crate roots in the
+ * per-symbol section names) run from the upper region. Inserted before
+ * .text so these patterns claim the sections first. Nothing may call into
+ * it until startup has checked the installed region (`upper.rs`).
+ */
+SECTIONS
+{
+  .upper : ALIGN(4)
+  {
+    __supper = .;
+    *(.text.*_5usbpd* .text.*_12usbpd_traits* .text.*_11pd_protocol* .text.*_10fusb302_pd*);
+    *(.rodata.*_5usbpd* .rodata.*_12usbpd_traits* .rodata.*_11pd_protocol* .rodata.*_10fusb302_pd*);
+    . = ALIGN(4);
+    __eupper = .;
+  } > UPPER
+} INSERT BEFORE .text;

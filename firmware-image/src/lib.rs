@@ -40,6 +40,29 @@ pub const CHECKSUM_OFFSET: usize = 0x3340c;
 /// Byte holding the `0x80` marker, followed by zero alignment bytes.
 pub const MARKER_OFFSET: usize = 0x33410;
 pub const MARKER: u8 = 0x80;
+/// Upper code region: the firmware programs it itself (the update path
+/// writes only below [`ERASE_CEILING`]). It ends one blank sector below the
+/// sector at `0x6e000`, which holds data nothing may erase (read on the
+/// device by the `flash-probe` firmware; `[0x44000, 0x6e000)` read blank).
+/// Matches `UPPER` in `firmware/memory.x`.
+pub const UPPER_BASE: u32 = ERASE_CEILING;
+pub const UPPER_END: u32 = 0x6c000;
+/// Marks the main image's upper-region record (magic, length, hash) for
+/// `firmware-pack`, which fills in the length and hash; random, unique.
+pub const UPPER_ID_MAGIC: [u32; 2] = [0x5550_5052, 0x9e37_79b9];
+/// An unfilled record field.
+pub const UPPER_ID_UNSET: u32 = u32::MAX;
+
+/// FNV-1a 32-bit hash of the upper region's bytes (offset basis and prime
+/// from the FNV specification).
+pub fn upper_hash(bytes: &[u8]) -> u32 {
+    const OFFSET_BASIS: u32 = 0x811c_9dc5;
+    const PRIME: u32 = 0x0100_0193;
+    bytes.iter().fold(OFFSET_BASIS, |hash, byte| {
+        (hash ^ u32::from(*byte)).wrapping_mul(PRIME)
+    })
+}
+
 /// Opaque container prefix; the host flasher passes it to bootloader command 107 unchanged.
 pub const CONTAINER_PREFIX: [u8; 2] = [0x00, 0x0a];
 
