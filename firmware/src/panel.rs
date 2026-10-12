@@ -332,5 +332,27 @@ pub async unsafe fn flush(frame: *const u16, orientation: Orientation) -> bool {
     let mut shown = bus.shown.take();
     let sent = unsafe { stream(bus, frame, orientation, &mut shown).await };
     bus.shown = shown;
+    if !sent {
+        restart(bus, orientation).await;
+    }
     sent
+}
+
+/// Bring the panel back after a failed transfer, so the next flush draws
+/// again: clear the SPI fault, then reset and re-initialize the panel, which
+/// may hold a partial byte or command. Leaves `shown` unknown.
+async fn restart(bus: &mut Spi, orientation: Orientation) -> bool {
+    bus.shown = None;
+    if bus.driver.recover().await.is_err() {
+        return false;
+    }
+    hard_reset(bus).await;
+    sequence(bus, delay).await
+        && command(
+            bus,
+            panel::CMD_MEMORY_ACCESS_CONTROL,
+            &[orientation.madctl()],
+        )
+        .await
+        && bus.idle().await
 }
