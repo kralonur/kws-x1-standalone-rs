@@ -1,20 +1,28 @@
-//! Async ST7789V transport over the exclusive SPI3 HAL owner. No transfer DMA.
+//! Async ST7789V transport over the exclusive SPI3 HAL owner. Commands go
+//! out byte by byte, pixels through a DMA channel ([`DMA_UNIT`] channel
+//! [`DMA_CHANNEL`], the one the original firmware used for the panel).
 //! Panel commands, pin routing and wire order follow the owner-confirmed driver.
 //! Complete command/frame operations hold one mutex; D/C changes fence wire idle.
+use embassy_hc32::dma::{self, Unit};
 use embassy_hc32::gpio::{AlternateMode, AlternatePin, Level, OutputPin, Port};
 use firmware_core::panel;
 
-/// Polls of the DMA channel state before the stop is treated as failed. The
-/// channel stops after its current read/write (RM 14.3.11), so this is a
-/// generous chosen bound, not a measured or specified time.
-const DMA_STOP_POLLS: u32 = 200_000;
+/// The DMA unit and channel that send pixels. The channel's completion
+/// event and the unit's error event must be routed to handlers that call
+/// [`dma::on_interrupt`] with the unit.
+pub const DMA_UNIT: Unit = Unit::Dma2;
+pub const DMA_CHANNEL: usize = 0;
+
 trait Bus {
     async fn idle(&mut self) -> bool;
     fn dc(&mut self, data: bool);
     async fn bytes(&mut self, bytes: &[u8]) -> bool;
+    /// Send pixel data without the CPU copying each byte.
+    async fn pixels(&mut self, bytes: &[u8]) -> bool;
 }
 struct Spi {
     driver: embassy_hc32::spi::Spi3,
+    dma: dma::Channel,
     dc: OutputPin,
     reset: OutputPin,
     _mosi: AlternatePin,
@@ -41,6 +49,9 @@ impl Bus for Spi {
     }
     async fn bytes(&mut self, bytes: &[u8]) -> bool {
         self.driver.write(bytes).await.is_ok()
+    }
+    async fn pixels(&mut self, bytes: &[u8]) -> bool {
+        self.driver.write_dma(&mut self.dma, bytes).await.is_ok()
     }
 }
 
@@ -85,38 +96,6 @@ async fn delay(ms: u32) -> bool {
     true
 }
 
-/// PWC_FCG0 and its DMA2 bit: set while DMA2's function clock is stopped (RM 5.7.13).
-const PWC_FCG0: *const u32 = 0x4004_8000 as *const u32;
-const FCG0_DMA2_STOPPED: u32 = 1 << 15;
-/// DMA2 channel enable and channel state registers: base 0x4005_3400 plus
-/// 0x1c and 0x24 (RM 14.5).
-const DMA2_CHEN: *mut u32 = 0x4005_341c as *mut u32;
-const DMA2_CHSTAT: *const u32 = 0x4005_3424 as *const u32;
-/// CHEN[0] and CHSTAT CHACT[0]: channel 0 enabled and active (RM 14.5.8, 14.5.11).
-const CHEN0: u32 = 1 << 0;
-const CHACT0: u32 = 1 << 16;
-
-fn dma0_idle(enable: u32, status: u32) -> bool {
-    enable & CHEN0 == 0 && status & CHACT0 == 0
-}
-
-/// Stop only display DMA2 channel0 if its clock is already enabled. RM 14.3.11
-/// says disabling terminates after the current read/write; wait for CHACT0 too.
-unsafe fn stop_display_dma() -> bool {
-    unsafe {
-        if PWC_FCG0.read_volatile() & FCG0_DMA2_STOPPED != 0 {
-            return true;
-        }
-        DMA2_CHEN.write_volatile(DMA2_CHEN.read_volatile() & !CHEN0);
-        for _ in 0..DMA_STOP_POLLS {
-            if dma0_idle(DMA2_CHEN.read_volatile(), DMA2_CHSTAT.read_volatile()) {
-                return true;
-            }
-        }
-        false
-    }
-}
-
 /// PB5 and PB6 pin functions: Func40 SPI3_MOSI and Func43 SPI3_SCK in
 /// Func_Grp2 (HC32 Datasheet Tables 2-1 and 2-2).
 const SPI3_MOSI: u8 = 40;
@@ -125,27 +104,46 @@ const SPI3_SCK: u8 = 43;
 /// SPI_CR1: SPE | MSTR | TXMDS | SPIMDS, an enabled 3-wire master that only
 /// transmits (RM 27.12.2).
 const SPI_CR1: u32 = 1 << 6 | 1 << 3 | 1 << 1 | 1 << 0;
-/// SPI_CFG1: MIDI = 101b, 6 SCK + 2 PCLK between accesses; bit 4 is reserved
-/// and written as 1 (RM 27.12.3).
-const SPI_CFG1: u32 = 0b101 << 28 | 1 << 4;
-/// SPI_CFG2: MSSIE | MSSDLE | MIDIE use the CFG1 delays, DSIZE = 0100b (8-bit),
+/// SPI_CFG1: no access delay (MIDI) is set, as CFG2 leaves it off; bit 4 is
+/// reserved and written as 1 (RM 27.12.3).
+const SPI_CFG1: u32 = 1 << 4;
+/// SPI_CFG2: MSSIE | MSSDLE use the CFG1 delays, DSIZE = 0100b (8-bit),
 /// MSB first, SS0, MBR = 000b (PCLK1 / 2), CPOL = CPHA = 1 (RM 27.12.5).
-const SPI_CFG2: u32 = 1 << 15 | 1 << 14 | 1 << 13 | 0b0100 << 8 | 1 << 1 | 1 << 0;
+/// MIDIE is clear for the shortest gap between frames (1 SCK + 2 PCLK, at
+/// least 3 SCK + 2 PCLK per Errata 4.3.1); the original 6 SCK gap made
+/// the panel's full redraws slower, and the ST7789V needs no gap.
+const SPI_CFG2: u32 = 1 << 15 | 1 << 14 | 0b0100 << 8 | 1 << 1 | 1 << 0;
+
+/// Reset pulse and settle time, in ms. Retained from the original driver;
+/// the ST7789V needs a 10 µs pulse and 5 ms before the next command.
+const RESET_MS: u32 = 10;
+
+/// Pulse the panel's reset line and wait for it to settle.
+async fn hard_reset(bus: &mut Spi) {
+    bus.reset.set_low();
+    delay(RESET_MS).await;
+    bus.reset.set_high();
+    delay(RESET_MS).await;
+}
 
 /// # Safety
 /// Requires privileged initialized clock/PORT and running Embassy time driver.
 /// PB5/PB6/PB7/PA15, PH2 GPIO drive and SPI3 are configured. Backlight timer
 /// setup is separate. `backlight_pin` must be the owned PH2 TimerA4/function4
-/// pin; its mux is preserved. Inherited display DMA2 channel0 is stopped if clocked.
+/// pin; its mux is preserved. [`DMA_UNIT`] is given to the panel, which stops
+/// any channel an earlier image left running before SPI3 is touched.
 pub async unsafe fn init(mut backlight_pin: AlternatePin) -> bool {
     let mut owner = DISPLAY.lock().await;
     if owner.is_some() {
         return false;
     }
     unsafe {
-        if !stop_display_dma() {
+        let Some(channel) = dma::split(DMA_UNIT)
+            .ok()
+            .and_then(|channels| channels.into_iter().nth(DMA_CHANNEL))
+        else {
             return false;
-        }
+        };
         let mosi = AlternatePin::new(Port::B, 5, SPI3_MOSI, AlternateMode::Digital);
         let sck = AlternatePin::new(Port::B, 6, SPI3_SCK, AlternateMode::Digital);
         let dc = OutputPin::new_high_drive(Port::B, 7, Level::High);
@@ -164,6 +162,7 @@ pub async unsafe fn init(mut backlight_pin: AlternatePin) -> bool {
         };
         let mut bus = Spi {
             driver,
+            dma: channel,
             dc,
             reset,
             _mosi: mosi,
@@ -171,14 +170,7 @@ pub async unsafe fn init(mut backlight_pin: AlternatePin) -> bool {
             _backlight_pin: backlight_pin,
             shown: None,
         };
-        bus.reset.set_low();
-        if !delay(10).await {
-            return false;
-        }
-        bus.reset.set_high();
-        if !delay(10).await {
-            return false;
-        }
+        hard_reset(&mut bus).await;
         if !sequence(&mut bus, delay).await {
             return false;
         }
@@ -187,8 +179,7 @@ pub async unsafe fn init(mut backlight_pin: AlternatePin) -> bool {
     }
 }
 
-/// Bytes in one RGB565 panel row. The frame goes out a row per SPI write,
-/// since the SPI driver faults a single write that runs past its timeout.
+/// Bytes in one RGB565 panel row.
 const ROW_BYTES: usize = panel::WIDTH as usize * 2;
 // `row_hash` reads whole 32-bit words; a partial word at a row's end would be skipped.
 const _: () = assert!(ROW_BYTES.is_multiple_of(4));
@@ -265,12 +256,7 @@ async fn send_rows(bus: &mut impl Bus, first_row: u16, rows: &[u8]) -> bool {
         return false;
     }
     bus.dc(true);
-    for row in rows.chunks(ROW_BYTES) {
-        if !bus.bytes(row).await {
-            return false;
-        }
-    }
-    true
+    bus.pixels(rows).await
 }
 
 /// Send the rows whose [`row_hash`] differs from `shown`, in runs of

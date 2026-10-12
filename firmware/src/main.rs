@@ -310,6 +310,15 @@ const SWI_LINE: embassy_hc32::intc::Line = line(8);
 /// (RM Table 10-2).
 const ADC2_EOCA: u16 = 452;
 const ADC_LINE: embassy_hc32::intc::Line = line(116);
+/// The panel's DMA completion and error events (DMA2 TC0 = 36 and
+/// DMA2_ERR = 49, group 1, whose window is lines 38..=43; RM Table 10-2).
+const PANEL_DMA_EVENTS: [(u16, embassy_hc32::intc::Line); 2] = [
+    (
+        panel::DMA_UNIT.complete_event(panel::DMA_CHANNEL).0,
+        line(38),
+    ),
+    (panel::DMA_UNIT.error_event().0, line(39)),
+];
 /// NVIC priorities (lower is more urgent). Both stay below SysTick (0), so
 /// timing never starves; bus and tilt wakes rank ahead of the PD alert and self-test.
 const BUS_PRIORITY: u8 = 8;
@@ -385,6 +394,16 @@ fn INT113() {
 #[cortex_m_rt::interrupt]
 fn INT116() {
     embassy_hc32::adc::on_interrupt();
+}
+
+/// The panel DMA's completion and error events, on `PANEL_DMA_EVENTS`' lines.
+#[cortex_m_rt::interrupt]
+fn INT038() {
+    embassy_hc32::dma::on_interrupt(panel::DMA_UNIT);
+}
+#[cortex_m_rt::interrupt]
+fn INT039() {
+    embassy_hc32::dma::on_interrupt(panel::DMA_UNIT);
 }
 
 /// SPI3 TX-empty, physical idle and error sources (group 9, lines 86..88).
@@ -1291,6 +1310,13 @@ async fn main(spawner: Spawner) {
         // The line ADC waits for its scans on this wake.
         if embassy_hc32::intc::register(ADC2_EOCA, ADC_LINE, BUS_PRIORITY).is_err() {
             IRQ_REG_FAILURES.fetch_add(1, Ordering::Relaxed);
+        }
+
+        // The panel waits on these for its pixel transfers.
+        for (event, line) in PANEL_DMA_EVENTS {
+            if embassy_hc32::intc::register(event, line, BUS_PRIORITY).is_err() {
+                IRQ_REG_FAILURES.fetch_add(1, Ordering::Relaxed);
+            }
         }
 
         // Route a software interrupt to INT008.
