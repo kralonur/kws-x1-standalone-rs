@@ -1462,6 +1462,13 @@ pub fn draw_fixed<D: DrawTarget<Color = Rgb565>>(
             active.then_some(("ACTIVE", GREEN)),
         );
     }
+    scrollbar(
+        target,
+        profiles.len() as u32,
+        PROFILE_ROWS as u32,
+        first as u32,
+        if editing { GREEN } else { MUTED },
+    );
     hint(
         target,
         header,
@@ -1469,6 +1476,8 @@ pub fn draw_fixed<D: DrawTarget<Color = Rgb565>>(
             VIEW_ONLY
         } else if editing {
             "< > choose  OK request  BACK cancel"
+        } else if profiles.len() > PROFILE_ROWS {
+            "OK select/scroll    < > tabs"
         } else {
             "OK select a profile    < > tabs"
         },
@@ -1915,6 +1924,35 @@ const LIST_PITCH: i32 = 12;
 const LIST_BASELINE: i32 = 34;
 /// Scrollbar track along the right edge.
 const SCROLL_TRACK: Rectangle = Rectangle::new(Point::new(RIGHT + 1, 25), Size::new(3, 94));
+/// Shortest scrollbar thumb in pixels, so a long list still shows its position.
+const SCROLL_THUMB_MIN: u32 = 8;
+
+/// A scrollbar on `SCROLL_TRACK` for `visible` of `total` rows from row
+/// `first`; nothing when every row fits.
+fn scrollbar<D: DrawTarget<Color = Rgb565>>(
+    target: &mut D,
+    total: u32,
+    visible: u32,
+    first: u32,
+    color: Rgb565,
+) {
+    let end = total.saturating_sub(visible);
+    if end == 0 {
+        return;
+    }
+    fill(target, SCROLL_TRACK, RULE);
+    let track = SCROLL_TRACK.size.height;
+    let thumb = (track * visible / total).max(SCROLL_THUMB_MIN);
+    let offset = (track - thumb) * first.min(end) / end;
+    fill(
+        target,
+        Rectangle::new(
+            SCROLL_TRACK.top_left + Point::new(0, offset as i32),
+            Size::new(SCROLL_TRACK.size.width, thumb),
+        ),
+        color,
+    );
+}
 
 /// A detail page in `page`'s colour: the non-blank rows of `sections` from
 /// row `top`, with a scrollbar lit while `scrolling`.
@@ -1964,20 +2002,13 @@ pub fn draw_detail<D: DrawTarget<Color = Rgb565>>(
         }
     }
     view.end = rows.saturating_sub(LIST_ROWS);
-    if view.end > 0 {
-        fill(target, SCROLL_TRACK, RULE);
-        let track = SCROLL_TRACK.size.height;
-        let thumb = (track * u32::from(LIST_ROWS) / u32::from(rows)).max(8);
-        let offset = (track - thumb) * u32::from(top.min(view.end)) / u32::from(view.end);
-        fill(
-            target,
-            Rectangle::new(
-                SCROLL_TRACK.top_left + Point::new(0, offset as i32),
-                Size::new(SCROLL_TRACK.size.width, thumb),
-            ),
-            if scrolling { accent } else { MUTED },
-        );
-    }
+    scrollbar(
+        target,
+        u32::from(rows),
+        u32::from(LIST_ROWS),
+        u32::from(top),
+        if scrolling { accent } else { MUTED },
+    );
     hint(
         target,
         header,
