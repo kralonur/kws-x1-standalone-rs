@@ -5,6 +5,7 @@
 //! They are the Left, Right, OK and Back buttons, as identified on
 //! the device.
 
+use crate::power_history::{GraphTrace, GraphWindow};
 use crate::settings::{Item, NextBoot, QcFindings, Screen, Settings};
 use qc_protocol::detect::Report;
 use qc_protocol::qc2::Voltage;
@@ -142,7 +143,7 @@ impl Group {
 
     /// The group's tabs, in Left/Right order.
     const fn tabs(self) -> &'static [Tab] {
-        const MONITOR: [Tab; 3] = [Tab::Overview, Tab::Lines, Tab::Energy];
+        const MONITOR: [Tab; 4] = [Tab::Overview, Tab::Graph, Tab::Lines, Tab::Energy];
         const TRIGGER: [Tab; MAX_TABS] = [Tab::Fixed, Tab::Pps, Tab::Avs, Tab::Qc2, Tab::Qc3];
         const INFO: [Tab; 4] = [
             Tab::detail(Detail::Pd),
@@ -181,6 +182,8 @@ impl Group {
 pub enum Tab {
     #[default]
     Overview,
+    /// Recent power.
+    Graph,
     /// D+, D−, CC1 and CC2 line voltages.
     Lines,
     /// Accumulated charge and energy.
@@ -200,10 +203,12 @@ pub enum Tab {
 }
 
 impl From<Tab> for Screen {
-    /// The screen to come back to; a detail list comes back at its top.
+    /// The screen to come back to; a detail list comes back at its top. The
+    /// graph's history does not outlast a restart, so it comes back as the
+    /// overview.
     fn from(tab: Tab) -> Self {
         match tab {
-            Tab::Overview => Self::Overview,
+            Tab::Overview | Tab::Graph => Self::Overview,
             Tab::Lines => Self::Lines,
             Tab::Energy => Self::Energy,
             Tab::Fixed => Self::Fixed,
@@ -248,7 +253,7 @@ impl Tab {
 
     pub const fn group(self) -> Group {
         match self {
-            Self::Overview | Self::Lines | Self::Energy => Group::Monitor,
+            Self::Overview | Self::Graph | Self::Lines | Self::Energy => Group::Monitor,
             Self::Fixed | Self::Pps | Self::Avs | Self::Qc2 | Self::Qc3 => Group::Trigger,
             Self::Detail { .. } => Group::Info,
         }
@@ -270,6 +275,7 @@ impl Tab {
             || matches!(
                 self,
                 Self::Overview
+                    | Self::Graph
                     | Self::Lines
                     | Self::Energy
                     | Self::Detail {
@@ -307,6 +313,8 @@ pub enum Open {
     Qc3,
     /// Left/Right scroll the list, shown from row `top`.
     Detail { page: Detail, top: u16 },
+    /// Left/Right change what the graph plots, or its window.
+    Graph(GraphFocus),
 }
 
 impl Open {
@@ -320,6 +328,7 @@ impl Open {
             Self::Qc2(_) => Tab::Qc2,
             Self::Qc3 => Tab::Qc3,
             Self::Detail { page, top } => Tab::Detail { page, top },
+            Self::Graph(_) => Tab::Graph,
         }
     }
 }
@@ -337,6 +346,8 @@ pub enum Level {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum View {
     Overview,
+    /// What Left/Right change, once opened.
+    Graph(Option<GraphFocus>),
     Lines,
     Energy,
     Fixed {
@@ -374,6 +385,13 @@ impl View {
     pub const fn shows_lines(self) -> bool {
         matches!(self, Self::Overview | Self::Lines) || self.quick_charge()
     }
+}
+
+/// What Left/Right change on the open graph.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GraphFocus {
+    Trace,
+    Window,
 }
 
 /// What Left/Right change on the open PPS tab.
@@ -625,6 +643,7 @@ impl Page {
         match self {
             Self::Groups(tab) | Self::Tabs(tab) => match tab {
                 Tab::Overview => View::Overview,
+                Tab::Graph => View::Graph(None),
                 Tab::Lines => View::Lines,
                 Tab::Energy => View::Energy,
                 Tab::Fixed => View::Fixed { choosing: false },
@@ -650,6 +669,7 @@ impl Page {
                     top,
                     scrolling: true,
                 },
+                Open::Graph(focus) => View::Graph(Some(focus)),
             },
             Self::Settings(focus) => View::Settings(focus),
         }
@@ -682,6 +702,7 @@ impl Page {
                     | Open::Qc2(_)
                     | Open::Qc3
                     | Open::Detail { .. }
+                    | Open::Graph(_)
             ) | Self::Settings(
                 SettingsFocus::Brightness | SettingsFocus::Rotation | SettingsFocus::EnergyMemory
             )
@@ -732,6 +753,9 @@ pub struct Input {
     /// tabs show; `None` leaves D+/D− undriven. A PD contract (the charger
     /// then ignores Quick Charge), passthrough or a restart clears it.
     pub trigger: Option<QcTarget>,
+    /// What the graph plots and how far back it reaches; this boot only.
+    pub graph_trace: GraphTrace,
+    pub graph_window: GraphWindow,
 }
 
 impl Input {
@@ -1077,6 +1101,22 @@ impl Navigation {
             }
             // The probe runs until it ends or Back.
             Page::Open(Open::Probe(_)) => {}
+            Page::Open(Open::Graph(GraphFocus::Trace)) => {
+                let all = GraphTrace::ALL;
+                let index = all
+                    .iter()
+                    .position(|t| *t == input.graph_trace)
+                    .unwrap_or(0);
+                input.graph_trace = cycle(&all, index, forward);
+            }
+            Page::Open(Open::Graph(GraphFocus::Window)) => {
+                let all = GraphWindow::ALL;
+                let index = all
+                    .iter()
+                    .position(|w| *w == input.graph_window)
+                    .unwrap_or(0);
+                input.graph_window = cycle(&all, index, forward);
+            }
             Page::Open(Open::Pps(PpsFocus::Voltage)) => {
                 let step = if repeat { PPS_MV_REPEAT } else { PPS_MV_STEP };
                 return Some(PdCommand::PpsVoltage(sign * step));
@@ -1098,6 +1138,10 @@ impl Navigation {
         let (page, command) = match input.page {
             Page::Groups(tab) => (Page::Tabs(tab), None),
             page @ Page::Tabs(Tab::Overview | Tab::Lines | Tab::Energy) => (page, None),
+            Page::Tabs(Tab::Graph) => (Page::Open(Open::Graph(GraphFocus::Trace)), None),
+            Page::Open(Open::Graph(GraphFocus::Trace)) => {
+                (Page::Open(Open::Graph(GraphFocus::Window)), None)
+            }
             // Quick Charge holds the charger: restart into PD, back on this tab.
             page @ Page::Tabs(tab @ (Tab::Fixed | Tab::Pps | Tab::Avs)) if self.silent => {
                 input
@@ -1136,7 +1180,9 @@ impl Navigation {
                 (Page::Tabs(Tab::Qc2), None)
             }
             page @ Page::Open(Open::Probe(_)) => (page, None),
-            Page::Open(open @ (Open::Qc3 | Open::Detail { .. })) => (Page::Tabs(open.tab()), None),
+            Page::Open(open @ (Open::Qc3 | Open::Detail { .. } | Open::Graph(_))) => {
+                (Page::Tabs(open.tab()), None)
+            }
             Page::Settings(SettingsFocus::Row(item)) => (
                 Page::Settings(match item {
                     Item::Brightness => SettingsFocus::Brightness,

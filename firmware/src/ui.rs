@@ -6,12 +6,15 @@
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
 use embedded_graphics::primitives::{
-    Circle, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle, RoundedRectangle, StyledDrawable,
-    Triangle,
+    Circle, Line, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle, RoundedRectangle,
+    StyledDrawable, Triangle,
 };
-use firmware_core::buttons::{Detail, Level, PpsFocus, Qc2Choice, QcOffer, SettingsFocus, Tab};
+use firmware_core::buttons::{
+    Detail, GraphFocus, Level, PpsFocus, Qc2Choice, QcOffer, SettingsFocus, Tab,
+};
 use firmware_core::dcp::Dcp;
 use firmware_core::energy::Totals;
+use firmware_core::power_history::{GraphTrace, GraphWindow, History, Sample};
 use firmware_core::settings::{
     BRIGHTNESS_PERCENT, EnergyMemory, Item, QcFindings, Rotation, Settings,
 };
@@ -282,6 +285,7 @@ pub enum Header<'a> {
 fn tab_style(tab: Tab, passthrough: bool) -> (&'static str, Rgb565) {
     match tab {
         Tab::Overview => ("OVERVIEW", CYAN),
+        Tab::Graph => ("GRAPH", CYAN),
         Tab::Lines => ("LINES", YELLOW),
         Tab::Energy => ("ENERGY", GREEN),
         Tab::Fixed => ("PD PROFILES", GREEN),
@@ -765,6 +769,241 @@ pub fn draw_meter<D: DrawTarget<Color = Rgb565>>(
         Circle::with_center(Point::new(RIGHT - 1, HINT_BASELINE - 5), 6),
         meter.alive,
     );
+}
+
+/// Space between the trace and window labels, and the full-scale label's
+/// baseline below the plot's top line, in pixels.
+const GRAPH_LABEL_GAP: i32 = 6;
+const GRAPH_SCALE_LABEL_BELOW_TOP: i32 = 10;
+/// Power graph: the now and max rows' baselines above the plot, the right
+/// edges of their volts and amps columns, and the plot.
+const GRAPH_NOW_BASELINE: i32 = 34;
+const GRAPH_MAX_BASELINE: i32 = 46;
+const GRAPH_VOLTS_RIGHT: i32 = 100;
+const GRAPH_AMPS_RIGHT: i32 = 160;
+const PLOT: Rectangle = Rectangle::new(Point::new(LEFT - 4, 51), Size::new(230, 70));
+/// The graph's full scale is the peak plus this headroom, in percent,
+/// rounded up to one of these steps (times a power of ten), so the top line
+/// is a round number the trace stays below: e.g. 22 W becomes 25 W.
+const GRAPH_HEADROOM_PERCENT: u64 = 10;
+const GRAPH_SCALE_STEPS: [u64; 10] = [10, 12, 15, 20, 25, 30, 40, 50, 60, 80];
+
+/// Full scale for a `peak` in milli-units, in milli-units.
+fn graph_scale(peak: u32) -> u32 {
+    let wanted = (u64::from(peak) * (100 + GRAPH_HEADROOM_PERCENT)).div_ceil(100);
+    let mut decade = 1;
+    loop {
+        if let Some(step) = GRAPH_SCALE_STEPS
+            .iter()
+            .map(|step| step * decade)
+            .find(|step| *step >= wanted)
+        {
+            return u32::try_from(step).unwrap_or(u32::MAX);
+        }
+        decade *= 10;
+    }
+}
+
+/// A full scale in milli-units as its shortest exact decimal, e.g. 25000
+/// is "25", 1500 is "1.5" and 250 is "0.25".
+fn scale_label(milli: u32) -> Label {
+    if milli.is_multiple_of(1000) {
+        Label::new().fixed(milli / 1000, 0)
+    } else if milli.is_multiple_of(100) {
+        Label::new().fixed(milli / 100, 1)
+    } else {
+        Label::new().fixed(milli / 10, 2)
+    }
+}
+
+/// One summary row: `label`, then volts, amps and watts in the overview's
+/// colours, or dashes without a reading.
+fn graph_row<D: DrawTarget<Color = Rgb565>>(
+    target: &mut D,
+    label: &str,
+    color: Rgb565,
+    sample: Option<Sample>,
+    baseline: i32,
+) {
+    text(
+        target,
+        &PLAIN,
+        label,
+        Point::new(LEFT, baseline),
+        HorizontalAlignment::Left,
+        color,
+    );
+    let values = match sample {
+        Some(sample) => [
+            Label::new().hundredths(sample.mv.into()).push(b"V"),
+            Label::new().hundredths(sample.ma.into()).push(b"A"),
+            Label::new().watts(sample.mw).push(b"W"),
+        ],
+        None => [
+            Label::new().push(b"--.--V"),
+            Label::new().push(b"-.--A"),
+            Label::new().push(b"--.--W"),
+        ],
+    };
+    let columns = [
+        (GRAPH_VOLTS_RIGHT, YELLOW),
+        (GRAPH_AMPS_RIGHT, CYAN),
+        (RIGHT, GREEN),
+    ];
+    for (value, (right, color)) in values.iter().zip(columns) {
+        text(
+            target,
+            &PLAIN,
+            value.as_str(),
+            Point::new(right, baseline),
+            HorizontalAlignment::Right,
+            color,
+        );
+    }
+}
+
+/// The graph: `trace` over the last `window`, newest on the right, from zero
+/// to a round full scale above the window's highest second. `focus` is what Left/Right
+/// change, once opened.
+pub fn draw_graph<D: DrawTarget<Color = Rgb565>>(
+    target: &mut D,
+    header: &Header<'_>,
+    history: &History,
+    trace: GraphTrace,
+    window: GraphWindow,
+    focus: Option<GraphFocus>,
+) {
+    draw_header(target, header);
+    let max = history.max(window);
+    graph_row(target, "NOW", WHITE, history.latest(), GRAPH_NOW_BASELINE);
+    graph_row(target, "MAX", MAGENTA, max, GRAPH_MAX_BASELINE);
+
+    let top = PLOT.top_left.y;
+    let bottom = top + PLOT.size.height as i32 - 1;
+    // Full scale, half scale and zero.
+    for y in [top, (top + bottom) / 2, bottom] {
+        fill(
+            target,
+            Rectangle::new(
+                Point::new(PLOT.top_left.x, y),
+                Size::new(PLOT.size.width, 1),
+            ),
+            RULE,
+        );
+    }
+    // The overview's colours for each quantity.
+    let (color, tint) = match trace {
+        GraphTrace::Power => (GREEN, GREEN_TINT),
+        GraphTrace::Voltage => (YELLOW, YELLOW_TINT),
+        GraphTrace::Current => (CYAN, CYAN_TINT),
+    };
+    let scale = graph_scale(max.map_or(0, |max| trace.value(max)));
+    // Drawn first, so the trace stays on top where they meet.
+    text(
+        target,
+        &PLAIN,
+        scale_label(scale).push(trace.unit().as_bytes()).as_str(),
+        Point::new(PLOT.top_left.x + 2, top + GRAPH_SCALE_LABEL_BELOW_TOP),
+        HorizontalAlignment::Left,
+        MUTED,
+    );
+    // A column per second, or, when the window has more seconds than the
+    // plot has pixels, the highest of the seconds a pixel column covers, so
+    // a short peak stays visible and still reaches the top.
+    let seconds = window.seconds();
+    let columns = seconds.min(PLOT.size.width as usize);
+    let mut previous = None;
+    let mut column = (0, None);
+    for (second, sample) in history.recent(window).enumerate() {
+        let index = second * columns / seconds;
+        if index != column.0 {
+            plot_column(target, column, columns, scale, (color, tint), &mut previous);
+            column = (index, None);
+        }
+        column.1 = column.1.max(sample.map(|sample| trace.value(sample)));
+    }
+    plot_column(target, column, columns, scale, (color, tint), &mut previous);
+
+    // Bottom right: the trace in its colour, then the window; arrows round
+    // the one Left/Right change.
+    let framed = |content: &str, focused: bool| {
+        if focused {
+            Label::new()
+                .push(b"< ")
+                .push(content.as_bytes())
+                .push(b" >")
+        } else {
+            Label::new().push(content.as_bytes())
+        }
+    };
+    let span = framed(window.label(), focus == Some(GraphFocus::Window));
+    let span_width = PLAIN
+        .get_rendered_dimensions(span.as_str(), Point::zero(), VerticalPosition::Baseline)
+        .map_or(0, |dimensions| dimensions.advance.x);
+    text(
+        target,
+        &PLAIN,
+        span.as_str(),
+        Point::new(RIGHT, HINT_BASELINE),
+        HorizontalAlignment::Right,
+        if focus == Some(GraphFocus::Window) {
+            CYAN
+        } else {
+            MUTED
+        },
+    );
+    text(
+        target,
+        &PLAIN,
+        framed(trace.label(), focus == Some(GraphFocus::Trace)).as_str(),
+        Point::new(RIGHT - span_width - GRAPH_LABEL_GAP, HINT_BASELINE),
+        HorizontalAlignment::Right,
+        color,
+    );
+    hint(
+        target,
+        header,
+        match focus {
+            None => "OK choose    < > tabs",
+            Some(GraphFocus::Trace) => "< > trace  OK time",
+            Some(GraphFocus::Window) => "< > time  OK done",
+        },
+    );
+}
+
+/// Plot column `index` of `columns` at `value` (none: a gap) against
+/// `scale`, as a line in `color` over a `tint` fill, joined to the
+/// `previous` column's point.
+fn plot_column<D: DrawTarget<Color = Rgb565>>(
+    target: &mut D,
+    (index, value): (usize, Option<u32>),
+    columns: usize,
+    scale: u32,
+    (color, tint): (Rgb565, Rgb565),
+    previous: &mut Option<Point>,
+) {
+    let Some(value) = value else {
+        *previous = None;
+        return;
+    };
+    let width = PLOT.size.width as usize;
+    let left = PLOT.top_left.x + (width * index / columns) as i32;
+    let right = PLOT.top_left.x + (width * (index + 1) / columns) as i32;
+    let bottom = PLOT.top_left.y + PLOT.size.height as i32 - 1;
+    let rise = (u64::from(value) * u64::from(PLOT.size.height - 1) / u64::from(scale)) as i32;
+    let point = Point::new((left + right) / 2, bottom - rise);
+    fill(
+        target,
+        Rectangle::new(
+            Point::new(left, point.y),
+            Size::new((right - left) as u32, rise as u32 + 1),
+        ),
+        tint,
+    );
+    Line::new(previous.unwrap_or(point), point)
+        .draw_styled(&PrimitiveStyle::with_stroke(color, 1), target)
+        .ok();
+    *previous = Some(point);
 }
 
 /// Totals remain visible on their own monitor tab without displacing live

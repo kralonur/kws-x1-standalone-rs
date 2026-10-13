@@ -55,6 +55,7 @@ use embassy_time::{Instant, Timer};
 use embedded_graphics::pixelcolor::{Rgb565, RgbColor};
 use firmware_core::buttons as button_logic;
 use firmware_core::energy::{Totals, Tracker};
+use firmware_core::power_history::{self, History};
 use firmware_core::settings::{NextBoot, QcFindings, Rotation, Screen};
 use hc32f460_pac::interrupt;
 use panel::Orientation;
@@ -869,6 +870,8 @@ async fn meter_task(
     // request clears them.
     let mut peaks = ui::Peaks::default();
     let mut peaks_reset = input.peaks_reset;
+    // The overview's power graph samples every read, whatever the page.
+    let mut power_history = History::default();
     let mut brightness = input.settings.brightness;
     // Reads are paced by an absolute deadline, never by subtracting from an
     // `Instant` (embassy-time panics on underflow, e.g. `Instant::now() - 200ms`
@@ -985,7 +988,18 @@ async fn meter_task(
             let sample = reading(raw_v, raw_i);
             let read_ms = Instant::now().as_millis();
             energy.sample(read_ms, sample.map(|reading| (reading.mv, reading.ma)));
-            if reads_current && let Some(reading) = sample {
+            power_history.sample(
+                read_ms,
+                sample.map(|reading| power_history::Sample {
+                    mv: u16::try_from(reading.mv).unwrap_or(u16::MAX),
+                    ma: u16::try_from(reading.ma.unsigned_abs()).unwrap_or(u16::MAX),
+                    mw: reading.mw(),
+                }),
+            );
+            // The graph's readings count toward the overview's peaks.
+            if (reads_current || matches!(view, View::Graph(_)))
+                && let Some(reading) = sample
+            {
                 peaks.update(reading);
             }
         }
@@ -1078,6 +1092,17 @@ async fn meter_task(
                             flipped: current_rotation == Orientation::Inverted,
                             alive: pulse_now,
                         },
+                    );
+                }
+                View::Graph(focus) => {
+                    render::clear(frame);
+                    ui::draw_graph(
+                        &mut Canvas(frame),
+                        &header,
+                        &power_history,
+                        input.graph_trace,
+                        input.graph_window,
+                        focus,
                     );
                 }
                 View::Energy => {
