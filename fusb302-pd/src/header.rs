@@ -58,9 +58,13 @@ pub mod control {
 
 /// Data Message types (USB PD Table 6.5).
 pub mod data {
+    pub const SOURCE_CAPABILITIES: u16 = 0x01;
     pub const REQUEST: u16 = 0x02;
     pub const SINK_CAPABILITIES: u16 = 0x04;
     pub const ALERT: u16 = 0x06;
+    /// EPR_Request carries an RDO and PDO copy; EPR_Mode carries one mode DO.
+    pub const EPR_REQUEST: u16 = 0x09;
+    pub const EPR_MODE: u16 = 0x0a;
     pub const REVISION: u16 = 0x0c;
     pub const VENDOR_DEFINED: u16 = 0x0f;
 }

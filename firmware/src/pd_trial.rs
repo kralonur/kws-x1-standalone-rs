@@ -181,9 +181,12 @@ fn control(
             _ => selection.apply(command),
         }
     }
-    // These boots list everything at once: ask for the EPR offer as soon as
-    // the contract allows; a later long OK asks again.
-    if list_all && selection.epr_offer() == pd_spr::EprOffer::NotAsked {
+    // The cable test and full scan list everything at once, and an EPR capable
+    // charger's selectable EPR profiles need its offer: ask as soon as the
+    // contract allows; a later long OK asks again.
+    if (list_all || !cable_test && selection.epr_capable())
+        && selection.epr_offer() == pd_spr::EprOffer::NotAsked
+    {
         selection.request_epr_offer();
     }
     selection.resume_cable_query();
@@ -208,9 +211,17 @@ impl pd_spr_phy::Clock for Clock {
 impl pd_spr::Timer for Clock {
     async fn after_millis(ms: u64) {
         embassy_time::Timer::after_millis(ms).await;
-        // In this pinned upstream revision only SinkPPSPeriodic uses5000ms.
-        // Its Ready select must not drop an active native I2C receive future.
-        if ms == 5_000 {
+    }
+    async fn after_timer(timer: pd_spr::TimerType, ms: u64) {
+        use pd_spr::TimerType;
+        embassy_time::Timer::after_millis(ms).await;
+        // These Ready selects must not cancel an active native I2C receive
+        // future. A whole display frame cannot starve the interrupt executor,
+        // but a bus transaction must still finish before the timer takes control.
+        if matches!(
+            timer,
+            TimerType::SinkPPSPeriodic | TimerType::SinkEPRKeepAlive | TimerType::SinkEPREnter
+        ) {
             pd_spr_phy::wait_for_rx_idle(&mut embassy_time::Delay).await;
         }
     }
@@ -227,6 +238,7 @@ pub async fn run(observation: &mut pd::Observation, report: pd_cc::Report) {
     let mut error;
     {
         let plug_in_charger = observation.listen.is_some();
+        selection.set_plug_in_charger(plug_in_charger);
         let cable_test = observation.cable_test;
         let list_all = cable_test || observation.scan_pd;
         let control = |observation: &mut fusb302_pd::observation::Observation,

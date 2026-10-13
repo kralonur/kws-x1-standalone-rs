@@ -29,11 +29,11 @@ firmware-image = { path = "firmware-image" }
 fusb302-pd = { path = "fusb302-pd" }
 hc32f460-pac = { git = "https://github.com/kralonur/hc32f460-embassy-rs", rev = "56e1c3d24bbdb33b379626b6b49a902b3337ee12" }
 panic-halt = "1.0.0"
-pd-protocol = { git = "https://github.com/kralonur/embedded-charging-protocols-rs", rev = "8bb4a12936ed642da6c886587df36bf2e08c6632" }
-qc-protocol = { git = "https://github.com/kralonur/embedded-charging-protocols-rs", rev = "8bb4a12936ed642da6c886587df36bf2e08c6632" }
+pd-protocol = { git = "https://github.com/kralonur/embedded-charging-protocols-rs", rev = "adbe909808f62d831b95397368a28b161cdb63b0" }
+qc-protocol = { git = "https://github.com/kralonur/embedded-charging-protocols-rs", rev = "adbe909808f62d831b95397368a28b161cdb63b0" }
 u8g2-fonts = "0.8.0"
-usbpd = { git = "https://github.com/kralonur/usbpd", rev = "9c1325e1ecf6be5f5f53be656ae3658dd7131101" }
-usbpd-traits = { git = "https://github.com/kralonur/usbpd", rev = "9c1325e1ecf6be5f5f53be656ae3658dd7131101" }
+usbpd = { git = "https://github.com/kralonur/usbpd", rev = "99bf0229450fa807e225c9b2f6b85f655c2842f4" }
+usbpd-traits = { git = "https://github.com/kralonur/usbpd", rev = "99bf0229450fa807e225c9b2f6b85f655c2842f4" }
 
 # Size optimization keeps the application below the preserved graphics bank.
 # This is the source firmware's release profile, not a new hardware qualification.

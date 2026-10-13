@@ -259,8 +259,10 @@ fn capability_rows(observation: Observation) -> [[u8; 24]; 16] {
     let scanned = observation.cable_test || observation.scan_pd;
     let note: &[u8] = if plug_in_charger && observation.cable_test_skipped {
         b"5A TEST DID NOT START"
+    } else if let Some(notice) = super::epr_notice(spr.epr_state) {
+        notice.as_bytes()
     } else if !scanned {
-        b"HOLD OK: FULL SCAN"
+        b"HOLD OK: FULL RESCAN"
     } else if !epr_capable(live[0].raw) || spr.peer_revision != Some(3) {
         b""
     } else {
@@ -278,10 +280,20 @@ fn capability_rows(observation: Observation) -> [[u8; 24]; 16] {
         (_, true) => b"BACK ENDS 5A CABLE TEST",
         (true, false) if observation.cable_test_skipped => b"HOLD OK TO TRY AGAIN",
         _ if scanned => b"",
-        (true, false) => b"QC, EPR, 5A; RESTARTS",
-        (false, false) => b"QC AND EPR; RESTARTS",
+        (true, false) => b"QC, 5A TEST; RESTARTS",
+        (false, false) => b"QC SCAN; RESTARTS",
     };
-    put(&mut rows[next + usize::from(!note.is_empty())], follow);
+    let follow_row = next + usize::from(!note.is_empty());
+    put(&mut rows[follow_row], follow);
+    if spr.epr_state == firmware_core::pd_spr::EprState::Active {
+        let last = rows.len() - 1;
+        let row = &mut rows[last];
+        put(row, b"KEEP:---- GAP:----MS");
+        // Saturate counters to the four decimal columns reserved by the label.
+        const DISPLAY_MAX: u16 = 9999;
+        super::decimal4(row, 5, spr.epr_keep_alives.min(DISPLAY_MAX));
+        super::decimal4(row, 13, spr.epr_max_silence_ms.min(DISPLAY_MAX));
+    }
     rows
 }
 

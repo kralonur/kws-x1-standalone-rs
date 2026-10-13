@@ -1,4 +1,4 @@
-//! Checked native FUSB302 fixed/PPS SPR adapter. One bus owner, one Sink session.
+//! Checked native FUSB302 SPR/EPR adapter. One bus owner, one Sink session.
 //! Read-Clear registers are never written. No Rp/power-role swaps.
 //! Explicit PD3 fixed5V inspection uses caller-authorized VCONN routing and SOP' reads.
 //! SOP'' alone uses an authorized synchronization Soft_Reset, then Get_Status.
@@ -22,7 +22,10 @@ use crate::{config as pd_cc, observation as pd, service as pd_service};
 use embedded_hal_async::{delay::DelayNs, i2c::I2c};
 use pd_cc::ConfigRegister;
 use pd_protocol::pd_rx::Sop;
-use pd_protocol::pd_spr::{Limits, Supply};
+use pd_protocol::pd_spr::{
+    EPR_ENTER_FAILED, EPR_ENTER_SUCCEEDED, EPR_EXIT, EPR_KEEP_ALIVE_BODY, EPR_KEEP_ALIVE_HEADER,
+    EPR_MODE_HEADER, EPR_MODE_KIND, EPR_REQUEST_HEADER, Limits, SPR_OBJECTS, Supply,
+};
 use usbpd_traits::{Driver, DriverRxError, DriverTxError};
 
 mod tx;
@@ -61,6 +64,18 @@ pub trait Platform {
 /// still handled within about 5 ms, inside the 15 ms tReceiverResponse and
 /// the source's SenderResponseTimer (at least 27 ms, USB PD Table 7.9).
 pub const IDLE_POLL_MS: u32 = 4;
+/// Existing user stop gesture, in ms: hold Back for one second. A navigation
+/// tap must not start an EPR exit or stop servicing an SPR contract.
+const STOP_HOLD_MS: u64 = 1_000;
+
+fn stop_hold_elapsed(since: &mut Option<u64>, requested: bool, now: u64) -> bool {
+    if !requested {
+        *since = None;
+        return false;
+    }
+    now.saturating_sub(*since.get_or_insert(now)) >= STOP_HOLD_MS
+}
+
 // Pre-contract poll limit: 16 384 polls covered the 10-second window at 1 ms
 // per poll, with handshake margin; scaled to the idle poll pause.
 const POLL_BUDGET: u16 = 16_384 / IDLE_POLL_MS as u16;
@@ -91,6 +106,13 @@ const EMARKER_REPLY_BYTES: usize = 2 + 5 * 4;
 /// (Table 7.9): tSenderResponse 27 ms, tPSTransition (SPR) 450 ms.
 const SENDER_RESPONSE_MIN_MS: u64 = 27;
 const PS_TRANSITION_MIN_MS: u64 = 450;
+/// EPR tPSTransition minimum and tTypeCSinkWaitCap minimum (USB PD Table 6.71).
+const EPR_PS_TRANSITION_MIN_MS: u64 = 830;
+const EPR_WAIT_CAP_MIN_MS: u64 = 310;
+/// Earliest valid tEnterEPR expiry (USB PD Table 6.71), measured from Enter GoodCRC.
+const EPR_ENTER_MIN_MS: u64 = 450;
+/// Earliest tChunkSenderRequest expiry for a sent capability Chunk (Table 6.71).
+const CHUNK_SENDER_REQUEST_MIN_MS: u64 = 24;
 /// tHardResetComplete max (Table 7.9): without I_HARDSENT by then, the
 /// Hard Reset counts as sent (section 7.31.10.1).
 const HARD_RESET_COMPLETE_MS: u64 = 5;
@@ -99,6 +121,9 @@ const HARD_RESET_COMPLETE_MS: u64 = 5;
 /// tSrcTurnOn (1000 + 275 ms); each with margin.
 const VBUS_SAFE0_MV: u32 = 800;
 const VBUS_OFF_MS: u64 = 1_000;
+/// EPR tPSHardReset max 35 ms plus tPSSourceOff max 1400 ms, rounded up
+/// to allow the sensor/poll boundary (USB PD Table 6.71).
+const EPR_VBUS_OFF_MS: u64 = 1_500;
 const VBUS_ON_MS: u64 = 1_500;
 
 /// Bus access for the first Message of a Sink-initiated AMS (section 7.2): read
@@ -337,6 +362,9 @@ pub struct Session<'a, B: I2c, D, C, P: Platform> {
     // ends at this time, and the Chunk of EPR_Source_Capabilities due next.
     epr_until: Option<u64>,
     epr_chunk: Option<u8>,
+    epr_wire: pd_protocol::pd_spr::EprWire,
+    epr_ack_ms: Option<u64>,
+    epr_last_traffic_ms: Option<u64>,
     // `Platform::EMARKER` while the plug sits in the Source's receptacle, the
     // reply due to its SOP' Discover Identity, and our SOP' MessageID.
     emarker: Option<[u32; 4]>,
@@ -376,6 +404,9 @@ pub struct Session<'a, B: I2c, D, C, P: Platform> {
     cable_done_ms: Option<u64>,
     rp_probing: bool,
     stop_since_ms: Option<u64>,
+    // A completed stop hold during EPR: stop once the exit to SPR is done,
+    // even if Back was released while the exit ran.
+    stop_after_epr: bool,
 }
 impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> {
     /// Create a session and run its checked startup. The session is returned
@@ -433,6 +464,9 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             query_until: None,
             epr_until: None,
             epr_chunk: None,
+            epr_wire: pd_protocol::pd_spr::EprWire::new(),
+            epr_ack_ms: None,
+            epr_last_traffic_ms: None,
             emarker: None,
             emarker_due: None,
             emarker_id: 0,
@@ -461,6 +495,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             cable_done_ms: None,
             rp_probing: false,
             stop_since_ms: None,
+            stop_after_epr: false,
         }
     }
     pub fn stopped(&self) -> bool {
@@ -708,6 +743,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             }
             self.trace().partner = selection.partner_info();
             self.trace().epr_offer = selection.epr_offer();
+            self.trace().epr_state = selection.epr_state();
         }
         if self.config.trace_steps
             && self.observation.rp_probe.is_none()
@@ -889,9 +925,19 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         self.queue[0] = self.queue[1].take();
         packet
     }
-    /// Independent re-check of an outgoing Request against the parsed
-    /// advertisement: exact fixed/PPS/SPR AVS target and reviewed current, valid APDO
-    /// range/type, and no dangerous or reserved RDO/APDO flags.
+    /// Observe SOP traffic at RX/TX-ack boundaries, not electrical waveform timing.
+    fn epr_traffic(&mut self, now: u64) {
+        if self.epr_wire.active() {
+            if let Some(last) = self.epr_last_traffic_ms {
+                let gap = now.saturating_sub(last).min(u64::from(u16::MAX)) as u16;
+                self.trace().epr_max_silence_ms = self.trace().epr_max_silence_ms.max(gap);
+            }
+            self.epr_last_traffic_ms = Some(now);
+        } else {
+            self.epr_last_traffic_ms = None;
+        }
+    }
+    /// Independently review target, current, APDO range, RDO flags and EPR PDO copy.
     fn request_is_reviewed(&self, rdo: u32) -> bool {
         let Some(capabilities) = self.observation.capabilities else {
             return false;
@@ -904,6 +950,24 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                 ma: selection.target_ma(),
                 supply: selection.target_supply(),
             });
+        if self.epr_wire.active() {
+            let Some(target) = target else {
+                return false;
+            };
+            let mut bytes = [0; 10];
+            bytes[..2].copy_from_slice(&EPR_REQUEST_HEADER.to_le_bytes());
+            bytes[2..6].copy_from_slice(&rdo.to_le_bytes());
+            let position = (rdo >> 28) as usize;
+            if !(1..=pd_protocol::pd_spr::EPR_OBJECTS).contains(&position) {
+                return false;
+            }
+            bytes[6..].copy_from_slice(&self.epr_wire.objects()[position - 1].to_le_bytes());
+            return pd_protocol::pd_spr::review_epr_request::<P::Limits>(
+                self.epr_wire.objects(),
+                &bytes,
+                target,
+            );
+        }
         pd_protocol::pd_spr::review_rdo::<P::Limits>(&capabilities, rdo, target)
     }
     async fn send(&mut self, bytes: &[u8]) -> Result<(), Error<B::Error>> {
@@ -915,6 +979,16 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         let timers = (self.t_ack, self.t_accept);
         let result = self.send_sop_once(bytes, sop).await;
         if matches!(result, Err(Error::Deferred)) {
+            // Only an unsent EPR_Mode or EPR_KeepAlive advanced the EPR phase;
+            // the engine retries it from Ready (section 8.3.3.1).
+            if bytes.len() == 6
+                && matches!(
+                    u16::from_le_bytes([bytes[0], bytes[1]]) & header::WITHOUT_ID,
+                    EPR_MODE_HEADER | EPR_KEEP_ALIVE_HEADER
+                )
+            {
+                self.epr_wire.transmit_deferred();
+            }
             (self.t_ack, self.t_accept) = timers;
             let trace = self.trace();
             trace.accept_seen = before.accept_seen;
@@ -935,13 +1009,42 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         if self.hard_reset_armed || self.bist_test_data {
             return Err(Error::Request);
         }
-        let rdo = first_data_object(bytes).filter(|_| bytes.len() == 6);
-        let is_request = rdo.is_some_and(|rdo| self.request_is_reviewed(rdo));
+        let rdo = first_data_object(bytes).filter(|_| matches!(bytes.len(), 6 | 10));
+        let is_epr_power = self.epr_wire.ready()
+            && bytes.len() == 10
+            && self.config.selection.is_some_and(|s| {
+                pd_protocol::pd_spr::review_epr_request::<P::Limits>(
+                    self.epr_wire.objects(),
+                    bytes,
+                    pd_protocol::pd_spr::Target {
+                        mv: s.target_mv(),
+                        ma: s.target_ma(),
+                        supply: s.target_supply(),
+                    },
+                )
+            });
+        let is_request = is_epr_power
+            || !self.epr_wire.active()
+                && bytes.len() == 6
+                && rdo.is_some_and(|rdo| self.request_is_reviewed(rdo));
         // The TX FIFO image below holds at most one 30-byte message.
         if bytes.len() < 2 || bytes.len() > 30 {
             return Err(Error::Request);
         }
         let header = u16::from_le_bytes([bytes[0], bytes[1]]);
+        if bytes.len() == 2
+            && header & header::KIND_COUNT == header::control::SOFT_RESET
+            && ((self.epr_wire.entering()
+                && self
+                    .epr_ack_ms
+                    .is_some_and(|at| self.clock.now_ms().saturating_sub(at) >= EPR_ENTER_MIN_MS))
+                || (self.epr_wire.awaiting_sink_chunk()
+                    && self.epr_ack_ms.is_some_and(|at| {
+                        self.clock.now_ms().saturating_sub(at) >= CHUNK_SENDER_REQUEST_MIN_MS
+                    })))
+        {
+            self.protocol_error()?;
+        }
         // Sink_Capabilities once per received Get_Sink_Cap: Data, Sink/UFP, the
         // negotiated revision and exactly the objects for it (section 6.4.1.2).
         let is_sink_caps = sop == Sop::Partner
@@ -1164,6 +1267,14 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             && self.epr_chunk.is_some_and(|chunk| {
                 chunk > 0 && bytes[2..] == pd_protocol::pd_spr::epr_chunk_request(chunk)
             });
+        let enter = query_ready && self.config.selection.is_some_and(|s| s.epr_enter_armed());
+        let exit = query_ready
+            && self
+                .contract_object
+                .is_some_and(|object| usize::from(object) <= SPR_OBJECTS)
+            && self.config.selection.is_some_and(|s| s.epr_exit_armed());
+        let epr_signal =
+            sop == Sop::Partner && self.epr_wire.transmit::<P::Limits>(bytes, enter, exit);
         let sink_alert = query_ready
             && bytes.len() == 6
             && header & header::WITHOUT_ID
@@ -1180,7 +1291,12 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         // Message, Get_PPS_Status, an information request, and a Request from
         // Ready that answers no Source_Capabilities. Responses belong to the
         // Source's AMS and are never gated.
-        let ams_start = sink_alert
+        let ams_start = epr_signal
+            && matches!(
+                header & header::WITHOUT_ID,
+                EPR_MODE_HEADER | EPR_KEEP_ALIVE_HEADER
+            )
+            || sink_alert
             || cable_identity
             || pps_status_query
             || query.is_some()
@@ -1202,6 +1318,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             && query.is_none()
             && !epr_request
             && !epr_chunk_request
+            && !epr_signal
             && !emarker_reply
             && !soft_reset
         {
@@ -1209,6 +1326,9 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         }
         let expected_type = if cable_identity {
             header & header::WITHOUT_ID_REVISION
+        } else if is_epr_power {
+            // USB PD EPR_Request: two objects, type 9 (Table 6.5).
+            header::objects(2) | header::data::EPR_REQUEST
         } else if is_request {
             header::objects(1) | header::data::REQUEST
         } else if reset_accept {
@@ -1468,6 +1588,18 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                 if epr_chunk_request {
                     self.epr_until = Some(t_ack + CHUNK_ANSWER_MS);
                 }
+                if sop == Sop::Partner {
+                    self.epr_traffic(t_ack);
+                }
+                if epr_signal {
+                    self.epr_ack_ms = Some(t_ack);
+                    if header & header::WITHOUT_ID == EPR_KEEP_ALIVE_HEADER
+                        && bytes[2..] == EPR_KEEP_ALIVE_BODY
+                    {
+                        self.trace().epr_keep_alives =
+                            self.trace().epr_keep_alives.saturating_add(1);
+                    }
+                }
                 if is_request {
                     self.requested_object = rdo.map(|rdo| (rdo >> 28) as u8);
                     self.trace().request_ma = rdo.map_or(0, |rdo| {
@@ -1545,6 +1677,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         self.query_until = None;
         self.epr_until = None;
         self.epr_chunk = None;
+        self.epr_wire.soft_reset();
         self.status_reply = None;
         self.sink_alert_until = None;
         self.unsupported_reply = None;
@@ -1787,8 +1920,15 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                 self.status_reply = None;
                 self.bist_carrier_armed = false;
                 let now = self.clock.now_ms();
+                self.epr_traffic(now);
                 let revision_known = self.trace().peer_revision.is_some();
                 let same_revision = revision == self.tx_revision;
+                if <P::Limits as pd_protocol::pd_spr::Limits>::EPR
+                    && self.epr_wire.duplicate(&buffer[..length])
+                    && (!revision_known || same_revision)
+                {
+                    return Ok(length);
+                }
                 if header & header::KIND_COUNT == 13 {
                     // PE_SNK_Soft_Reset from any state (section 9.2.5.2.2):
                     // MessageID 0 (section 7.7), no pending TX, cable work or
@@ -1830,6 +1970,61 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                     }
                     self.reset = Some(ResetStep::WaitCapsAfterReset);
                     return Ok(length);
+                }
+                if <P::Limits as pd_protocol::pd_spr::Limits>::EPR
+                    && same_revision
+                    && self.request.is_none()
+                    && matches!(self.reset, None | Some(ResetStep::WaitCapsAfterReset))
+                {
+                    let active = self.epr_wire.active();
+                    let exit = header & header::KIND_COUNT == EPR_MODE_KIND
+                        && length == 6
+                        && buffer[5] == EPR_EXIT;
+                    if exit
+                        && active
+                        && self
+                            .contract_object
+                            .is_some_and(|object| usize::from(object) > SPR_OBJECTS)
+                    {
+                        self.arm_hard_reset();
+                        return Ok(length);
+                    }
+                    if self.epr_wire.receive(&buffer[..length]) {
+                        if header & header::KIND
+                            == pd_protocol::pd_spr::EPR_SOURCE_CAPABILITIES_KIND
+                        {
+                            if self.reset == Some(ResetStep::WaitCapsAfterReset) {
+                                self.reset = None;
+                            }
+                            if self.epr_wire.ready() {
+                                if !self.epr_wire.valid_spr_prefix() {
+                                    self.arm_hard_reset();
+                                } else {
+                                    self.caps_reply = true;
+                                    self.reset = None;
+                                }
+                            }
+                        } else if header & header::KIND_COUNT == EPR_MODE_KIND
+                            && buffer[5] == EPR_ENTER_FAILED
+                        {
+                            self.protocol_error()?;
+                        } else if header & header::KIND_COUNT == EPR_MODE_KIND
+                            && buffer[5] == EPR_ENTER_SUCCEEDED
+                        {
+                            self.epr_ack_ms = Some(now);
+                        } else if header & header::KIND == header::data::SOURCE_CAPABILITIES {
+                            self.caps_reply = true;
+                        }
+                        return Ok(length);
+                    }
+                    if self.epr_wire.busy() {
+                        self.protocol_error()?;
+                        return Ok(length);
+                    }
+                    if active && header & header::KIND == header::data::SOURCE_CAPABILITIES {
+                        self.arm_hard_reset();
+                        return Ok(length);
+                    }
                 }
                 if self.reset == Some(ResetStep::WaitCapsAfterCarrier) {
                     // PE_SNK_Wait_for_Capabilities after BIST Carrier Mode: only fresh
@@ -2075,19 +2270,21 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                 && self.trace().contract_seen
                 && !self.reset_in_progress()
                 && self.config.selection.is_none_or(|s| !s.request_in_flight())
+                && (stop_hold_elapsed(
+                    &mut self.stop_since_ms,
+                    self.config
+                        .stop_requested
+                        .is_some_and(|requested| requested()),
+                    self.clock.now_ms(),
+                ) || self.stop_after_epr)
             {
-                if self
-                    .config
-                    .stop_requested
-                    .is_some_and(|requested| requested())
-                {
-                    let now = self.clock.now_ms();
-                    let since = *self.stop_since_ms.get_or_insert(now);
-                    if now.saturating_sub(since) >= 1000 {
-                        return Err(Error::StopRequested);
+                if self.epr_wire.active() || self.epr_wire.busy() {
+                    self.stop_after_epr = true;
+                    if let Some(selection) = self.config.selection {
+                        selection.request_epr_exit();
                     }
                 } else {
-                    self.stop_since_ms = None;
+                    return Err(Error::StopRequested);
                 }
             }
             if let Some(selection) = self.config.selection {
@@ -2268,6 +2465,10 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         &mut self,
         contract: &pd_protocol::pd_spr::Contract,
     ) -> Result<Snapshot, Error<B::Error>> {
+        // EPR may never be parked without its keep-alive task.
+        if self.epr_wire.active() || self.epr_wire.busy() {
+            return Err(Error::Completion);
+        }
         if self.stopped() {
             return Err(Error::Stopped);
         }
@@ -2389,7 +2590,18 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             || self.reset == Some(ResetStep::AwaitAccept))
             && since(self.t_ack, SENDER_RESPONSE_MIN_MS))
             || (self.request == Some(RequestStage::TransitionSink)
-                && since(self.t_accept, PS_TRANSITION_MIN_MS));
+                && since(
+                    self.t_accept,
+                    if self.epr_wire.active() {
+                        EPR_PS_TRANSITION_MIN_MS
+                    } else {
+                        PS_TRANSITION_MIN_MS
+                    },
+                ))
+            || self.epr_wire.awaiting_keep_alive()
+                && since(self.epr_ack_ms, SENDER_RESPONSE_MIN_MS)
+            || (self.epr_wire.awaiting_capabilities() || self.epr_wire.awaiting_exit())
+                && since(self.epr_ack_ms, EPR_WAIT_CAP_MIN_MS);
         let startup_reset = matches!(
             self.reset,
             Some(ResetStep::AcceptPartner | ResetStep::WaitCapsAfterReset)
@@ -2551,6 +2763,13 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             return Err(Error::Stopped);
         }
         P::set_rx_idle(false);
+        let vbus_off_ms = if self.epr_wire.active() {
+            EPR_VBUS_OFF_MS
+        } else {
+            VBUS_OFF_MS
+        };
+        self.epr_wire = pd_protocol::pd_spr::EprWire::new();
+        self.trace().epr_state = pd_protocol::pd_spr::EprState::Spr;
         self.lifecycle = Lifecycle::Finished;
         self.unverified = true;
         self.register = Some(register::RESET);
@@ -2565,7 +2784,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         self.restore_baseline().await?;
         let began = self.clock.now_ms();
         while self.vbus_mv().await? >= VBUS_SAFE0_MV {
-            if self.clock.now_ms().saturating_sub(began) >= VBUS_OFF_MS {
+            if self.clock.now_ms().saturating_sub(began) >= vbus_off_ms {
                 return Err(Error::HardResetVbus);
             }
             self.delay.delay_ms(5).await;
@@ -2841,5 +3060,25 @@ impl<B: GatedBus, D: Waiter, C: Clock, P: Platform> Driver for Session<'_, B, D,
                 })
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{STOP_HOLD_MS, stop_hold_elapsed};
+
+    // A navigation tap must not reach the stop path, which exits EPR to 5 V.
+    #[test]
+    fn stop_requires_continuous_hold() {
+        let mut since = None;
+        assert!(!stop_hold_elapsed(&mut since, true, 0));
+        assert!(!stop_hold_elapsed(&mut since, true, STOP_HOLD_MS - 1));
+        assert!(!stop_hold_elapsed(&mut since, false, STOP_HOLD_MS));
+        assert_eq!(since, None);
+        assert!(!stop_hold_elapsed(&mut since, true, STOP_HOLD_MS));
+        assert!(!stop_hold_elapsed(&mut since, true, 2 * STOP_HOLD_MS - 1));
+        assert!(stop_hold_elapsed(&mut since, true, 2 * STOP_HOLD_MS));
+        assert!(!stop_hold_elapsed(&mut since, false, 2 * STOP_HOLD_MS));
+        assert_eq!(since, None);
     }
 }

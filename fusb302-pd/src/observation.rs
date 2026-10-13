@@ -82,6 +82,11 @@ pub struct SprObservation {
     pub partner: pd_protocol::pd_partner::PartnerInfo,
     /// The Source's EPR offer, when asked (`pd_spr::Limits::EPR_OFFER`).
     pub epr_offer: pd_protocol::pd_spr::EprOffer,
+    pub epr_state: pd_protocol::pd_spr::EprState,
+    pub epr_keep_alives: u16,
+    /// Largest observed SOP traffic gap during EPR, ms. Timestamped at the
+    /// native receive/TX-ack boundary, not an electrical waveform measurement.
+    pub epr_max_silence_ms: u16,
     /// Last transmission that saw neither GoodCRC nor I_RETRYFAIL (ERR 000D).
     pub tx_timeout: Option<TxTimeout>,
     /// The last transmission was acknowledged by its GoodCRC frame without the
@@ -125,6 +130,9 @@ impl SprObservation {
             sink_tx_cause: 0,
             partner: pd_protocol::pd_partner::PartnerInfo::PENDING,
             epr_offer: pd_protocol::pd_spr::EprOffer::NotAsked,
+            epr_state: pd_protocol::pd_spr::EprState::Spr,
+            epr_keep_alives: 0,
+            epr_max_silence_ms: 0,
             tx_timeout: None,
             tx_ack_goodcrc_only: false,
         }

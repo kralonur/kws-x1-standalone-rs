@@ -178,6 +178,8 @@ pub struct AvsRange {
     pub max_mv: u16,
     pub ma_15v: u16,
     pub ma_20v: u16,
+    /// EPR AVS power limit; SPR AVS instead uses the two current fields.
+    pub pdp_w: Option<u16>,
 }
 
 /// Most power objects one Source_Capabilities message can carry (USB PD
@@ -190,6 +192,7 @@ pub const MAX_OBJECTS: usize = 7;
 pub struct Offer {
     /// The sink session runs, so profiles can be requested.
     pub session: bool,
+    pub pd_notice: Option<&'static str>,
     /// This boot keeps PD silent for Quick Charge, so no offer is heard.
     pub quick_charge: bool,
     fixed: [Supply; MAX_OBJECTS],
@@ -1472,7 +1475,7 @@ pub fn draw_fixed<D: DrawTarget<Color = Rgb565>>(
     hint(
         target,
         header,
-        if !offer.session {
+        offer.pd_notice.unwrap_or(if !offer.session {
             VIEW_ONLY
         } else if editing {
             "< > choose  OK request  BACK cancel"
@@ -1480,7 +1483,7 @@ pub fn draw_fixed<D: DrawTarget<Color = Rgb565>>(
             "OK select/scroll    < > tabs"
         } else {
             "OK select a profile    < > tabs"
-        },
+        }),
     );
 }
 
@@ -1564,16 +1567,16 @@ pub fn draw_pps<D: DrawTarget<Color = Rgb565>>(
     hint(
         target,
         header,
-        match focus {
+        offer.pd_notice.unwrap_or(match focus {
             _ if !offer.session => VIEW_ONLY,
             Some(PpsFocus::Voltage) => "< > volts    OK next: current",
             Some(PpsFocus::Current) => "< > amps    OK request",
             None => "OK adjust PPS    < > tabs",
-        },
+        }),
     );
 }
 
-/// The SPR AVS selector: the advertised ranges, the voltage box (framed while
+/// The SPR/EPR AVS selector: the advertised ranges, the voltage box (framed while
 /// Left/Right change it), the current that voltage asks for, and the live
 /// reading. The meter asks for the most the range allows at the set voltage.
 pub fn draw_avs<D: DrawTarget<Color = Rgb565>>(
@@ -1601,7 +1604,15 @@ pub fn draw_avs<D: DrawTarget<Color = Rgb565>>(
             .push(b"V  ")
             .hundredths(u32::from(range.ma_15v))
             .push(b"A");
-        let line = if range.ma_20v == 0 {
+        let line = if let Some(pdp) = range.pdp_w {
+            Label::new()
+                .hundredths(u32::from(range.min_mv))
+                .push(b"-")
+                .hundredths(u32::from(range.max_mv))
+                .push(b"V EPR ")
+                .fixed(u32::from(pdp), 0)
+                .push(b"W")
+        } else if range.ma_20v == 0 {
             line
         } else {
             line.push(b" / ")
@@ -1633,13 +1644,13 @@ pub fn draw_avs<D: DrawTarget<Color = Rgb565>>(
     hint(
         target,
         header,
-        if !offer.session {
+        offer.pd_notice.unwrap_or(if !offer.session {
             VIEW_ONLY
         } else if adjusting {
             "< > volts    OK request"
         } else {
             "OK adjust AVS    < > tabs"
-        },
+        }),
     );
 }
 

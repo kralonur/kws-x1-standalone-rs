@@ -6,8 +6,8 @@ use pd_protocol::pd_spr as shared;
 use usbpd::protocol_layer::message::data::{request, source_capabilities};
 
 pub use shared::{
-    Contract, EPR_OBJECTS, EprOffer, Error, MaintainedTrace, Mode, PPS_MIN_MA, PpsStatus,
-    ReviewedRdo, Supply, Timer,
+    Contract, EPR_OBJECTS, EprOffer, EprState, Error, MaintainedTrace, Mode, PPS_MIN_MA, PpsStatus,
+    ReviewedRdo, SPR_OBJECTS, Supply, Timer, TimerType,
 };
 // Preserve the existing board scheduling: delays are policy, not wire timers.
 pub const PPS_STATUS_SETTLE_MS: u64 = 300;
@@ -22,7 +22,10 @@ pub const SESSION_POLICY: shared::SessionPolicy = shared::SessionPolicy {
     pps_status_max_deferrals: 3,
     query_max_deferrals: 3,
 };
+/// Maximum requested voltage in mV, from the rated input range.
 pub const MAX_REQUEST_MV: u32 = 30_000;
+/// Maximum EPR power in W: requested voltage ceiling times the PD 5 A cable ceiling.
+pub const MAX_EPR_PDP_W: u16 = (MAX_REQUEST_MV / 1_000 * shared::FIXED_SINK_MAX_MA / 1_000) as u16;
 pub const MAX_PPS_MV: u32 = 21_000;
 pub const TARGET_MV: u32 = 9_000;
 pub const REQUEST_MA: u32 = 100;
@@ -30,6 +33,9 @@ pub const REQUEST_MA: u32 = 100;
 /// object's Maximum Current; PD objects never exceed 5 A, so 12 A never binds.
 pub const MAX_CURRENT_MA: u32 = 12_000;
 pub const PPS_REFRESH_MS: u64 = 4_000;
+/// Highest SPR fixed voltage in mV (USB PD Table 6.9); above it a fixed
+/// profile needs EPR Mode.
+const SPR_FIXED_MAX_MV: u16 = 20_000;
 /// The only contract a cable query starts from: fixed 5 V, at the meter's
 /// own request current (`shared::Selection::request_cable`'s gate).
 const CABLE_QUERY_MV: u16 = 5_000;
@@ -74,7 +80,12 @@ pub enum Advertised {
         ma_15v: u16,
         ma_20v: u16,
     },
-    /// Battery, variable, EPR or unknown objects.
+    EprAvs {
+        min_mv: u16,
+        max_mv: u16,
+        pdp_w: u16,
+    },
+    /// Battery, variable or unknown objects.
     Other,
 }
 
@@ -101,6 +112,11 @@ pub fn advertised(raw: u32) -> Advertised {
             ma_15v: pdo.raw_max_current_15v() * AVS_CURRENT_UNIT_MA,
             ma_20v: pdo.raw_max_current_20v() * AVS_CURRENT_UNIT_MA,
         },
+        PowerDataObject::Augmented(Augmented::Epr(pdo)) => Advertised::EprAvs {
+            min_mv: u16::from(pdo.raw_min_voltage()) * PPS_VOLTAGE_UNIT_MV,
+            max_mv: pdo.raw_max_voltage() * PPS_VOLTAGE_UNIT_MV,
+            pdp_w: u16::from(pdo.raw_pd_power()),
+        },
         _ => Advertised::Other,
     }
 }
@@ -124,11 +140,13 @@ impl shared::Limits for BoardLimits {
     const UNCONSTRAINED_POWER: bool = false;
     // Powered from VBUS only: no battery, no own supply (Table 6.61 bit 1).
     const SINK_POWER_MODES: u8 = 0b0000_0010;
-    const FIXED_TARGETS: &'static [u16] = &[5_000, 9_000, 12_000, 15_000, 20_000];
+    const FIXED_TARGETS: &'static [u16] = &[5_000, 9_000, 12_000, 15_000, 20_000, 28_000];
     const PPS_REFRESH_MS: u64 = PPS_REFRESH_MS;
     // Long OK on the charger page asks an EPR capable charger for its EPR
     // offer, as the source firmware's capability test did.
     const EPR_OFFER: bool = true;
+    // Real EPR cable only; the diagnostic marker remains non-EPR/20 V.
+    const EPR: bool = true;
     // SPR AVS stays within the SPR 20 V the fixed profiles already reach,
     // inside the board's 4-30 V rating.
     const SPR_AVS: bool = true;
@@ -168,6 +186,8 @@ pub struct Selection {
     cable_after_5v: Cell<bool>,
     /// When the 5 V contract a cable query waits for was first seen, in ms.
     five_volts_since: Cell<Option<u64>>,
+    /// See [`Self::set_plug_in_charger`].
+    plug_in_charger: Cell<bool>,
 }
 impl core::ops::Deref for Selection {
     type Target = shared::Selection<BoardLimits>;
@@ -182,7 +202,14 @@ impl Selection {
             mode_cursor: Cell::new(None),
             cable_after_5v: Cell::new(false),
             five_volts_since: Cell::new(None),
+            plug_in_charger: Cell::new(false),
         }
+    }
+    /// The meter's own plug sits in the charger: there is no cable, so no EPR
+    /// capable one, and the charger answers EPR entry with Enter Failed (USB PD
+    /// 3.2 section 6.4.10.1 step 4). EPR profiles are then never previewed.
+    pub fn set_plug_in_charger(&self, plugged: bool) {
+        self.plug_in_charger.set(plugged);
     }
     pub fn mode_cursor(&self) -> Option<u16> {
         self.mode_cursor.get()
@@ -252,7 +279,9 @@ impl Selection {
     }
 
     fn options(&self) -> impl Iterator<Item = shared::Target> + '_ {
-        (0..self.option_count()).filter_map(|index| self.option(index))
+        (0..self.option_count())
+            .filter_map(|index| self.option(index))
+            .filter(|option| !(self.plug_in_charger.get() && needs_epr(option)))
     }
 
     /// Preview the fixed profile `step` places from the previewed one (the
@@ -319,7 +348,7 @@ impl Selection {
         }
     }
 
-    /// Preview an SPR AVS voltage change, in any advertised range that
+    /// Preview an SPR or EPR AVS voltage change, in any advertised range that
     /// accepts it, at the current that voltage allows; a change no range
     /// accepts leaves the preview unchanged.
     fn adjust_avs(&self, delta_mv: i16) {
@@ -342,6 +371,14 @@ impl Selection {
                 return;
             }
         }
+    }
+}
+/// A fixed profile above SPR or an AVS range at an EPR object position.
+fn needs_epr(target: &shared::Target) -> bool {
+    match target.supply {
+        Supply::Fixed => target.mv > SPR_FIXED_MAX_MV,
+        Supply::Avs(object) => usize::from(object) > SPR_OBJECTS,
+        Supply::Pps(_) => false,
     }
 }
 impl Default for Selection {

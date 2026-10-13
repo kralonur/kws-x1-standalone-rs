@@ -286,7 +286,10 @@ pub fn offer(observation: &Observation) -> ui::Offer {
     let mut offer = ui::Offer::default();
     offer.quick_charge = observation.quick_charge;
     let mut add = |raw: u32| match firmware_core::pd_spr::advertised(raw) {
-        Advertised::Fixed { mv, ma } => offer.push_fixed(mv, ma),
+        Advertised::Fixed { mv, ma } if u32::from(mv) <= firmware_core::pd_spr::MAX_REQUEST_MV => {
+            offer.push_fixed(mv, ma)
+        }
+        Advertised::Fixed { .. } => {}
         Advertised::Pps {
             min_mv,
             max_mv,
@@ -306,7 +309,24 @@ pub fn offer(observation: &Observation) -> ui::Offer {
             max_mv,
             ma_15v,
             ma_20v,
+            pdp_w: None,
         }),
+        Advertised::EprAvs {
+            min_mv,
+            max_mv,
+            pdp_w,
+        } => {
+            let max_mv = max_mv.min(firmware_core::pd_spr::MAX_REQUEST_MV as u16);
+            if min_mv <= max_mv {
+                offer.push_avs(ui::AvsRange {
+                    min_mv,
+                    max_mv,
+                    ma_15v: 0,
+                    ma_20v: 0,
+                    pdp_w: Some(pdp_w.min(firmware_core::pd_spr::MAX_EPR_PDP_W)),
+                });
+            }
+        }
         Advertised::Other => {}
     };
     if let Some(caps) = observation.capabilities {
@@ -319,6 +339,19 @@ pub fn offer(observation: &Observation) -> ui::Offer {
         }
     }
     if let Some(spr) = observation.spr {
+        // With the plug in the charger there is no EPR cable, so EPR profiles
+        // cannot be entered (`Selection::set_plug_in_charger`); the partner
+        // page still lists them.
+        if let firmware_core::pd_spr::EprOffer::Received(objects) = spr.epr_offer
+            && observation.listen.is_none()
+        {
+            for &object in &objects[firmware_core::pd_spr::SPR_OBJECTS..] {
+                if object != 0 {
+                    add(object);
+                }
+            }
+        }
+        offer.pd_notice = epr_notice(spr.epr_state);
         offer.session = true;
         offer.preview = spr
             .selected_mv
@@ -413,7 +446,29 @@ fn type_c(rp: firmware_core::pd_sniff::Rp) -> Protocol {
     }
 }
 
+/// Enter Failed reason codes are defined by USB PD Table 6.49.
+pub fn epr_notice(state: firmware_core::pd_spr::EprState) -> Option<&'static str> {
+    use firmware_core::pd_spr::EprState;
+    match state {
+        EprState::Entering => Some("EPR: entering mode"),
+        EprState::Exiting => Some("EPR: returning to SPR"),
+        EprState::Failed(1) => Some("EPR: cable not capable"),
+        EprState::Failed(2) => Some("EPR: VCONN failed"),
+        EprState::Failed(3) => Some("EPR: RDO bit missing"),
+        EprState::Failed(4) => Some("EPR: source unavailable"),
+        EprState::Failed(5) => Some("EPR: source PDO bit"),
+        EprState::Failed(_) => Some("EPR: unknown failure"),
+        EprState::Timeout => Some("EPR: timeout / bad reply"),
+        EprState::Deferred => Some("EPR: line busy, retry OK"),
+        EprState::Spr | EprState::Active => None,
+    }
+}
+
 fn phase_line(row: &mut [u8; 24], observation: Observation) {
+    if let Some(notice) = observation.spr.and_then(|spr| epr_notice(spr.epr_state)) {
+        put(row, notice.as_bytes());
+        return;
+    }
     match observation.phase {
         Phase::Waiting => put(row, b"WAIT CC TEST"),
         Phase::Passive => put(row, b"PASSIVE TX OFF"),
