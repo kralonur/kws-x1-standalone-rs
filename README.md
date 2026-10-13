@@ -348,10 +348,18 @@ charger's fixed profiles, to request one.
   fixed profiles.
 - **`QC MODE` / `PD is off while Quick Charge runs`**: this boot keeps PD
   silent for [Quick Charge](#quick-charge), so there is no offer.
-- **Hint row**: `OK select a profile    < > tabs`, then while choosing
+- **Scrollbar**: on the right edge when there are more than five profiles
+  (an EPR charger's 28 V adds one); choosing scrolls the list.
+- **Hint row**: `OK select a profile    < > tabs` (`OK select/scroll    < >
+  tabs` with the scrollbar), then while choosing
   `< > choose  OK request  BACK cancel`. Before the charger's offer arrives it
   reads `waiting for the charger    < > tabs`; in `QC MODE`,
-  `OK switch back to PD`.
+  `OK switch back to PD`. While EPR is being entered or left, or after it
+  failed, the PD screens show its state here instead: `EPR: entering mode`,
+  `EPR: returning to SPR`, `EPR: cable not capable`, `EPR: VCONN failed`,
+  `EPR: RDO bit missing`, `EPR: source unavailable`, `EPR: source PDO bit`,
+  `EPR: unknown failure`, `EPR: timeout / bad reply` or
+  `EPR: line busy, retry OK`.
 
 #### 4. PPS
 
@@ -377,14 +385,16 @@ programmable ranges, to request a voltage and current limit.
 
 #### 5. AVS
 
-This is the **AVS** screen (tab `AVS` in Trigger): the charger's SPR
-adjustable voltage ranges (USB PD 3.2), to request a voltage from 9 V. Unlike
-PPS, the charger does not limit the current: the meter asks for the most the
-range allows at the set voltage, at most 100 W.
+This is the **AVS** screen (tab `AVS` in Trigger): the charger's
+adjustable voltage ranges (USB PD 3.2), to request a voltage. Unlike PPS, the
+charger does not limit the current: the meter asks for the most the range
+allows at the set voltage. SPR AVS runs from 9 V, at most 100 W; EPR AVS from
+15 V up to 30 V, at most 150 W and 5 A, and needs a real EPR cable.
 
-- **Range row**: each SPR AVS range, for example
-  `9.00-20.00V  3.00A / 2.25A`: the current up to 15 V, then above 15 V
-  (only on a range that reaches 20 V).
+- **Range row**: each AVS range, for example
+  `9.00-20.00V  3.00A / 2.25A`: the SPR current up to 15 V, then above 15 V
+  (only on a range that reaches 20 V); `15.00-30.00V EPR 140W`: an EPR range
+  capped at 30 V and its power, which the current at each voltage follows.
 - **`SET VOLTAGE`**: the voltage to request, in 100 mV steps (500 mV while
   held), framed with arrows while Left/Right change it.
 - **`CURRENT`**: the current the request asks for at that voltage.
@@ -588,7 +598,11 @@ scrolls (OK) through the parts; a long offer takes two screens.
   - `BACK ENDS 5A CABLE TEST`: the test is running. The heading then also
     names the reset cause (`POWER` is expected).
   - `5A TEST DID NOT START` / `HOLD OK TO TRY AGAIN`.
+  - The `EPR: …` states listed under the
+    [PD Profiles](#3-pd-profiles) hint row.
   - `NO PD SESSION`, `NO OFFER YET`.
+- **`KEEP:---- GAP:----MS`** (last row, in EPR mode): how many keep-alives
+  the meter sent, and the longest gap between two PD messages it saw, in ms.
 
 **`QUICK CHARGE 2.0`** and **`QUICK CHARGE 3.0`**
 
@@ -979,7 +993,8 @@ Passthrough (slider at passthrough, then power up):
 Sink (slider at sink, then power up from a PD charger through a cable):
 
 3. The overview shows voltage, current and the flow chevrons. Tilt the meter:
-   with rotation on auto, the screen follows. OK, Right: the lines page updates
+   with rotation on auto, the screen follows, and Left and Right swap with
+   it. OK, Right: the lines page updates
    D+, D-, CC1 and CC2, and the CC pin the overview names reads above 0 V.
    Compare the values with a multimeter where the lines are reachable.
 4. Settings (Back on the overview): change brightness and rotation, then
@@ -990,8 +1005,13 @@ Sink (slider at sink, then power up from a PD charger through a cable):
    overview. AVS page (SPR AVS charger): step the voltage, confirm, check the
    overview.
    Charger page with a PD power bank: the `BATTERY` section lists its charge.
-7. Charger page (Info group): it lists the offer. With an EPR charger, hold OK: the 28 V and
-   higher objects appear. With a 3 A cable, objects that need 5 A carry `*`.
+7. Charger page (Info group): it lists the offer. With an EPR charger the
+   28 V and higher objects appear by themselves. With a 3 A cable, objects
+   that need 5 A carry `*`. With a real EPR cable, request 28 V or an EPR AVS
+   voltage: the hint row shows `EPR: entering mode`, then the overview reads
+   the voltage and the charger page counts `KEEP:` up. Requesting an SPR
+   profile returns to SPR; so does holding Back, which then stops at 5 V. With the meter's plug straight in the
+   charger, the profile and AVS pages leave EPR out.
 8. Cable page with an e-marked cable, from 9 V or higher: hold OK drops to 5 V
    and it shows the marker's details.
 9. System page: `LAST RESET:` reads `POWER` after a plain plug-in, and the I2C
