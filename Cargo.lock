@@ -386,7 +386,7 @@ checksum = "dc2d050bdc5c21e0862a89256ed8029ae6c290a93aecefc73084b3002cdebb01"
 [[package]]
 name = "embassy-hc32"
 version = "0.1.0"
-source = "git+https://github.com/kralonur/hc32f460-embassy-rs?rev=bca14239e0adf13a9177d0468d7110b16951ecd5#bca14239e0adf13a9177d0468d7110b16951ecd5"
+source = "git+https://github.com/kralonur/hc32f460-embassy-rs?rev=56e1c3d24bbdb33b379626b6b49a902b3337ee12#56e1c3d24bbdb33b379626b6b49a902b3337ee12"
 dependencies = [
  "cortex-m",
  "critical-section",
@@ -397,6 +397,8 @@ dependencies = [
  "embassy-time-queue-utils",
  "embedded-hal 1.0.0",
  "embedded-hal-async",
+ "embedded-io",
+ "embedded-io-async",
  "hc32f460-pac",
  "thiserror",
 ]
@@ -688,10 +690,11 @@ dependencies = [
 [[package]]
 name = "hc32f460-pac"
 version = "0.1.0"
-source = "git+https://github.com/kralonur/hc32f460-embassy-rs?rev=bca14239e0adf13a9177d0468d7110b16951ecd5#bca14239e0adf13a9177d0468d7110b16951ecd5"
+source = "git+https://github.com/kralonur/hc32f460-embassy-rs?rev=56e1c3d24bbdb33b379626b6b49a902b3337ee12#56e1c3d24bbdb33b379626b6b49a902b3337ee12"
 dependencies = [
  "cortex-m",
  "cortex-m-rt",
+ "critical-section",
  "vcell",
 ]
 

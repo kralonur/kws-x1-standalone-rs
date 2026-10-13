@@ -59,16 +59,16 @@ impl LineAdc {
     /// Make the line pins analog inputs, route the internal reference to
     /// ADC2 and set up one averaged scan of the lines and the reference.
     ///
-    /// # Panics
-    /// Never: the four line pins are ADC12 inputs, the only check
-    /// `AdcPin::new` makes.
+    /// # Errors
+    /// Returns the HAL error if the inherited ADC conversion cannot be stopped
+    /// or the scan configuration is invalid.
     ///
     /// # Safety
     /// Call once during startup; route ADC2's end-of-scan event before the
     /// first [`Self::read`]. The caller gives up ADC2, these four pins, PWC
     /// FCG3's ADC2/CMP gates, PWCMR.ADBUFE and CMP RVADC to this owner; no
     /// other code may configure them.
-    pub async unsafe fn new(adc: hc32f460_pac::Adc2) -> Self {
+    pub async unsafe fn new(adc: hc32f460_pac::Adc2) -> Result<Self, embassy_hc32::adc::Error> {
         // SAFETY: forwarded from this function's contract.
         unsafe {
             let pin = |(port, pin), sample_time| Input {
@@ -88,9 +88,9 @@ impl LineAdc {
                 pin(DP_PIN, DATA_SAMPLE_TIME),
                 reference,
             ];
-            Self {
-                adc: Adc2::new(adc, inputs, Some(AVERAGE), SCAN_TIMEOUT),
-            }
+            Ok(Self {
+                adc: Adc2::new(adc, inputs, Some(AVERAGE), SCAN_TIMEOUT)?,
+            })
         }
     }
 

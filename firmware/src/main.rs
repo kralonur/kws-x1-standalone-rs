@@ -1289,7 +1289,13 @@ async fn main(spawner: Spawner) {
         // it reads high; observed low with the slider ON).
         pc13_input = InputPin::new_pull_up(Port::C, 13);
         // PA6, PA7, PB0 and PB1 become analog inputs owned by ADC2.
-        line_adc = line_adc::LineAdc::new(hc32f460_pac::Adc2::steal()).await;
+        let Ok(adc) = line_adc::LineAdc::new(hc32f460_pac::Adc2::steal()).await else {
+            // Do not start protocol tasks without a valid line-voltage reader.
+            loop {
+                core::hint::spin_loop();
+            }
+        };
+        line_adc = adc;
         // PB3, PB4, PB8 and PB9 (free after the JTAG release) drive D+/D−
         // only for the Quick Charge page.
         qc_trigger = qc_drive::Trigger::new();

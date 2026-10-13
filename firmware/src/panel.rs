@@ -51,7 +51,10 @@ impl Bus for Spi {
         self.driver.write(bytes).await.is_ok()
     }
     async fn pixels(&mut self, bytes: &[u8]) -> bool {
-        self.driver.write_dma(&mut self.dma, bytes).await.is_ok()
+        // SAFETY: private callers directly await this future without forgetting
+        // it; the frame stays alive and unmodified until DMA completes or Drop
+        // stops the channel before releasing the buffer borrow.
+        unsafe { self.driver.write_dma(&mut self.dma, bytes).await.is_ok() }
     }
 }
 
@@ -323,7 +326,8 @@ pub async unsafe fn set_orientation(orientation: Orientation) -> bool {
 }
 
 /// # Safety
-/// Same initialized hardware/frame requirements as init/stream.
+/// Same initialized hardware/frame requirements as init/stream. Await or drop
+/// the future; never forget it after polling, since DMA may still read the frame.
 pub async unsafe fn flush(frame: *const u16, orientation: Orientation) -> bool {
     let mut owner = DISPLAY.lock().await;
     let Some(bus) = owner.as_mut() else {
