@@ -214,18 +214,89 @@ upper region against the main firmware's record before anything calls into it,
 and shows a missing-code screen rather than running a mismatched region. This result does not qualify every build's runtime
 behavior. Image framing and matching hashes do not authorize flashing.
 
-Normal firmware saves its settings (brightness, rotation) and does not program
-the diagnostic log. Both use the same append-only writer: blank words only, in
-blank or already-claimed sectors from `0x72000` through `0x7c000`, never erase,
-and never the final `0x7e000` sector. Settings claim sectors with their own
-claim word, searching from `0x72000` up; the log searches from `0x7c000` down
-and never takes a sector the other claimed. A settings save appends one 8-byte
-record when a changed value stops being edited; a sector holds about 1000
-records, then the next blank sector is claimed. With no blank sector left the
-settings stay in RAM. The flash programming window is narrowed and restored,
-the programming routine runs from RAM with interrupts disabled, and error flags
-fail the write without retries. These sectors are outside the update erase
-range, so saved settings survive firmware updates.
+Normal firmware saves settings (brightness, rotation, energy-memory interval)
+and does not program the diagnostic log. Settings and logs use the same
+append-only writer: blank words only in blank or already-claimed sectors from
+`0x72000` through `0x7c000`, never erase settings or active diagnostic sectors,
+and never use the final `0x7e000` boot-swap sector. New allocations reserve
+`0x78000` and `0x7a000` for the energy journal. Legacy diagnostic sectors inside
+that pair are migrated at boot as described below; settings or unknown contents
+block initialization instead of being erased. Diagnostic writes exclude the
+pair even when a legacy log remains there; existing logs may be read before
+migration. Settings search from `0x72000` up, the log from `0x7c000` down, each
+with its own claim.
+A settings save appends one 8-byte record once a changed value stops being
+edited. Four sectors remain for new settings/log allocations; exhausted settings
+stay in RAM. Failed attempts are cached as failures, never subsequently reported
+as successful just because the attempted value is unchanged. The settings page
+shows storage-full versus write-failure status. Old settings decode with energy
+memory Off. Startup applies the saved brightness to PWM immediately, rather
+than initializing PWM to 60% while the renderer assumes the saved level is
+already applied.
+
+Energy memory defaults Off, with no totals writes or restoration on boot.
+Enabled intervals are 5, 10, 30 and 60 seconds. Charge/energy integrate fresh
+voltage and current-magnitude samples, independent of navigation. Failed samples
+or gaps over one second break integration; missing usage is not invented.
+The selected interval checkpoints changed totals; enabling or changing an enabled
+interval, and resetting totals, also checkpoint immediately. Disabling memory
+preserves the live counters but ignores old checkpoints on the next boot.
+
+Before I2C, panel DMA or protocol tasks start (and only after the upper code
+check succeeds), energy preparation automatically migrates recognized `KWLG`
+legacy logs inside the dedicated pair. It is not a blanket erase of unused
+flash. Without a committed journal header or migration intent, both sectors
+must be entirely blank or have that known legacy ownership tag; settings and
+unknown data stay untouched. The legacy log's header has three unused words at
+bytes 4..16. One word commits `ENMG` migration intent only after both sectors
+were checked; a torn word is skipped in favor of another blank header word,
+never reprogrammed. The survivor's tag/intent remain while its partner is erased
+and given a complemented energy header. That energy header then remains while
+the survivor is erased. A power cut during either erase or claim therefore
+retains proof of the pair's ownership, and the next boot resumes preparation.
+This one-time migration also runs with Energy memory Off. Blank or initialized
+pairs incur no recurring cleanup write or erase; unknown data is never cleared.
+
+Absent migration, the energy journal claims its pair only after verifying both
+sectors blank. The complemented version/ownership header in either sector
+establishes ownership of both, permitting recovery after a torn erase of its
+partner. Boot recovery never erases a sector with a valid energy header, so
+existing checkpoints are preserved.
+Each 44-byte record contains a sequence, two u64 counters, their word-wise
+complements and a final nonblank commit word. Boot scans both claimed sectors,
+skips incomplete records and chooses the newest valid sequence. A full sector
+rotates to its partner, erasing only the older checkpoint sector. The newest
+complete checkpoint and its ownership header remain intact until the replacement
+is committed. A write/erase error stops further energy writes for that boot and
+is shown on the Energy page, separately from occupied/unclaimable storage.
+The read-only System storage section reports all six sector headers, their
+erased-word counts, and the last failed flash operation's start address/error
+flags this boot. Low bits retain EFM flags; bit 6 means a rejected software
+precheck and bit 7 a read-back verification failure. These diagnostics do not
+claim sectors or authorize erasing unknown data.
+Power loss can lose usage since the last checkpoint;
+there is no power-fail interrupt or guaranteed last-second flush.
+
+Both programming and erase narrow and restore the EFM window, run from RAM with
+interrupts disabled and read back their result. The sector erase routine is
+shared with the unpacker, but the runtime adapter exposes only the energy pair.
+The meter holds the I2C lease and waits for panel DMA completion before saving,
+so no active I2C transaction or framebuffer transfer is suspended by erase.
+SysTick coalesces masked interrupts; runtime erase uses DWT core-cycle counting
+and the SysTick phase to replay missed millisecond driver ticks, leaving one
+pending hardware tick to the handler. This preserves nominal integration time
+but does not remove the interrupt pause. Datasheet rev 1.61 table 3-55 specifies
+up to 20 ms plus six HCLK cycles for sector erase. Live PD response timing, the
+cycle-counter compensation and power-cut recovery require explicitly approved
+hardware validation; host fault-injection tests and a build do not qualify them.
+
+The pair holds 186 checkpoints per sector. Datasheet table 3-56 specifies at
+least 10,000 erase cycles (20-year retention at 85 C): two-sector rotation gives
+about 3.72 million checkpoints, roughly 215 days at 5s or seven years at 60s of
+continuous changing usage, not an endurance guarantee. All storage remains
+outside the firmware update erase range and survives updates. Flash references:
+[erase/program timing and endurance](https://oss-nc-beijing-2.cecloudcs.com/doc-ds/DS_HC32F460SeriesDatasheet_Rev1.61.pdf),
+[EFM operations](https://oss-nc-beijing-2.cecloudcs.com/doc-rm/RM_HC32F460_F45x_A460SeriesReferenceManual_Rev1.5.pdf).
 
 The Rust `firmware-pack` CLI takes the built firmware and unpacker, validates
 their vectors and sizes, packs the release, generates the standalone layout using

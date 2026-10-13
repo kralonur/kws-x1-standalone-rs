@@ -106,6 +106,7 @@ This is **kws-x1-standalone-rs**.
 - Passthrough mode: listens to the PD messages between a charger and a device
   without taking part.
 - Brightness and auto-rotation, saved to flash.
+- Ah/Wh totals on every page, with optional energy memory: Off, 5s, 10s, 30s or 60s.
 
 ## Limitations
 
@@ -143,8 +144,8 @@ What this firmware does **not** do, for now:
 - **The 5 A cable test is non-standard**, and works only with the meter's plug
   straight in the charger. See
   [Full charger offer and 5 A without a cable](#full-charger-offer-and-5-a-without-a-cable).
-- **No energy or charge counting** (no mAh or Wh), no timer, no graphs, no
-  recording, and no USB data connection to a computer or app.
+- **No timer, no graphs, no recording**, and no USB data connection to a
+  computer or app.
 - **No calibration setting.** The measurement uses a fixed sensor calibration.
   The line voltages use an internal reference of 1083 mV, the stock
   firmware's value, rather than the reference manual's "about 1.1 V"
@@ -152,7 +153,7 @@ What this firmware does **not** do, for now:
   within 5 mV from 0.55 to 3.23 V), but the manual gives no tolerance, so
   another unit may read a few percent off. CC1 and CC2 were not checked.
 - **The chosen profile is not remembered:** every boot starts at 5 V.
-- **About 6000 settings saves** in the device's lifetime (see
+- **About 4000 settings saves** in the device's lifetime (see
   [What is saved](#what-is-saved)).
 - **Flashing uses the Rust flasher on Windows, Linux or macOS** (see
   [Flashing](#flashing)). Project `.X1C` images are generated directly from the
@@ -170,7 +171,7 @@ What this firmware does **not** do, for now:
 | OK | go into the group's tabs; on a tab, select, confirm, scroll or start (see each page) | 0.5 s: page action (cable query, full charger scan) |
 | Back | up one level: cancel the edit or scroll, leave the tabs; from a group, back to the overview; on the overview, open the settings | – |
 
-The pages sit in three groups: **Monitor** (Overview, Lines), **Trigger**
+The pages sit in three groups: **Monitor** (Overview, Lines, Energy), **Trigger**
 (PD Profiles, PPS, AVS, QC 2.0, QC 3.0) and **Info** (PD Session, Charger, Cable,
 System). The header shows the group's tabs as a strip, each in its own
 colour: the shown tab is named, the others fold to thin bars. A dot per group
@@ -195,7 +196,8 @@ meter in again.
   pull-downs off and sits between a charger and a device, which negotiate with
   each other as through a plain cable. The meter measures and logs their PD
   messages; it never sends, never acknowledges and never resets. Only the
-  overview, lines, PD session, system and settings pages are shown.
+  overview, lines, energy, PD session, system and settings pages are
+  shown.
 
 ### Ways to connect
 
@@ -243,15 +245,54 @@ unknown state. A port without PD does not close it.
 
 ### What is saved
 
-Brightness and rotation are saved to flash once you finish changing them, and
+Brightness, rotation and the energy-memory interval are saved to flash once you finish changing them, and
 come back at the next power-up, as does the mode the meter restarts the
 charger into (full scan, cable test, Quick Charge). The chosen profile is not:
 every boot starts at 5 V. `MAX` values live until reset or power-off.
 
 Saving appends an 8-byte record to the meter's original settings area and
-never erases flash. Each 8 KiB sector holds 1023 records and up to six are
-used, about 6000 saves in all; after that, settings keep working until power-off
-but are no longer saved. The bootloader and its region are never written.
+never erases settings sectors. Each 8 KiB sector holds 1023 records; up to four
+are available for new settings/log allocations (about 4000 settings saves without
+diagnostic logs). Existing records from older builds are still read. After this
+area fills, settings keep working until power-off but are no longer saved.
+
+**Energy memory** defaults to **Off**: Ah/Wh reset at every restart and no totals
+are written. Choose **5s, 10s, 30s or 60s** to restore the latest checkpoint and
+continue counting across restarts. Only changed totals are checkpointed. Changing
+an enabled interval or enabling memory also checkpoints current totals; `RESET
+ENERGY` clears both counters and checkpoints the reset when memory is enabled.
+Turning memory off leaves current totals on screen, but the next boot starts at
+zero. Re-enabling it uses the current run, not an old checkpoint.
+
+Energy uses a separate rotating two-sector journal, spreading erase wear and
+keeping the previous complete checkpoint during rollover. Power loss can lose
+usage since the last successful save; interrupted writes are ignored on boot.
+On boot, before protocol tasks start, the firmware automatically migrates old
+project diagnostic logs found in the reserved energy pair (`0x78000`, `0x7a000`).
+It discards only those logs, commits migration intent before erasing, and resumes
+an interrupted migration on a later boot. Settings, logs outside that pair,
+firmware and the bootloader are not cleared. This one-time migration may also
+run with Energy memory Off; it is not a recurring boot erase. Blank or already
+initialized pairs need no cleanup. Unknown data is never treated as unused.
+`ENERGY AREA OCCUPIED` means the reserved sectors contain unrecognized data or
+settings this journal cannot claim. `FLASH SAVE FAILED` means a write or erase failed.
+In either case totals are RAM-only and remain usable until power-off. Writes
+stop after a flash error for that boot. Settings also show `SETTINGS AREA FULL`
+or `SETTINGS WRITE FAILED` instead of silently promising that a failed change
+was saved. On System, the read-only **FLASH STORAGE** section shows sector
+headers and erased-word counts (`FREE 0800` means an entirely blank sector).
+`ERR` reports the last failing operation this boot: `01` write-mode error, `02`
+window protection, `04` size/alignment, `08` read-back mismatch, `20` bus collision,
+`40` rejected software check, or `80` verification failure; flags may combine.
+`AT` is that operation's start address. No error flag alone authorizes an erase.
+Neither the bootloader nor its boot-swap sector is touched.
+
+**Shorter intervals wear flash faster.** Each energy sector holds 186 checkpoints.
+At the datasheet's minimum 10,000 erase cycles, two-sector rotation gives roughly
+3.72 million checkpoints: about **215 days at 5s** or **7 years at 60s** of continuous,
+changing usage. These are endurance estimates, not guarantees. Runtime sector
+erase pauses execution for up to roughly 20 ms; live PD timing needs hardware
+validation before treating an energy-memory build as qualified.
 
 ## Screens
 
@@ -334,6 +375,17 @@ screen shows, or while Quick Charge runs.
 - **Hint row**: `approximate    < > tabs`. The internal reference was
   measured on one unit, and another unit's may differ by a few percent (see
   [Limitations](#limitations)).
+
+#### Energy
+
+The **Energy** screen (tab `ENERGY` in Monitor, after Lines) shows **CHARGE** in
+Ah and **ENERGY** in Wh, with three decimals. It counts current magnitude in either
+direction, sampling voltage/current every nominal 100 ms regardless of the shown
+page. Failed samples and gaps over one second are not extrapolated. Counters
+continue from saved totals only when energy memory is enabled.
+
+The status line shows RAM-only operation, the checkpoint interval/flash-wear
+reminder, or a save failure. Use **RESET ENERGY** in Settings to start fresh.
 
 #### 3. PD Profiles
 
@@ -763,22 +815,29 @@ It scrolls (OK) through two sections.
 <img src="pictures/settings_screen.webp" width="360" alt="Settings screen">
 
 This is the **Settings** screen (Back on the overview): display preferences
-and the overview's peaks.
+and the overview's peaks, energy totals and persistence. The photo predates
+the added energy rows.
 
-- **`BRIGHTNESS`**: five bars, 20%, 40%, 60%, 80% and 95%. Saved.
+- **`BRIGHTNESS`**: five bars, 20%, 40%, 60%, 80% and 95%. Saved; the backlight
+  starts at the restored level, not always the default 60%.
 - **`ROTATION`**: `AUTO` (follows the tilt sensor once the meter has stayed
   turned for 0.3 s, so a jolt from a button press does not flip it),
   `NORMAL` or `FLIPPED`. Saved. Left and Right follow the screen: turned
   over, the two arrow buttons swap.
+- **`ENERGY MEMORY`**: `OFF` (default), `5s`, `10s`, `30s` or `60s`. Saved.
+  Shorter intervals lose less usage on power loss but cause more flash wear.
+- **`RESET ENERGY`**: OK clears Ah/Wh; with memory on, saves the reset immediately.
 - **`RESET MAX`**: OK clears the overview's `MAX` values.
-- **`VERSION`**: the firmware version, shown only; the cursor skips it.
+- **`VERSION`**: the firmware version, shown only; the cursor skips it. A failed
+  settings save replaces its label with a storage-full or write-failure warning.
 - **Hint row**: `< > choose  OK change  BACK exit`, then
   `< > dimmer/brighter    OK done` or `< > auto/normal/flipped  OK done`.
 
 ### Passthrough mode
 
-Passthrough shows four screens: Overview and Lines in Monitor, PD Sniff and
-System in Info; the Trigger group is left out. The Overview, Lines and System
+Passthrough shows five screens: Overview, Lines and Energy in Monitor, PD
+Sniff and System in Info; the Trigger group is left out. The Overview, Lines,
+Energy and System
 screens read as in sink mode.
 
 #### 1. Overview in passthrough

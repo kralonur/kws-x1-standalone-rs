@@ -142,7 +142,7 @@ impl Group {
 
     /// The group's tabs, in Left/Right order.
     const fn tabs(self) -> &'static [Tab] {
-        const MONITOR: [Tab; 2] = [Tab::Overview, Tab::Lines];
+        const MONITOR: [Tab; 3] = [Tab::Overview, Tab::Lines, Tab::Energy];
         const TRIGGER: [Tab; MAX_TABS] = [Tab::Fixed, Tab::Pps, Tab::Avs, Tab::Qc2, Tab::Qc3];
         const INFO: [Tab; 4] = [
             Tab::detail(Detail::Pd),
@@ -183,6 +183,8 @@ pub enum Tab {
     Overview,
     /// D+, D−, CC1 and CC2 line voltages.
     Lines,
+    /// Accumulated charge and energy.
+    Energy,
     /// Fixed PD profile selector.
     Fixed,
     /// PPS voltage and current selector.
@@ -203,6 +205,7 @@ impl From<Tab> for Screen {
         match tab {
             Tab::Overview => Self::Overview,
             Tab::Lines => Self::Lines,
+            Tab::Energy => Self::Energy,
             Tab::Fixed => Self::Fixed,
             Tab::Pps => Self::Pps,
             Tab::Avs => Self::Avs,
@@ -223,6 +226,7 @@ impl From<Screen> for Tab {
         match screen {
             Screen::Overview => Self::Overview,
             Screen::Lines => Self::Lines,
+            Screen::Energy => Self::Energy,
             Screen::Fixed => Self::Fixed,
             Screen::Pps => Self::Pps,
             Screen::Avs => Self::Avs,
@@ -244,7 +248,7 @@ impl Tab {
 
     pub const fn group(self) -> Group {
         match self {
-            Self::Overview | Self::Lines => Group::Monitor,
+            Self::Overview | Self::Lines | Self::Energy => Group::Monitor,
             Self::Fixed | Self::Pps | Self::Avs | Self::Qc2 | Self::Qc3 => Group::Trigger,
             Self::Detail { .. } => Group::Info,
         }
@@ -267,6 +271,7 @@ impl Tab {
                 self,
                 Self::Overview
                     | Self::Lines
+                    | Self::Energy
                     | Self::Detail {
                         page: Detail::Pd | Detail::System,
                         ..
@@ -333,6 +338,7 @@ pub enum Level {
 pub enum View {
     Overview,
     Lines,
+    Energy,
     Fixed {
         choosing: bool,
     },
@@ -514,6 +520,7 @@ pub enum SettingsFocus {
     /// Left/Right change the value.
     Brightness,
     Rotation,
+    EnergyMemory,
 }
 
 impl Default for SettingsFocus {
@@ -529,6 +536,7 @@ impl SettingsFocus {
             Self::Row(item) => item,
             Self::Brightness => Item::Brightness,
             Self::Rotation => Item::Rotation,
+            Self::EnergyMemory => Item::EnergyMemory,
         }
     }
 }
@@ -618,6 +626,7 @@ impl Page {
             Self::Groups(tab) | Self::Tabs(tab) => match tab {
                 Tab::Overview => View::Overview,
                 Tab::Lines => View::Lines,
+                Tab::Energy => View::Energy,
                 Tab::Fixed => View::Fixed { choosing: false },
                 Tab::Pps => View::Pps(None),
                 Tab::Avs => View::Avs { adjusting: false },
@@ -673,7 +682,9 @@ impl Page {
                     | Open::Qc2(_)
                     | Open::Qc3
                     | Open::Detail { .. }
-            ) | Self::Settings(SettingsFocus::Brightness | SettingsFocus::Rotation)
+            ) | Self::Settings(
+                SettingsFocus::Brightness | SettingsFocus::Rotation | SettingsFocus::EnergyMemory
+            )
         )
     }
 }
@@ -714,6 +725,8 @@ pub struct Input {
     /// Incremented by each peak reset request; the meter clears its peaks
     /// when this changes.
     pub peaks_reset: u8,
+    /// The meter task clears totals when this request counter changes.
+    pub energy_reset: u8,
     pub qc: QcOffer,
     /// What the Quick Charge trigger asks of the charger, kept while other
     /// tabs show; `None` leaves D+/D− undriven. A PD contract (the charger
@@ -1038,6 +1051,9 @@ impl Navigation {
             }
             Page::Settings(SettingsFocus::Brightness) => input.settings.step_brightness(forward),
             Page::Settings(SettingsFocus::Rotation) => input.settings.step_rotation(forward),
+            Page::Settings(SettingsFocus::EnergyMemory) => {
+                input.settings.step_energy_memory(forward)
+            }
             Page::Open(Open::Fixed) => return Some(PdCommand::StepFixed(sign as i8)),
             Page::Open(Open::Qc2(preview)) => {
                 let all = Qc2Choice::ALL;
@@ -1081,7 +1097,7 @@ impl Navigation {
         let input = &mut self.input;
         let (page, command) = match input.page {
             Page::Groups(tab) => (Page::Tabs(tab), None),
-            page @ Page::Tabs(Tab::Overview | Tab::Lines) => (page, None),
+            page @ Page::Tabs(Tab::Overview | Tab::Lines | Tab::Energy) => (page, None),
             // Quick Charge holds the charger: restart into PD, back on this tab.
             page @ Page::Tabs(tab @ (Tab::Fixed | Tab::Pps | Tab::Avs)) if self.silent => {
                 input
@@ -1125,6 +1141,11 @@ impl Navigation {
                 Page::Settings(match item {
                     Item::Brightness => SettingsFocus::Brightness,
                     Item::Rotation => SettingsFocus::Rotation,
+                    Item::EnergyMemory => SettingsFocus::EnergyMemory,
+                    Item::ResetEnergy => {
+                        input.energy_reset = input.energy_reset.wrapping_add(1);
+                        SettingsFocus::Row(item)
+                    }
                     Item::ResetPeaks => {
                         input.peaks_reset = input.peaks_reset.wrapping_add(1);
                         SettingsFocus::Row(item)

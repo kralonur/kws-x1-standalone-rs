@@ -12,6 +12,48 @@ pub const BRIGHTNESS_PERCENT: [u8; 5] = [20, 40, 60, 80, 95];
 /// Index of the 60% level in [`BRIGHTNESS_PERCENT`].
 const DEFAULT_BRIGHTNESS: u8 = 2;
 
+/// Energy checkpoint interval. Off never writes totals and starts each boot
+/// from zero; the other choices trade flash endurance for less power-loss lag.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EnergyMemory {
+    #[default]
+    Off,
+    Seconds5,
+    Seconds10,
+    Seconds30,
+    Seconds60,
+}
+
+impl EnergyMemory {
+    pub const ALL: [Self; 5] = [
+        Self::Off,
+        Self::Seconds5,
+        Self::Seconds10,
+        Self::Seconds30,
+        Self::Seconds60,
+    ];
+
+    pub fn seconds(self) -> Option<u64> {
+        match self {
+            Self::Off => None,
+            Self::Seconds5 => Some(5),
+            Self::Seconds10 => Some(10),
+            Self::Seconds30 => Some(30),
+            Self::Seconds60 => Some(60),
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "OFF",
+            Self::Seconds5 => "5s",
+            Self::Seconds10 => "10s",
+            Self::Seconds30 => "30s",
+            Self::Seconds60 => "60s",
+        }
+    }
+}
+
 /// Screen orientation: follow the tilt sensor, or stay fixed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Rotation {
@@ -91,12 +133,13 @@ pub enum Screen {
     Cable,
     System,
     Avs,
+    Energy,
 }
 
 impl Screen {
     /// Record values, by position; new values go last, so older records
     /// still decode.
-    const ALL: [Self; 11] = [
+    const ALL: [Self; 12] = [
         Self::Overview,
         Self::Lines,
         Self::Fixed,
@@ -108,6 +151,7 @@ impl Screen {
         Self::Cable,
         Self::System,
         Self::Avs,
+        Self::Energy,
     ];
 
     /// 0 for none, else the position in [`Self::ALL`] plus one.
@@ -193,11 +237,19 @@ const RESUME_SHIFT: u32 = 10;
 const RESUME_MASK: u32 = 0b11_1111;
 const _: () = assert!(Screen::ALL.len() <= RESUME_MASK as usize);
 
+/// Brightness uses only the low three bits; energy memory occupies formerly
+/// zero bits 5..3, so old records retain Off. Bits 7..6 remain reserved.
+const BRIGHTNESS_MASK: u32 = 0b111;
+const ENERGY_MEMORY_SHIFT: u32 = 3;
+const ENERGY_MEMORY_MASK: u32 = 0b111;
+const RESERVED_MASK: u32 = 0b1100_0000;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Settings {
     /// Index into [`BRIGHTNESS_PERCENT`].
     pub brightness: u8,
     pub rotation: Rotation,
+    pub energy_memory: EnergyMemory,
     pub next_boot: NextBoot,
     /// The full scan's Quick Charge result, for its PD part to show; that
     /// boot clears it.
@@ -212,6 +264,7 @@ impl Default for Settings {
         Self {
             brightness: DEFAULT_BRIGHTNESS,
             rotation: Rotation::Auto,
+            energy_memory: EnergyMemory::Off,
             next_boot: NextBoot::Normal,
             qc_findings: None,
             resume: None,
@@ -263,13 +316,27 @@ impl Settings {
         self.rotation = all[next % all.len()];
     }
 
+    pub fn step_energy_memory(&mut self, forward: bool) {
+        let all = EnergyMemory::ALL;
+        let index = all
+            .iter()
+            .position(|value| *value == self.energy_memory)
+            .unwrap_or(0);
+        let next = if forward {
+            index + 1
+        } else {
+            index + all.len() - 1
+        };
+        self.energy_memory = all[next % all.len()];
+    }
+
     pub fn brightness_percent(&self) -> u8 {
         BRIGHTNESS_PERCENT[usize::from(self.brightness) % BRIGHTNESS_PERCENT.len()]
     }
 
     /// Pack into one word: tag in bits 31..24, Quick Charge findings in
     /// 23..19, the next boot in 18..16, the resume screen in 15..10, rotation
-    /// in 9..8, brightness in 7..0.
+    /// in 9..8, energy memory in 5..3, brightness in 2..0.
     /// Earlier records kept the cable test in bit 16 and Quick Charge mode in
     /// 17, which read as the same next boot here.
     pub fn encode(&self) -> u32 {
@@ -286,15 +353,18 @@ impl Settings {
             | next_boot << NEXT_BOOT_SHIFT
             | Screen::encode(self.resume) << RESUME_SHIFT
             | rotation << ROTATION_SHIFT
+            | (self.energy_memory as u32) << ENERGY_MEMORY_SHIFT
             | u32::from(self.brightness)
     }
 
     /// Unpack a word from [`Self::encode`]; anything else is `None`.
     pub fn decode(word: u32) -> Option<Self> {
-        if word >> 24 != RECORD_TAG {
+        if word >> 24 != RECORD_TAG || word & RESERVED_MASK != 0 {
             return None;
         }
-        let brightness = word as u8;
+        let brightness = (word & BRIGHTNESS_MASK) as u8;
+        let energy_memory =
+            *EnergyMemory::ALL.get((word >> ENERGY_MEMORY_SHIFT & ENERGY_MEMORY_MASK) as usize)?;
         let rotation = *Rotation::ALL.get((word >> ROTATION_SHIFT & ROTATION_MASK) as usize)?;
         let next_boot = *NextBoot::ALL.get((word >> NEXT_BOOT_SHIFT & NEXT_BOOT_MASK) as usize)?;
         let qc_findings = QcFindings::decode(word >> FINDINGS_SHIFT & FINDINGS_MASK)?;
@@ -302,6 +372,7 @@ impl Settings {
         (usize::from(brightness) < BRIGHTNESS_PERCENT.len()).then_some(Self {
             brightness,
             rotation,
+            energy_memory,
             next_boot,
             qc_findings,
             resume,
@@ -315,9 +386,57 @@ pub enum Item {
     #[default]
     Brightness,
     Rotation,
+    EnergyMemory,
+    ResetEnergy,
     ResetPeaks,
 }
 
 impl Item {
-    pub const ALL: [Self; 3] = [Self::Brightness, Self::Rotation, Self::ResetPeaks];
+    pub const ALL: [Self; 5] = [
+        Self::Brightness,
+        Self::Rotation,
+        Self::EnergyMemory,
+        Self::ResetEnergy,
+        Self::ResetPeaks,
+    ];
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn energy_memory_preserves_legacy_records_and_other_fields() {
+        assert_eq!(Settings::decode(0x5e00_0002), Some(Settings::default()));
+        for memory in EnergyMemory::ALL {
+            for brightness in 0..BRIGHTNESS_PERCENT.len() as u8 {
+                let settings = Settings {
+                    brightness,
+                    rotation: Rotation::Flipped,
+                    energy_memory: memory,
+                    next_boot: NextBoot::ScanQuickCharge {
+                        then_cable_test: true,
+                    },
+                    resume: Some(Screen::Energy),
+                    qc_findings: Some(QcFindings::Failed(Failure::NoEntry)),
+                };
+                assert_eq!(Settings::decode(settings.encode()), Some(settings));
+            }
+        }
+        assert!(Settings::decode(0x5e00_003a).is_none());
+        assert!(Settings::decode(0x5e00_0042).is_none());
+    }
+
+    #[test]
+    fn interval_choices_cycle_in_both_directions() {
+        let mut settings = Settings::default();
+        for seconds in [Some(5), Some(10), Some(30), Some(60), None] {
+            settings.step_energy_memory(true);
+            assert_eq!(settings.energy_memory.seconds(), seconds);
+        }
+        for seconds in [Some(60), Some(30), Some(10), Some(5), None] {
+            settings.step_energy_memory(false);
+            assert_eq!(settings.energy_memory.seconds(), seconds);
+        }
+    }
 }

@@ -5,12 +5,13 @@
 //! that is entirely blank or already claimed by this log; any error flag
 //! stops the log.
 
-use crate::flash::{BLANK, SECTOR, SECTORS, blank, read, write};
+use crate::flash::{
+    BLANK, ENERGY_SECTORS, LOG_CLAIM as CLAIM, SECTOR, SECTORS, blank, read, write,
+};
 use crate::pd;
 use core::cell::Cell;
 use core::sync::atomic::{AtomicU16, Ordering};
 
-const CLAIM: u32 = 0x4b57_4c47; // "KWLG", first word of a claimed sector
 /// 16-byte entries (first log image) are skipped; 32-byte entries carry the
 /// lock/transfer/delay maxima too.
 const ENTRY_V1: u32 = 0xb0;
@@ -149,17 +150,19 @@ pub fn start() {
     let room = |base: usize| used_end(base) + ENTRY_LEN <= base + SECTOR;
     let base = last_boot
         .map(|(_, base)| base)
-        .filter(|&base| room(base))
+        .filter(|&base| !ENERGY_SECTORS.contains(&base) && room(base))
         .or_else(|| {
             SECTORS
                 .iter()
                 .copied()
+                .filter(|base| !ENERGY_SECTORS.contains(base))
                 .find(|&base| claimed(base) && room(base))
         })
         .or_else(|| {
             SECTORS
                 .iter()
                 .copied()
+                .filter(|base| !ENERGY_SECTORS.contains(base))
                 .find(|&base| blank(base) && write(base, base, &[CLAIM]))
         });
     let boot = last_boot.map_or(1, |(b, _)| b.wrapping_add(1));

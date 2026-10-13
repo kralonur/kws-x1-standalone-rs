@@ -11,7 +11,10 @@ use embedded_graphics::primitives::{
 };
 use firmware_core::buttons::{Detail, Level, PpsFocus, Qc2Choice, QcOffer, SettingsFocus, Tab};
 use firmware_core::dcp::Dcp;
-use firmware_core::settings::{BRIGHTNESS_PERCENT, Item, QcFindings, Rotation, Settings};
+use firmware_core::energy::Totals;
+use firmware_core::settings::{
+    BRIGHTNESS_PERCENT, EnergyMemory, Item, QcFindings, Rotation, Settings,
+};
 use u8g2_fonts::FontRenderer;
 use u8g2_fonts::fonts;
 use u8g2_fonts::types::{FontColor, HorizontalAlignment, VerticalPosition};
@@ -280,6 +283,7 @@ fn tab_style(tab: Tab, passthrough: bool) -> (&'static str, Rgb565) {
     match tab {
         Tab::Overview => ("OVERVIEW", CYAN),
         Tab::Lines => ("LINES", YELLOW),
+        Tab::Energy => ("ENERGY", GREEN),
         Tab::Fixed => ("PD PROFILES", GREEN),
         Tab::Pps => ("PPS", MAGENTA),
         Tab::Avs => ("AVS", YELLOW),
@@ -334,8 +338,13 @@ impl Label {
     }
 
     /// `value / 10^places` with `places` decimals, e.g. `fixed(2012, 2)` is "20.12".
-    fn fixed(self, mut value: u32, places: u32) -> Self {
-        let mut digits = [0u8; 12];
+    fn fixed(self, value: u32, places: u32) -> Self {
+        self.fixed_u64(u64::from(value), places)
+    }
+
+    fn fixed_u64(self, mut value: u64, places: u32) -> Self {
+        // Twenty decimal digits for u64, plus a decimal point and leading zero.
+        let mut digits = [0u8; 22];
         let mut start = digits.len();
         let mut place = 0;
         loop {
@@ -756,6 +765,73 @@ pub fn draw_meter<D: DrawTarget<Color = Rgb565>>(
         Circle::with_center(Point::new(RIGHT - 1, HINT_BASELINE - 5), 6),
         meter.alive,
     );
+}
+
+/// Totals remain visible on their own monitor tab without displacing live
+/// readings or peaks on the overview.
+pub fn draw_energy<D: DrawTarget<Color = Rgb565>>(
+    target: &mut D,
+    header: &Header<'_>,
+    totals: Totals,
+    memory: EnergyMemory,
+    save_status: crate::energy_store::Status,
+) {
+    draw_header(target, header);
+    let cards = [
+        (
+            Rectangle::new(Point::new(4, 25), Size::new(232, 39)),
+            "CHARGE",
+            totals.milliamp_hours(),
+            "Ah",
+            CYAN,
+            CYAN_TINT,
+        ),
+        (
+            Rectangle::new(Point::new(4, 68), Size::new(232, 39)),
+            "ENERGY",
+            totals.milliwatt_hours(),
+            "Wh",
+            GREEN,
+            GREEN_TINT,
+        ),
+    ];
+    for (area, label, value, unit, color, tint) in cards {
+        card(target, area, tint, None);
+        card_label(target, area, label, color);
+        value_with_unit(
+            target,
+            &READING,
+            &Label::new().fixed_u64(value, 3),
+            unit,
+            area.top_left + Point::new(6, CARD_VALUE),
+            color,
+        );
+    }
+    let status = if memory == EnergyMemory::Off {
+        Label::new().push(b"RAM ONLY - RESTART RESETS")
+    } else if save_status == crate::energy_store::Status::Occupied {
+        Label::new().push(b"ENERGY AREA OCCUPIED")
+    } else if save_status == crate::energy_store::Status::SaveFailed {
+        Label::new().push(b"FLASH SAVE FAILED")
+    } else {
+        Label::new()
+            .push(b"SAVE EVERY ")
+            .push(memory.label().as_bytes())
+            .push(b" - FLASH WEAR")
+    };
+    text(
+        target,
+        &PLAIN,
+        status.as_str(),
+        Point::new(LEFT, VERSION_BASELINE),
+        HorizontalAlignment::Left,
+        if memory != EnergyMemory::Off && save_status != crate::energy_store::Status::Ready {
+            ORANGE
+        } else {
+            MUTED
+        },
+    );
+    hint(target, header, "reset totals in settings    < > tabs");
 }
 
 /// Which way the current flows, as chevrons on the bottom row. Upright, the
@@ -1760,10 +1836,11 @@ fn arrows<D: DrawTarget<Color = Rgb565>>(target: &mut D, area: Rectangle, color:
 }
 
 /// Settings rows: first baseline and pitch.
-const SETTINGS_BASELINE: i32 = 44;
-const SETTINGS_PITCH: i32 = 27;
-/// Baseline of the firmware version line: below the last row's highlight
-/// (which ends 7 px under its baseline, 98) and above the hint at 131.
+const SETTINGS_BASELINE: i32 = 35;
+const SETTINGS_PITCH: i32 = 18;
+/// Compact row highlights and edit frames leave room for all five settings.
+const SETTINGS_ROW_HEIGHT: u32 = 17;
+/// Baseline of the firmware version line, below the five rows and above the hint.
 const VERSION_BASELINE: i32 = 117;
 /// This firmware's version, from its Cargo package.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -1775,6 +1852,7 @@ pub fn draw_settings<D: DrawTarget<Color = Rgb565>>(
     header: &Header<'_>,
     settings: Settings,
     focus: SettingsFocus,
+    save_status: crate::settings_store::Status,
 ) {
     draw_header(target, header);
     for (index, item) in Item::ALL.into_iter().enumerate() {
@@ -1783,7 +1861,10 @@ pub fn draw_settings<D: DrawTarget<Color = Rgb565>>(
         if selected {
             card(
                 target,
-                Rectangle::new(Point::new(4, baseline - 15), Size::new(232, 22)),
+                Rectangle::new(
+                    Point::new(4, baseline - 13),
+                    Size::new(232, SETTINGS_ROW_HEIGHT),
+                ),
                 RULE,
                 None,
             );
@@ -1799,6 +1880,8 @@ pub fn draw_settings<D: DrawTarget<Color = Rgb565>>(
         let name = match item {
             Item::Brightness => "BRIGHTNESS",
             Item::Rotation => "ROTATION",
+            Item::EnergyMemory => "ENERGY MEMORY",
+            Item::ResetEnergy => "RESET ENERGY",
             Item::ResetPeaks => "RESET MAX",
         };
         text(
@@ -1821,7 +1904,10 @@ pub fn draw_settings<D: DrawTarget<Color = Rgb565>>(
                 if editing {
                     card(
                         target,
-                        Rectangle::new(Point::new(154, baseline - 16), Size::new(78, 24)),
+                        Rectangle::new(
+                            Point::new(154, baseline - 13),
+                            Size::new(78, SETTINGS_ROW_HEIGHT),
+                        ),
                         BLACK,
                         Some(YELLOW),
                     );
@@ -1840,7 +1926,28 @@ pub fn draw_settings<D: DrawTarget<Color = Rgb565>>(
                     if selected { YELLOW } else { MUTED },
                 );
             }
-            Item::ResetPeaks => {
+            Item::EnergyMemory => {
+                if focus == SettingsFocus::EnergyMemory {
+                    card(
+                        target,
+                        Rectangle::new(
+                            Point::new(154, baseline - 13),
+                            Size::new(78, SETTINGS_ROW_HEIGHT),
+                        ),
+                        BLACK,
+                        Some(YELLOW),
+                    );
+                }
+                text(
+                    target,
+                    &ROW,
+                    settings.energy_memory.label(),
+                    Point::new(193, baseline),
+                    HorizontalAlignment::Center,
+                    if selected { YELLOW } else { MUTED },
+                );
+            }
+            Item::ResetEnergy | Item::ResetPeaks => {
                 text(
                     target,
                     &ROW,
@@ -1852,14 +1959,19 @@ pub fn draw_settings<D: DrawTarget<Color = Rgb565>>(
             }
         }
     }
-    // Shown only, never a cursor row: it is not one of `Item::ALL`.
+    // A failed save stays visible instead of silently promising persistence.
+    let (label, color) = match save_status {
+        crate::settings_store::Status::Saved => ("VERSION", MUTED),
+        crate::settings_store::Status::NoSpace => ("SETTINGS AREA FULL", ORANGE),
+        crate::settings_store::Status::WriteFailed => ("SETTINGS WRITE FAILED", ORANGE),
+    };
     text(
         target,
         &PLAIN,
-        "VERSION",
+        label,
         Point::new(LEFT + 14, VERSION_BASELINE),
         HorizontalAlignment::Left,
-        MUTED,
+        color,
     );
     text(
         target,
@@ -1875,6 +1987,7 @@ pub fn draw_settings<D: DrawTarget<Color = Rgb565>>(
         match focus {
             SettingsFocus::Brightness => "< > dimmer/brighter    OK done",
             SettingsFocus::Rotation => "< > auto/normal/flipped  OK done",
+            SettingsFocus::EnergyMemory => "shorter saves = more wear   OK done",
             _ => "< > choose  OK change  BACK exit",
         },
     );
@@ -1892,13 +2005,16 @@ fn brightness_bars<D: DrawTarget<Color = Rgb565>>(
     if editing {
         card(
             target,
-            Rectangle::new(Point::new(left - 6, baseline - 16), Size::new(78, 24)),
+            Rectangle::new(
+                Point::new(left - 6, baseline - 13),
+                Size::new(78, SETTINGS_ROW_HEIGHT),
+            ),
             BLACK,
             Some(YELLOW),
         );
     }
     for index in 0..BRIGHTNESS_PERCENT.len() {
-        let height = 4 + 3 * index as u32;
+        let height = 2 + 3 * index as u32;
         let color = if index <= usize::from(level) {
             YELLOW
         } else {

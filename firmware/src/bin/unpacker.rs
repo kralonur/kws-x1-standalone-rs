@@ -205,54 +205,9 @@ fn erase(base: usize) -> bool {
     if !base.is_multiple_of(SECTOR) {
         return false;
     }
-    let erase: unsafe extern "C" fn(u32) -> u32 = core::hint::black_box(erase_sector);
+    let erase: unsafe extern "C" fn(u32) -> u32 = core::hint::black_box(flash::erase_sector);
     // SAFETY: the routine runs from RAM with interrupts off, and the caller
     // keeps `base` clear of code it runs.
     let errors = cortex_m::interrupt::free(|_| unsafe { erase(base as u32) });
     errors == 0 && flash::blank(base)
-}
-
-/// Sector erase (HC32F460 RM section 7.6: PEMOD = 0b100, any word write in
-/// the sector starts it), from RAM with the same unlock, window and cache
-/// handling as `flash.rs` `program`. Returns the EFM_FSR error bits.
-#[inline(never)]
-// SAFETY: this routine must run from RAM while the erase is active.
-#[unsafe(link_section = ".data.flash_erase")]
-unsafe extern "C" fn erase_sector(base: u32) -> u32 {
-    const EFM: u32 = 0x4001_0400;
-    /// FWMC: PEMODE (bit 0) with PEMOD = sector erase (bits 6..4).
-    const SECTOR_ERASE: u32 = 1 | 0b100 << 4;
-    /// Any value written into the sector starts the erase.
-    const START: u32 = 0;
-    let faprt = EFM as *mut u32;
-    let frmc = (EFM + 0x08) as *mut u32;
-    let fwmc = (EFM + 0x0c) as *mut u32;
-    let fsr = (EFM + 0x10) as *const u32;
-    let fsclr = (EFM + 0x14) as *mut u32;
-    let fpmtsw = (EFM + 0x20) as *mut u32;
-    let fpmtew = (EFM + 0x24) as *mut u32;
-    unsafe {
-        faprt.write_volatile(0x0123);
-        faprt.write_volatile(0x3210);
-        let read_mode = frmc.read_volatile();
-        frmc.write_volatile(read_mode & !(1 << 16)); // cache off (RM section 7.6)
-        let (start, end) = (fpmtsw.read_volatile(), fpmtew.read_volatile());
-        fpmtsw.write_volatile(base);
-        fpmtew.write_volatile(base + 0x1fff);
-        fsclr.write_volatile(0x3f);
-        fwmc.write_volatile(1);
-        fwmc.write_volatile(SECTOR_ERASE);
-        (base as *mut u32).write_volatile(START);
-        while fsr.read_volatile() & 1 << 8 == 0 {}
-        let errors = fsr.read_volatile() & 0x2f; // COLERR PGMISMTCH PGSZERR PEPRTERR PEWERR
-        fsclr.write_volatile(0x3f);
-        fwmc.write_volatile(1); // read-only
-        fwmc.write_volatile(0);
-        fpmtsw.write_volatile(start);
-        fpmtew.write_volatile(end);
-        frmc.write_volatile(read_mode | 1 << 24); // cache reset, then restore
-        frmc.write_volatile(read_mode);
-        faprt.write_volatile(0); // any write re-protects
-        errors
-    }
 }

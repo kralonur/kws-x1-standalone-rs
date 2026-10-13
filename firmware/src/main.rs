@@ -11,6 +11,7 @@
 
 mod bus;
 mod clock_setup;
+mod energy_store;
 mod flash;
 #[cfg(feature = "flash-probe")]
 mod flash_probe;
@@ -31,6 +32,7 @@ mod pd_service;
 mod pd_sniff;
 mod render;
 mod settings_store;
+mod storage_diag;
 mod ui;
 mod upper;
 
@@ -52,6 +54,7 @@ use button_logic::{Detail, MAX_TABS, Page, QcTarget, Tab, View};
 use embassy_time::{Instant, Timer};
 use embedded_graphics::pixelcolor::{Rgb565, RgbColor};
 use firmware_core::buttons as button_logic;
+use firmware_core::energy::{Totals, Tracker};
 use firmware_core::settings::{NextBoot, QcFindings, Rotation, Screen};
 use hc32f460_pac::interrupt;
 use panel::Orientation;
@@ -158,6 +161,8 @@ static PULSES: AtomicU32 = AtomicU32::new(0);
 /// `button_task` sends the input state when it changes; the renderer and PD
 /// trial read it.
 static BUTTON_STATE: Watch<CriticalSectionRawMutex, button_logic::Input, 1> = Watch::new();
+/// Last settings-save result, published by the input task for its status line.
+static SETTINGS_SAVE: Watch<CriticalSectionRawMutex, settings_store::Status, 1> = Watch::new();
 /// PD requests from `button_task` (profile previews, confirmations, the cable
 /// query), applied by the PD session in order.
 static PD_COMMANDS: Channel<CriticalSectionRawMutex, button_logic::PdCommand, 8> = Channel::new();
@@ -707,6 +712,12 @@ async fn button_task(
         // (a scrolling list counts as editing) so the next boot sees it.
         if !input.page.editing() || command == Some(firmware_core::buttons::PdCommand::Restart) {
             store.save(input.settings);
+            SETTINGS_SAVE.sender().send_if_modified(|current| {
+                let status = store.status();
+                let changed = *current != Some(status);
+                *current = Some(status);
+                changed
+            });
         }
         // The PD session drains these between transactions; a full queue
         // drops the press, as a missed tap would.
@@ -822,10 +833,29 @@ async fn meter_task(
     // The full scan's Quick Charge result, carried into its PD part.
     mut qc_findings: Option<QcFindings>,
     upper_installed: bool,
+    saved: firmware_core::settings::Settings,
+    mut energy_store: Option<energy_store::Store>,
+    mut energy_save_status: energy_store::Status,
 ) {
     let fb = framebuffer();
     let mut input_updates = BUTTON_STATE.anon_receiver();
-    let mut input = button_logic::Input::default();
+    let mut input = button_logic::Input {
+        settings: saved,
+        ..Default::default()
+    };
+    let mut energy_memory = saved.energy_memory;
+    let totals = if energy_memory.seconds().is_some() {
+        energy_store
+            .as_ref()
+            .map_or_else(Totals::default, energy_store::Store::totals)
+    } else {
+        Totals::default()
+    };
+    let mut energy = Tracker::new(totals);
+    let mut energy_reset = input.energy_reset;
+    let mut next_save = energy_memory
+        .seconds()
+        .map(|seconds| Instant::now() + embassy_time::Duration::from_secs(seconds));
     let mut dirty = true;
     // Last raw readings, `None` until the first read; a changed reading
     // redraws the meter page.
@@ -883,6 +913,24 @@ async fn meter_task(
         }
         let page = input.page;
         let view = page.view();
+        let mut save_energy = false;
+        // Previewing intervals must not write checkpoints on every arrow tap.
+        if !matches!(
+            view,
+            View::Settings(button_logic::SettingsFocus::EnergyMemory)
+        ) && input.settings.energy_memory != energy_memory
+        {
+            energy_memory = input.settings.energy_memory;
+            next_save = energy_memory
+                .seconds()
+                .map(|seconds| now + embassy_time::Duration::from_secs(seconds));
+            save_energy = energy_memory.seconds().is_some();
+        }
+        if input.energy_reset != energy_reset {
+            energy_reset = input.energy_reset;
+            energy.reset();
+            save_energy = energy_memory.seconds().is_some();
+        }
         if input.peaks_reset != peaks_reset {
             peaks_reset = input.peaks_reset;
             peaks = ui::Peaks::default();
@@ -912,8 +960,8 @@ async fn meter_task(
         }
 
         let mut changed = false;
-        // Pages showing live values read the meter; the PD details page reads
-        // only the bus voltage, as before.
+        // Energy sampling is independent of the page. Keep the existing peak
+        // updates and redraw decisions limited to their live-value pages.
         let reads_current = matches!(
             view,
             View::Overview | View::Fixed { .. } | View::Pps(_) | View::Avs { .. }
@@ -925,26 +973,44 @@ async fn meter_task(
                 ..
             }
         );
-        if (reads_current || pd_details) && now >= next_read {
+        if now >= next_read {
             next_read = now + METER_READ_PERIOD;
-            if let Some(v) = read_meter(ina226::BUS_VOLTAGE).await {
-                if Some(v) != last_raw_v {
-                    last_raw_v = Some(v);
-                    changed = true;
-                }
-                if pd_details {
-                    changed = true;
-                }
+            let raw_v = read_meter(ina226::BUS_VOLTAGE).await;
+            let raw_i = read_meter(ina226::CURRENT).await;
+            changed |=
+                (reads_current || pd_details) && (raw_v != last_raw_v || raw_i != last_raw_i);
+            changed |= pd_details;
+            last_raw_v = raw_v;
+            last_raw_i = raw_i;
+            let sample = reading(raw_v, raw_i);
+            let read_ms = Instant::now().as_millis();
+            energy.sample(read_ms, sample.map(|reading| (reading.mv, reading.ma)));
+            if reads_current && let Some(reading) = sample {
+                peaks.update(reading);
             }
-            if reads_current && let Some(i) = read_meter(ina226::CURRENT).await {
-                if Some(i) != last_raw_i {
-                    last_raw_i = Some(i);
-                    changed = true;
+        }
+
+        if energy_memory.seconds().is_some()
+            && (save_energy || next_save.is_some_and(|deadline| Instant::now() >= deadline))
+        {
+            // No I2C transaction may be suspended by the flash erase. Saving
+            // happens before starting the next panel DMA, whose last flush
+            // completed in the preceding loop.
+            let _bus = I2C3.lock().await;
+            energy_save_status = match energy_store.as_mut() {
+                None => energy_save_status,
+                Some(store) => {
+                    if store.save(energy.totals) {
+                        energy_store::Status::Ready
+                    } else {
+                        energy_store::Status::SaveFailed
+                    }
                 }
-                if let Some(reading) = reading(last_raw_v, last_raw_i) {
-                    peaks.update(reading);
-                }
-            }
+            };
+            next_save = energy_memory
+                .seconds()
+                .map(|seconds| Instant::now() + embassy_time::Duration::from_secs(seconds));
+            dirty |= view == View::Energy;
         }
 
         if let Some(update) = line_updates.try_changed() {
@@ -1012,6 +1078,16 @@ async fn meter_task(
                             flipped: current_rotation == Orientation::Inverted,
                             alive: pulse_now,
                         },
+                    );
+                }
+                View::Energy => {
+                    render::clear(frame);
+                    ui::draw_energy(
+                        &mut Canvas(frame),
+                        &header,
+                        energy.totals,
+                        energy_memory,
+                        energy_save_status,
                     );
                 }
                 View::Lines => {
@@ -1085,7 +1161,13 @@ async fn meter_task(
                 }
                 View::Settings(focus) => {
                     render::clear(frame);
-                    ui::draw_settings(&mut Canvas(frame), &header, input.settings, focus);
+                    ui::draw_settings(
+                        &mut Canvas(frame),
+                        &header,
+                        input.settings,
+                        focus,
+                        SETTINGS_SAVE.try_get().unwrap_or_default(),
+                    );
                 }
                 View::Detail {
                     page: detail,
@@ -1157,7 +1239,9 @@ async fn meter_task(
                                 reads: ASYNC_READS.load(Ordering::Relaxed),
                                 reset_flags: reset_flags(),
                             };
-                            let sections = render::system_lines(counters, bus_failed()).into_iter();
+                            let sections = render::system_lines(counters, bus_failed())
+                                .into_iter()
+                                .chain([storage_diag::lines()]);
                             #[cfg(feature = "flash-probe")]
                             let sections = sections.chain([flash_probe::lines()]);
                             ui::draw_detail(canvas, &header, detail, sections, top, scrolling)
@@ -1251,6 +1335,13 @@ async fn main(spawner: Spawner) {
     }
     // Checked before any task: the PD stack's code lives in the upper region.
     let upper_installed = upper::installed();
+    // Migrate only legacy logs in the energy pair before any bus, display DMA
+    // or protocol task starts. No blanket cleanup of other occupied sectors.
+    let (energy_store, energy_save_status) = if upper_installed {
+        energy_store::open()
+    } else {
+        (None, energy_store::Status::Occupied)
+    };
 
     // Each task is spawned once, here, into its default one-slot pool, so a
     // token is always free (`SpawnError::Busy` needs a second instance).
@@ -1268,6 +1359,7 @@ async fn main(spawner: Spawner) {
     let qc_findings = settings.qc_findings.take();
     settings.finish_boot();
     let cleared = store.save(settings);
+    SETTINGS_SAVE.sender().send(store.status());
     // The cable test runs only on a boot after a power-up (the restart's power
     // cycle), with its request verifiably cleared first. A reset during that
     // clear, or any other reset without power loss, cannot repeat it: that
@@ -1423,7 +1515,17 @@ async fn main(spawner: Spawner) {
         }
     }
 
-    spawner.spawn(meter_task(backlight_pwm, qc_findings, upper_installed).expect(ONE_SPAWN));
+    spawner.spawn(
+        meter_task(
+            backlight_pwm,
+            qc_findings,
+            upper_installed,
+            settings,
+            energy_store,
+            energy_save_status,
+        )
+        .expect(ONE_SPAWN),
+    );
     // The other tasks reach PD state and pages; none runs without the upper region.
     if !upper_installed {
         return;

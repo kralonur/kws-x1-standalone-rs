@@ -4,7 +4,7 @@
 
 use firmware_core::settings::Settings;
 
-use crate::flash::{BLANK, SECTOR, SECTORS, blank, read, write};
+use crate::flash::{BLANK, ENERGY_SECTORS, SECTOR, SECTORS, blank, read, write};
 
 /// First word of a sector claimed for settings ("KWST"). The diagnostic log
 /// claims its own sectors with a different word and never takes this one.
@@ -14,11 +14,21 @@ const RECORD: usize = 8;
 /// First record, after the claim word, keeping records 8-byte aligned.
 const FIRST: usize = 8;
 
-/// Where the next record goes, and what was last saved.
+/// Result of the last changed-settings save attempt.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Status {
+    #[default]
+    Saved,
+    NoSpace,
+    WriteFailed,
+}
+
+/// Where the next record goes, and what was last attempted.
 pub struct Store {
     /// Sector base and the next free record, `None` when no claimed sector has room.
     next: Option<(usize, usize)>,
     saved: Settings,
+    status: Status,
 }
 
 /// The newest valid record of a claimed sector and its first free record.
@@ -68,27 +78,42 @@ impl Store {
         let store = Self {
             next,
             saved: loaded.unwrap_or_default(),
+            status: Status::Saved,
         };
         (store, loaded)
     }
 
-    /// Append `settings` unless they are what was last saved. One attempt per
+    pub fn status(&self) -> Status {
+        self.status
+    }
+
+    /// Append `settings` unless they are what was last attempted. One attempt per
     /// change: a failed write is not retried, the settings stay in RAM.
     pub fn save(&mut self, settings: Settings) -> bool {
         if settings == self.saved {
-            return true;
+            return self.status == Status::Saved;
         }
         self.saved = settings;
+        self.status = Status::NoSpace;
         let next = self.next.or_else(|| {
             candidates()
-                .find(|&base| blank(base) && write(base, base, &[CLAIM]))
-                .map(|base| (base, base + FIRST))
+                .filter(|base| !ENERGY_SECTORS.contains(base))
+                .find(|&base| blank(base))
+                .and_then(|base| {
+                    self.status = Status::WriteFailed;
+                    write(base, base, &[CLAIM]).then_some((base, base + FIRST))
+                })
         });
         let Some((base, slot)) = next else {
             return false;
         };
         let word = settings.encode();
         let written = write(base, slot, &[word, !word]);
+        self.status = if written {
+            Status::Saved
+        } else {
+            Status::WriteFailed
+        };
         // Move past the slot even after a failure: it may be partly programmed.
         let following = slot + RECORD;
         self.next = (following + RECORD <= base + SECTOR).then_some((base, following));
