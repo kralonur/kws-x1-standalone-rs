@@ -90,8 +90,8 @@ This is **kws-x1-standalone-rs**.
 - Voltage, current and power in either direction, with peaks and a flow
   direction indicator.
 - D+, D-, CC1 and CC2 line voltages.
-- USB PD sink: fixed profiles up to 20 V, PPS and SPR AVS (9-20 V), chosen
-  on the meter.
+- USB PD sink: fixed profiles up to 20 V (28 V over EPR), PPS, SPR AVS
+  (9-20 V) and EPR AVS (15-30 V), chosen on the meter.
 - Quick Charge trigger: 5, 9, 12 or 20 V over D+/D−, or
   Quick Charge 3.0 0.2 V steps from 3.6 V, checked against VBUS, and a probe
   that reports Quick Charge 2.0 or 3.0 and Class A or B. On USB-C the meter
@@ -121,9 +121,11 @@ What this firmware does **not** do, for now:
   AVS up to 30 V can be selected with a real EPR cable. Fixed 36/48 V remain
   informational only. The fake marker remains 20 V/non-EPR. Keep-alive timing
   under display load still requires hardware verification.
-- **SPR AVS and the battery readout untested on hardware.** Both are built
-  from the USB PD 3.2 specification and checked in the library tests, but no
-  SPR AVS charger or battery-reporting power bank has been tried yet.
+- **SPR AVS lightly tested, the battery readout untested.** A user
+  confirmed an SPR AVS contract on one charger (9-20 V range, 15 V set,
+  `ACTIVE`, no load). The battery readout is built from the USB PD 3.2
+  specification and checked in the library tests, but no battery-reporting
+  power bank has been tried yet.
 - **Quick Charge partly tested.** Tested on one Quick Charge 3.0 Class A
   charger, on a USB-A port and on USB-C switched out of PD: fixed 9 and
   12 V, the 0.2 V steps and the probe. 20 V and Class B chargers are
@@ -384,6 +386,10 @@ programmable ranges, to request a voltage and current limit.
   `QC MODE`, `OK switch back to PD`.
 
 #### 5. AVS
+
+<img src="pictures/avs_screen.webp" width="360" alt="AVS screen">
+
+Photo thanks to [u/kurisutiano](https://www.reddit.com/user/kurisutiano/).
 
 This is the **AVS** screen (tab `AVS` in Trigger): the charger's
 adjustable voltage ranges (USB PD 3.2), to request a voltage. Unlike PPS, the
