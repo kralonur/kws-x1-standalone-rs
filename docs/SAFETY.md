@@ -128,16 +128,25 @@ charger's own CC pin, so VCONN would be driven into the charger.
 The board's 51 ms receive and 1000 ms no-progress bounds, request limits,
 refresh intervals and UI confirmation behavior are unchanged.
 
-**The board also retains a nonstandard EPR offer request** (USB PD R3.2
-section 6.5.14.1 reserves EPR_Get_Source_Cap for EPR capable Sinks). A long OK
-on the charger page sends it once, only from an idle PD3 contract with a Source
-whose first PDO sets EPR Mode Capable. Both gates allow exactly its bytes, the
-Chunk request for the next Chunk of EPR_Source_Capabilities and that Chunk; the
-answer is shown and never requested (no EPR_Request, no EPR Mode). This turns
-on the engine's chunking layer: another multi-Chunk Message now fails closed
-instead of getting Not_Supported. Not_Supported or another Message instead of
-the answer is a Protocol Error (Soft_Reset); a deferred request returns to
-Ready and is asked again after the cooldown, at most three unsent attempts.
+**EPR is explicitly confirmed and bounded** (USB PD 3.2 v1.1). The board
+advertises EPR capability in its SPR RDO, EPR Sink Capabilities and SKEDB; the
+reserved Fixed Sink PDO bits remain clear. Only fixed 28 V and AVS at or below
+30 V/5 A are requestable. The EPR maximum PDP is bounded at 150 W. A real EPR
+cable is required; the fake marker remains 20 V/non-EPR.
+
+The offer query alone never enters EPR. Confirmation starts the ordered
+Enter/Ack/Succeeded handshake under one continuous entry timer. Independent
+policy and native wire gates review mode messages, bounded capability chunks,
+exact RDO/PDO copies and keep-alive exchanges. Every request in EPR mode is an
+EPR_Request. Exit first establishes an SPR-object contract; stopping first
+requests 5 V and exits before reception is disabled. Hard Reset clears EPR
+state and uses the EPR transition-to-default timing boundaries.
+
+Keep-alive is scheduled at 375 ms on the interrupt executor, with native
+receive cancellation protection. Missing Ack causes Hard Reset. Telemetry
+records keep-alive count and maximum observed SOP silence; this is not proof
+of compliance under load. Hardware timing with continuous rendering remains
+unverified and requires an explicitly approved hardware test.
 
 **The board also retains a nonstandard cable identity** (`EMARKER` in
 `pd_spr_phy`), as the source firmware did. Only when the meter's own plug sits

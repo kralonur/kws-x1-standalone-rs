@@ -117,10 +117,10 @@ What this firmware does **not** do, for now:
   advertisement, the fixed D+/D- voltages some ports use to tell their
   current (`DIVIDER`, `1.2V DCP`) and the BC1.2 short once the Quick Charge
   test found it; a BC1.2 port looks like a plain USB port until then.
-- **No EPR.** The meter can ask for and list the EPR offer (28 V and up), but
-  it never enters EPR mode and cannot request an EPR voltage or EPR AVS.
-  Requests stay within the standard range: fixed profiles up to 20 V, PPS
-  and SPR AVS.
+- **EPR is limited to 30 V and untested on hardware.** Fixed 28 V and EPR
+  AVS up to 30 V can be selected with a real EPR cable. Fixed 36/48 V remain
+  informational only. The fake marker remains 20 V/non-EPR. Keep-alive timing
+  under display load still requires hardware verification.
 - **SPR AVS and the battery readout untested on hardware.** Both are built
   from the USB PD 3.2 specification and checked in the library tests, but no
   SPR AVS charger or battery-reporting power bank has been tried yet.
@@ -573,16 +573,16 @@ scrolls (OK) through the parts; a long offer takes two screens.
   - `FIX 9.00V 3.00A`: a fixed voltage.
   - `PPS 3.3-21.0V 5.00A`: a PPS range.
   - `AVS …A/…A`, `EAVS 15.0-48.0V 140W`: adjustable voltage (AVS) ranges,
-    shown when the charger offers them. The meter requests SPR AVS on the
-    AVS screen; it never requests EPR AVS.
+    shown when the charger offers them. Selectable EPR AVS ranges are capped
+    at 30 V; the partner page can still show the full advertised range.
   - `RAW xxxxxxxx`: an object type the meter does not decode.
 - **`*`** after a row: offered at that current only with a 5 A cable. Then
   the note `* ONLY WITH 5A CABLE`.
 - **Notes**:
-  - `HOLD OK: FULL SCAN` / `QC AND EPR; RESTARTS` (`QC, EPR, 5A; RESTARTS`
+  - `HOLD OK: FULL RESCAN` / `QC SCAN; RESTARTS` (`QC, 5A TEST; RESTARTS`
     with the plug in the charger): hold OK for the
     [full scan](#full-charger-offer-and-5-a-without-a-cable).
-  - After the scan, the EPR (28 V and up) request: `ASKING CHARGER`,
+  - The EPR (28 V and up) request: `ASKING CHARGER`,
     `NO ANSWER, HOLD OK AGAIN`, `LINE BUSY, HOLD OK AGAIN`, or in the 5 A
     cable test `HOLD OK FOR ALL`.
   - `BACK ENDS 5A CABLE TEST`: the test is running. The heading then also
@@ -850,7 +850,7 @@ charger's 60 ms filter plus PD's 550 ms supply transition limit) shows
 
 ## Full charger offer and 5 A without a cable
 
-**The full scan.** Hold OK on the Charger screen (`HOLD OK: FULL SCAN`). A
+**The full scan.** Hold OK on the Charger screen (`HOLD OK: FULL RESCAN`). A
 charger ignores Quick Charge under a PD contract, so the meter:
 
 1. Restarts the charger with a Hard Reset into a boot with PD silent, and
@@ -876,7 +876,7 @@ that question itself, as the source firmware did. It does so only in the
 would through any 3 A cable.
 
 **Running the test.** It is the last part of the full scan: on the charger
-page, hold OK (`HOLD OK: FULL SCAN`). The charger asks the cable question only
+page, hold OK (`HOLD OK: FULL RESCAN`). The charger asks the cable question only
 right after plug-in, so the meter restarts the charger to be asked again:
 
 1. After the scan's Quick Charge part, it saves a one-boot "cable test" mode
@@ -932,12 +932,20 @@ In the test:
 4. **The charger raises its offer.** From then on Source_Capabilities show the
    5 A objects, as with a real 5 A cable.
 
-**EPR objects.** The 28 V and higher objects are sent only on request. Hold OK
-on the charger page and the meter sends `EPR_Get_Source_Cap`, then collects the
-chunked `EPR_Source_Capabilities` answer. The page then lists every object the
-charger has. The request is informational only: no EPR mode is entered and no
-EPR object is requested. If the charger keeps the line busy, the request is
-retried a bounded number of times, and the page then says to hold OK again.
+**EPR objects.** The 28 V and higher objects are sent only on request. Once a
+charger whose first object sets EPR Mode Capable gives a contract, the meter
+sends `EPR_Get_Source_Cap` by itself, then collects the chunked
+`EPR_Source_Capabilities` answer. The page then lists every object the charger
+has. The query alone does not enter EPR mode.
+Confirming a supported 28 V or EPR AVS profile starts entry and reports entry
+failure in the UI. Selecting an SPR profile exits through an SPR-object
+EPR_Request; stopping first establishes a 5 V SPR contract and exits EPR mode,
+and completes even if Back is released during the exit. A real EPR cable is
+required; the fake marker is unchanged. With the meter's plug straight in the
+charger there is no cable, so the profile and AVS pages leave EPR out; the
+charger page still lists it. If the charger keeps the line busy, the
+query is retried a bounded number of times, and the page then says to hold OK
+again.
 
 **Sending while the plug sits in the charger.** In this setup the talking pin can
 show the plain default Rp level instead of the PD 3 "you may send" level. A
