@@ -2,6 +2,9 @@
 
 use super::{CableStatus, Observation, Phase, hex, put};
 
+/// USB PD vSafe5V nominal, in mV: cable reads run only on a fixed 5V contract.
+const VSAFE5V_MV: u16 = 5000;
+
 /// Sections of the cable list: identity fields six per section, the latest
 /// SVID reply in two, two per SVID for its modes, then manufacturer info and
 /// both cable statuses; one section while there is no identity.
@@ -265,7 +268,11 @@ pub fn cable_lines(observation: Observation, page: u32, svid: Option<u16>) -> [[
                     b"LIST NOT COMPLETE"
                 } else if observation.phase == Phase::Failed {
                     b"PD HALTED SEE PD PAGE"
-                } else if spr.cable_active {
+                } else if spr.cable_active
+                    || spr.supply == firmware_core::pd_spr::Supply::Fixed
+                        && spr.target_mv == VSAFE5V_MV
+                {
+                    // At fixed 5V the read for this SVID is queued or running.
                     b"READ IN PROGRESS"
                 } else {
                     b"READ NEEDS SAFE FIXED5V"
