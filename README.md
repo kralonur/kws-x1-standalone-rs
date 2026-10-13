@@ -748,7 +748,8 @@ and the overview's peaks.
 - **`BRIGHTNESS`**: five bars, 20%, 40%, 60%, 80% and 95%. Saved.
 - **`ROTATION`**: `AUTO` (follows the tilt sensor once the meter has stayed
   turned for 0.3 s, so a jolt from a button press does not flip it),
-  `NORMAL` or `FLIPPED`. Saved.
+  `NORMAL` or `FLIPPED`. Saved. Left and Right follow the screen: turned
+  over, the two arrow buttons swap.
 - **`RESET MAX`**: OK clears the overview's `MAX` values.
 - **`VERSION`**: the firmware version, shown only; the cursor skips it.
 - **Hint row**: `< > choose  OK change  BACK exit`, then

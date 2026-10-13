@@ -661,15 +661,26 @@ async fn button_task(
     };
     let input_sender = BUTTON_STATE.sender();
     let mut qc_updates = QC_STATUS.anon_receiver();
+    let mut orientation_updates = ORIENTATION.anon_receiver();
+    let mut sensed_rotation = Orientation::Normal;
+    let mut rotation = saved.rotation;
     let mut previous = Instant::now();
     let mut gap = WindowPeak::new(&BUTTON_GAP_MS);
     loop {
         let now = Instant::now();
         gap.add(now, now.duration_since(previous).as_millis() as u32);
         previous = now;
-        let raw = inputs.iter().enumerate().fold(0u8, |mask, (index, pin)| {
+        if let Some(tilted) = orientation_updates.try_changed() {
+            sensed_rotation = tilted;
+        }
+        let mut raw = inputs.iter().enumerate().fold(0u8, |mask, (index, pin)| {
             mask | (u8::from(pin.is_low()) << index)
         });
+        // The arrows follow the screen: turned over, the viewer's left button
+        // is the Right one.
+        if screen_orientation(rotation, sensed_rotation) == Orientation::Inverted {
+            raw = button_logic::swap_arrows(raw);
+        }
         // Selecting needs a sink session that has received the charger's offer.
         let observation = latest_observation();
         navigation.set_selectable(observation.spr.is_some() && observation.capabilities.is_some());
@@ -693,6 +704,7 @@ async fn button_task(
         };
         let (input, command) = navigation.update(raw);
         let command = scan_end.or(command);
+        rotation = input.settings.rotation;
         // Save once a value is no longer being changed, and before a restart
         // (a scrolling list counts as editing) so the next boot sees it.
         if !input.page.editing() || command == Some(firmware_core::buttons::PdCommand::Restart) {
@@ -709,6 +721,15 @@ async fn button_task(
             changed
         });
         Timer::after_millis(u64::from(button_logic::POLL_MS)).await;
+    }
+}
+
+/// The screen orientation the `rotation` setting picks, given the sensed one.
+fn screen_orientation(rotation: Rotation, sensed: Orientation) -> Orientation {
+    match rotation {
+        Rotation::Auto => sensed,
+        Rotation::Normal => Orientation::Normal,
+        Rotation::Flipped => Orientation::Inverted,
     }
 }
 
@@ -882,11 +903,7 @@ async fn meter_task(
         if let Some(tilted) = orientation_updates.try_changed() {
             sensed_rotation = tilted;
         }
-        let rotation_now = match input.settings.rotation {
-            Rotation::Auto => sensed_rotation,
-            Rotation::Normal => Orientation::Normal,
-            Rotation::Flipped => Orientation::Inverted,
-        };
+        let rotation_now = screen_orientation(input.settings.rotation, sensed_rotation);
         if rotation_now != current_rotation {
             // Only the display task changes MADCTL, before its matching RASET.
             unsafe {

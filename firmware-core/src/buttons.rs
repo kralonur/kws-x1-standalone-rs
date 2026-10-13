@@ -62,6 +62,13 @@ pub const RIGHT: u8 = 1 << 1;
 pub const OK: u8 = 1 << 2;
 pub const BACK: u8 = 1 << 3;
 
+/// `raw` with Left and Right swapped, for a screen turned 180 degrees: the
+/// button on the viewer's left is then the Right one.
+pub fn swap_arrows(raw: u8) -> u8 {
+    let swapped = |from, to| if raw & from != 0 { to } else { 0 };
+    raw & !(LEFT | RIGHT) | swapped(LEFT, RIGHT) | swapped(RIGHT, LEFT)
+}
+
 /// Button sampling period in milliseconds; the hold times below are counted
 /// in these samples.
 pub const POLL_MS: u32 = 10;
