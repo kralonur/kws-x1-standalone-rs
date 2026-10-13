@@ -603,7 +603,7 @@ scan or the last Quick Charge test, measured on VBUS:
 
 A failed handshake shows one `QUICK CHARGE` section with `NOT A CHARGING
 PORT` or `NO QUICK CHARGE`. Before any result it shows `NOT SCANNED YET`
-with `HOLD OK: FULL SCAN`, or without a PD contract `NOT TESTED YET` with
+with `HOLD OK: FULL RESCAN`, or without a PD contract `NOT TESTED YET` with
 `HOLD OK: TEST QC`, which runs the test on the QC 2.0 screen.
 
 **`IDENTITY`**

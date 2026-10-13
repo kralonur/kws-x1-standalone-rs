@@ -1306,8 +1306,8 @@ pub fn qc_charger_lines(findings: Option<QcFindings>, mode: QcMode, section: u32
         None if mode == QcMode::Pd => {
             line(b"QUICK CHARGE");
             line(b"NOT SCANNED YET");
-            line(b"HOLD OK: FULL SCAN");
-            line(b"(QC, PD AND EPR)");
+            line(b"HOLD OK: FULL RESCAN");
+            line(b"(QC AND PD)");
         }
         None => {
             line(b"QUICK CHARGE");
