@@ -452,8 +452,6 @@ const BACKLIGHT_CHANNEL: u8 = 7;
 /// TimerA4 counts PCLK1 / 256 (RM 21.5.4, set up by the HAL), so 1875 counts
 /// give 125 Hz at a 60 MHz PCLK1, 156 Hz at 75 MHz. Retained, hardware-tested.
 const BACKLIGHT_PERIOD: u16 = 1875;
-/// Compare at 60% of [`BACKLIGHT_PERIOD`]: the retained backlight level.
-const BACKLIGHT_COMPARE: u16 = 1125;
 
 /// Reset cause flags other than power-on, the reset pin and "multiple"
 /// (bits 2 to 13, `render::RESET_FLAGS`). Nothing clears the flags, so any
@@ -1353,7 +1351,7 @@ async fn main(spawner: Spawner) {
         //   3. Then claim the line, clear pending and enable NVIC (register()).
         // The timer arguments are constants, so this only fails on an edit
         // that breaks them; stop like a failed clock or panel start.
-        let Ok(backlight) = init_backlight(BACKLIGHT_COMPARE) else {
+        let Ok(backlight) = init_backlight(backlight_compare(settings)) else {
             loop {
                 core::hint::spin_loop();
             }
