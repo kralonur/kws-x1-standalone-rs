@@ -18,6 +18,10 @@ const PGA_GAIN: u32 = 2;
 const RMS_FRACTION: u64 = 16;
 /// Four vertical divisions, with the capture mean on the centre grid line.
 pub const VERTICAL_DIVISIONS: u32 = 4;
+/// Trigger hysteresis as a fraction of the capture's peak-to-peak: after
+/// reaching the mean, the signal must rise an eighth of its range above it.
+/// A chosen value, so noise around the mean cannot retrigger the trace.
+const TRIGGER_BAND_DIVISOR: u16 = 8;
 /// A 4 V plot spans even a one-sided excursion at 3.6 V supply / 2x gain.
 const MAX_MV_PER_DIV: u16 = 1000;
 
@@ -197,11 +201,16 @@ pub fn analyze(samples: &[u16; SAMPLE_COUNT]) -> Reading {
     let mean = (sum / SAMPLE_COUNT as u32) as u16;
     // Rising crossing only, and only where a whole trace window remains.
     // Never wrap the capture: its end and start are not adjacent in time.
-    let trigger = samples
-        .windows(2)
-        .take(SAMPLE_COUNT - TRACE_SAMPLES)
-        .position(|pair| pair[0] <= mean && pair[1] > mean)
-        .map(|index| index + 1);
+    // Arm at or below the mean, fire above it plus the hysteresis band.
+    let level = mean + (max - min) / TRIGGER_BAND_DIVISOR;
+    let mut armed = false;
+    let trigger = samples[..=SAMPLE_COUNT - TRACE_SAMPLES]
+        .iter()
+        .position(|&sample| {
+            let fired = armed && sample > level;
+            armed |= sample <= mean;
+            fired
+        });
     let start = trigger.unwrap_or(0);
     let trace = core::array::from_fn(|column| {
         let first = start + column * TRACE_SAMPLES / TRACE_COLUMNS;
@@ -363,6 +372,27 @@ mod tests {
         assert!(reading.trace.iter().all(|bin| bin.max <= 3000));
         assert_eq!(reading.peak_to_peak(), FULL_SCALE - 1000);
         assert!(reading.clipped());
+    }
+
+    #[test]
+    fn noise_at_the_mean_does_not_trigger_before_the_real_edge() {
+        // Without hysteresis the noise below crossed the mean at sample 1
+        // and the trace jumped between captures.
+        let mut samples = [1000; SAMPLE_COUNT];
+        samples[TRACE_SAMPLES..].fill(1100);
+        for (index, sample) in samples[..100].iter_mut().enumerate() {
+            *sample = if index % 2 == 0 { 1053 } else { 1056 };
+        }
+        let reading = analyze(&samples);
+        assert_eq!(reading.mean, 1055);
+        assert!(reading.triggered);
+        assert_eq!(
+            reading.trace[0],
+            Envelope {
+                min: 1100,
+                max: 1100
+            }
+        );
     }
 
     #[test]

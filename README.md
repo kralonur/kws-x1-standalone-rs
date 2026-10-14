@@ -461,9 +461,10 @@ so peaks can lie outside the visible trace.
 - **`AUTO` / `LOCK …mV/div`**: automatic or fixed vertical scale.
 - **`~70.4us/div`** or **`~56.3us/div`**, depending on clock profile: nominal
   microseconds per division, clock-derived rather than measured or calibrated.
-- **Status**: `T` means a mean-crossing trigger was found. `CLIPPED` means an ADC
-  rail was reached: amplitude is a lower bound. `OFF SCALE` means only the plot
-  cuts off peaks. `NO REF / raw` means ADC counts replace voltage scaling.
+- **Status**: `T` means a rising trigger was found, with hysteresis against
+  noise. `CLIPPED` means an ADC rail was reached: amplitude is a lower bound.
+  `OFF SCALE` means only the plot cuts off peaks. `NO REF / raw` means ADC
+  counts replace voltage scaling.
 
 **OK** first focuses without freezing; subsequent presses toggle run/hold.
 `HOLD` freezes the trace, statistics and voltage reference, but not bus V/A.
