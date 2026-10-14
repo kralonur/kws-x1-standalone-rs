@@ -2120,8 +2120,6 @@ pub fn draw_settings<D: DrawTarget<Color = Rgb565>>(
             Item::Brightness => "BRIGHTNESS",
             Item::Rotation => "ROTATION",
             Item::EnergyMemory => "ENERGY MEMORY",
-            Item::ResetEnergy => "RESET ENERGY",
-            Item::ResetPeaks => "RESET MAX",
         };
         text(
             target,
@@ -2184,16 +2182,6 @@ pub fn draw_settings<D: DrawTarget<Color = Rgb565>>(
                     Point::new(193, baseline),
                     HorizontalAlignment::Center,
                     if selected { YELLOW } else { MUTED },
-                );
-            }
-            Item::ResetEnergy | Item::ResetPeaks => {
-                text(
-                    target,
-                    &ROW,
-                    "OK",
-                    Point::new(RIGHT - 4, baseline),
-                    HorizontalAlignment::Right,
-                    if selected { MAGENTA } else { MUTED },
                 );
             }
         }
