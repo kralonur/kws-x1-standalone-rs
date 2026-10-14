@@ -386,7 +386,7 @@ checksum = "dc2d050bdc5c21e0862a89256ed8029ae6c290a93aecefc73084b3002cdebb01"
 [[package]]
 name = "embassy-hc32"
 version = "0.1.0"
-source = "git+https://github.com/kralonur/hc32f460-embassy-rs?rev=56e1c3d24bbdb33b379626b6b49a902b3337ee12#56e1c3d24bbdb33b379626b6b49a902b3337ee12"
+source = "git+https://github.com/kralonur/hc32f460-embassy-rs?rev=d8a0c73ee81fa8d34ed02eab30ddd1ff385df155#d8a0c73ee81fa8d34ed02eab30ddd1ff385df155"
 dependencies = [
  "cortex-m",
  "critical-section",
@@ -690,7 +690,7 @@ dependencies = [
 [[package]]
 name = "hc32f460-pac"
 version = "0.1.0"
-source = "git+https://github.com/kralonur/hc32f460-embassy-rs?rev=56e1c3d24bbdb33b379626b6b49a902b3337ee12#56e1c3d24bbdb33b379626b6b49a902b3337ee12"
+source = "git+https://github.com/kralonur/hc32f460-embassy-rs?rev=d8a0c73ee81fa8d34ed02eab30ddd1ff385df155#d8a0c73ee81fa8d34ed02eab30ddd1ff385df155"
 dependencies = [
  "cortex-m",
  "cortex-m-rt",
