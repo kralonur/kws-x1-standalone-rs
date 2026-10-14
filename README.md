@@ -171,7 +171,7 @@ What this firmware does **not** do, for now:
 | OK | go into the group's tabs; on a tab, select, confirm, scroll or start (see each page) | 0.5 s: page action (cable query, full charger scan); on Overview, Energy and Graph, a fill sweeps left to right and resets the page once full (about 1 s); let go earlier to cancel |
 | Back | up one level: cancel the edit or scroll, leave the tabs; from a group, back to the overview; on the overview, open the settings | – |
 
-The pages sit in three groups: **Monitor** (Overview, Lines, Energy, Graph), **Trigger**
+The pages sit in three groups: **Monitor** (Overview, Lines, Energy, Graph, Ripple), **Trigger**
 (PD Profiles, PPS, AVS, QC 2.0, QC 3.0) and **Info** (PD Session, Charger, Cable,
 System). The header shows the group's tabs as a strip, each in its own
 colour: the shown tab is named, the others fold to thin bars. A dot per group
@@ -226,6 +226,7 @@ point the way it flows (they follow the screen rotation).
 | **Lines** | D+, D-, CC1 and CC2 voltages | |
 | **Energy** | charge (Ah), energy (Wh) and the time since the last reset; how the totals are kept | hold OK: reset the totals |
 | **Graph** | power, voltage or current over the last 1, 2, 5 or 10 minutes; the latest second's and the window's highest voltage, current and power | OK, Left/Right choose power, voltage or current, OK, Left/Right change the window, OK done; Back closes; hold OK: clear the graph |
+| **Ripple** | bus ripple waveform, peak-to-peak voltage, mean-removed RMS and nominal time per division | OK focuses; OK hold/run; hold OK: vertical scale; Back exits |
 | **PD Profiles** | the charger's fixed profiles, `ACTIVE` on the one in force; with PD off for Quick Charge only `QC MODE` | OK, Left/Right to choose, OK requests it, Back cancels; in `QC MODE` OK switches back to PD |
 | **PPS** | the charger's PPS ranges, the set voltage and current limit, the live output; `ACTIVE` or `NOT APPLIED`; with PD off for Quick Charge only `QC MODE` | OK, Left/Right voltage (20 mV, 100 mV held), OK, current limit (50 mA, 250 mA held), OK requests; in `QC MODE` OK switches back to PD |
 | **AVS** | the charger's SPR AVS ranges, the set voltage and the current the meter asks for at it, the live output; `ACTIVE` or `NOT APPLIED`; with PD off for Quick Charge only `QC MODE` | OK, Left/Right voltage (100 mV, 500 mV held), OK requests; in `QC MODE` OK switches back to PD |
@@ -441,7 +442,39 @@ covers, so a short peak stays visible.
 The history is kept in RAM only (ten minutes, about 7 KB): it costs no
 flash writes, and a restart clears it and comes back on the overview.
 
-#### 5. PD Profiles
+#### 5. Ripple
+
+<img src="pictures/ripple_scope_comparison.webp" width="600" alt="Ripple screen next to a DSO Shell oscilloscope, showing similar downward steps in bus ripple">
+
+*Ripple screen next to a DSO Shell (DSO150) oscilloscope, both at 10 mV/div, under no load (trigger mode).
+The screen reads 24 mV p-p / 5.0 mV RMS, the scope 27 mV / 5 mV. Both were frozen by hand at nearly the
+same moment, so the captures are not synchronized and the waveforms can differ slightly.*
+
+The **Ripple** screen (tab `RIPPLE` in Monitor, after Graph) captures fast
+bus-voltage variations. Statistics cover 1024 samples; the plot shows 512,
+so peaks can lie outside the visible trace.
+
+- **`mV p-p`**: highest minus lowest sample.
+- **`RMS`**: ripple RMS with the capture's mean removed, not total bus RMS.
+  The scope's RMS can include a nonzero mean and is not always directly comparable.
+- **`U` / `I`**: live bus voltage and signed current, including during hold.
+- **`AUTO` / `LOCK …mV/div`**: automatic or fixed vertical scale.
+- **`~70.4us/div`** or **`~56.3us/div`**, depending on clock profile: nominal
+  microseconds per division, clock-derived rather than measured or calibrated.
+- **Status**: `T` means a mean-crossing trigger was found. `CLIPPED` means an ADC
+  rail was reached: amplitude is a lower bound. `OFF SCALE` means only the plot
+  cuts off peaks. `NO REF / raw` means ADC counts replace voltage scaling.
+
+**OK** first focuses without freezing; subsequent presses toggle run/hold.
+`HOLD` freezes the trace, statistics and voltage reference, but not bus V/A.
+**Hold OK** for 500 ms to adjust scale; Left/Right select Auto or 2–1000 mV/div.
+OK or Back closes adjustment; Back again returns to tab navigation.
+
+The photo is a single-point cross-check, not a calibration: accuracy under
+load, at other ripple frequencies and the actual sampling cadence are not
+characterized.
+
+#### 6. PD Profiles
 
 <img src="pictures/pd_profiles_screen.webp" width="360" alt="PD Profiles screen">
 
@@ -469,7 +502,7 @@ charger's fixed profiles, to request one.
   `EPR: unknown failure`, `EPR: timeout / bad reply` or
   `EPR: line busy, retry OK`.
 
-#### 6. PPS
+#### 7. PPS
 
 <img src="pictures/pps_screen.webp" width="360" alt="PPS screen">
 
@@ -492,7 +525,7 @@ programmable ranges, to request a voltage and current limit.
   `< > amps  OK request`, or `< > tabs  waiting for the charger`; in
   `QC MODE`, `< > tabs  OK switch back to PD`.
 
-#### 7. AVS
+#### 8. AVS
 
 <img src="pictures/avs_screen.webp" width="360" alt="AVS screen">
 
@@ -516,7 +549,7 @@ allows at the set voltage. SPR AVS runs from 9 V, at most 100 W; EPR AVS from
   `< > tabs  waiting for the charger`; in `QC MODE`,
   `< > tabs  OK switch back to PD`.
 
-#### 8. QC 2.0
+#### 9. QC 2.0
 
 <img src="pictures/qc2_screen.webp" width="360" alt="QC 2.0 screen">
 
@@ -548,7 +581,7 @@ the requests.
   `BACK stop  up to 20V on the output` (`BACK` once it failed); in
   `PD MODE`, `< > tabs  OK switch to QC, up to 20V`.
 
-#### 9. QC 3.0
+#### 10. QC 3.0
 
 <img src="pictures/qc3_screen.webp" width="360" alt="QC 3.0 screen">
 
@@ -572,7 +605,7 @@ screen; see [Quick Charge](#quick-charge).
   handshake, test and `PD MODE` hints as on the QC 2.0 screen, and `< > tabs`
   after `NO QC 3.0`.
 
-#### 10. PD Session
+#### 11. PD Session
 
 <img src="pictures/pd_session_screen.webp" width="360" alt="PD Session screen">
 
@@ -679,7 +712,7 @@ own PD negotiation. It scrolls (OK) through three sections.
 | `002B` | session ended without a contract |
 | `002C` | Hard Reset sent |
 
-#### 11. Charger
+#### 12. Charger
 
 <img src="pictures/charger_screen.webp" width="360" alt="Charger screen">
 
@@ -710,7 +743,7 @@ scrolls (OK) through the parts; a long offer takes two screens.
     names the reset cause (`POWER` is expected).
   - `5A TEST DID NOT START` / `HOLD OK TO TRY AGAIN`.
   - The `EPR: …` states listed under the
-    [PD Profiles](#5-pd-profiles) hint row.
+    [PD Profiles](#6-pd-profiles) hint row.
   - `NO PD SESSION`, `NO OFFER YET`.
 - **`KEEP:---- GAP:----MS`** (last row, in EPR mode): how many keep-alives
   the meter sent, and the longest gap between two PD messages it saw, in ms.
@@ -779,7 +812,7 @@ first battery, as the charger describes it.
 **Answer words** used in these sections: `OK`, `WAITING`, `NOT SUPPORTED`,
 `NO REPLY`, `BLOCKED`, `RESET`, `PD2 N/A` (not available under PD 2.0).
 
-#### 12. Cable
+#### 13. Cable
 
 <img src="pictures/cable_screen.webp" width="360" alt="Cable screen">
 
@@ -827,7 +860,7 @@ GET_STATUS`, `SECOND PLUG NO DATA`).
 **Status words**: `NOT QUERIED`, `ACK`, `NAK`, `BUSY NO RETRY`,
 `TIMEOUT NO RETRY`, `LIST INCOMPLETE`, `NOT SUPPORTED`.
 
-#### 13. System
+#### 14. System
 
 <img src="pictures/system_screen.webp" width="360" alt="System screen">
 
@@ -893,9 +926,9 @@ and energy persistence.
 
 ### Passthrough mode
 
-Passthrough shows six screens: Overview, Lines, Energy and Graph in Monitor, PD
-Sniff and System in Info; the Trigger group is left out. The Overview, Lines,
-Energy, Graph and System screens read as in sink mode.
+Passthrough shows seven screens: Overview, Lines, Energy, Graph and Ripple in
+Monitor, PD Sniff and System in Info; the Trigger group is left out. The
+Overview, Lines, Energy, Graph, Ripple and System screens read as in sink mode.
 
 #### 1. Overview in passthrough
 
@@ -908,7 +941,17 @@ offer and no contract has followed yet (`PD`, `CC1 offer, 5V`); once the
 device requests one it reads like `PD 3.0`, `CC2 9V 3.00A`. The chevrons
 show which way power flows.
 
-#### 2. PD Sniff
+#### 2. Ripple in passthrough
+
+The **Ripple** screen (`RIPPLE` in Monitor, after Graph) also works with a charger
+and device connected through the meter. It only measures: it does not request a
+voltage or change the device's PD contract.
+
+The fields, run/hold and scale controls, warnings and nominal timebase are the
+same as on the [Ripple screen above](#5-ripple). OK first focuses the page;
+subsequent presses toggle hold/run. Bus voltage/current stay live while held.
+
+#### 3. PD Sniff
 
 <img src="pictures/pd_sniff_screen.webp" width="360" alt="PD Sniff screen">
 
