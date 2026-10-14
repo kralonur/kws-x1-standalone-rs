@@ -106,7 +106,10 @@ This is **kws-x1-standalone-rs**.
 - Passthrough mode: listens to the PD messages between a charger and a device
   without taking part.
 - Brightness and auto-rotation, saved to flash.
-- Ah/Wh totals on every page, with optional energy memory: Off, 5s, 10s, 30s or 60s.
+- Charge (Ah), energy (Wh) and the time since the last reset, counted
+  whichever page shows, and optionally kept across restarts (energy memory:
+  Off, 5s, 10s, 30s or 60s).
+- A power, voltage or current graph over the last 1, 2, 5 or 10 minutes.
 
 ## Limitations
 
@@ -122,9 +125,7 @@ What this firmware does **not** do, for now:
   AVS up to 30 V can be selected with a real EPR cable. Fixed 36/48 V remain
   informational only. The fake marker remains 20 V/non-EPR. Keep-alive timing
   under display load still requires hardware verification.
-- **SPR AVS lightly tested, the battery readout untested.** A user
-  confirmed an SPR AVS contract on one charger (9-20 V range, 15 V set,
-  `ACTIVE`, no load). The battery readout is built from the USB PD 3.2
+- **The battery readout is untested.** It is built from the USB PD 3.2
   specification and checked in the library tests, but no battery-reporting
   power bank has been tried yet.
 - **Quick Charge partly tested.** Tested on one Quick Charge 3.0 Class A
@@ -144,8 +145,9 @@ What this firmware does **not** do, for now:
 - **The 5 A cable test is non-standard**, and works only with the meter's plug
   straight in the charger. See
   [Full charger offer and 5 A without a cable](#full-charger-offer-and-5-a-without-a-cable).
-- **No timer, no recording**, and no USB data connection to a computer or
-  app.
+- **No recording.** The graph keeps ten minutes in RAM only; nothing is
+  logged to flash or exported, and there is no USB data connection to a
+  computer or app.
 - **No calibration setting.** The measurement uses a fixed sensor calibration.
   The line voltages use an internal reference of 1083 mV, the stock
   firmware's value, rather than the reference manual's "about 1.1 V"
@@ -222,7 +224,7 @@ point the way it flows (they follow the screen rotation).
 
 | Page | Shows | Buttons |
 | ---- | ----- | ------- |
-| **Overview** | voltage, current, power; the highest of each since boot (`MAX`); protocol (`USB`, `TYPE-C`, `PD 2.0`, `PD 3.0`, `PPS`, `AVS`, `QC 2.0`, `QC 3.0`, `DIVIDER`, `1.2V DCP`, `BC1.2`) with the CC pin and contract; flow chevrons; a heartbeat dot | hold OK: reset `MAX`; Back: settings |
+| **Overview** | voltage, current, power; the highest of each since boot while a live page shows (`MAX`); protocol (`USB`, `TYPE-C`, `PD 2.0`, `PD 3.0`, `PPS`, `AVS`, `QC 2.0`, `QC 3.0`, `DIVIDER`, `1.2V DCP`, `BC1.2`) with the CC pin and contract; flow chevrons; a heartbeat dot | hold OK: reset `MAX`; Back: settings |
 | **Lines** | D+, D-, CC1 and CC2 voltages | |
 | **Energy** | charge (Ah), energy (Wh) and the time since the last reset; how the totals are kept | hold OK: reset the totals |
 | **Graph** | power, voltage or current over the last 1, 2, 5 or 10 minutes; the latest second's and the window's highest voltage, current and power | OK, Left/Right choose power, voltage or current, OK, Left/Right change the window, OK done; Back closes; hold OK: clear the graph |
@@ -310,8 +312,9 @@ While Left/Right move between groups, every hint row reads
 `< > groups  OK tabs`. The scrolling screens (PD Session, Charger, Cable,
 System, PD Sniff) share one hint row: `< > tabs  OK scroll`, then
 `< > scroll  OK done` while scrolling, or `< > tabs  BACK groups` when
-everything fits on one screen. Charger and Cable add their hold action:
-`hold OK scan` and `hold OK read`.
+everything fits on one screen. Charger and Cable add their hold action,
+`hold OK scan` and `hold OK read`, which replaces `BACK groups` when
+everything fits.
 
 Every hint row lists its buttons in the same order: Left/Right first, then
 OK, then a hold or Back, then any note, so on a tab it always starts with
@@ -332,8 +335,10 @@ use in the `PROTOCOL` strip along the bottom. The meter starts on it.
 - **`CURRENT`**: current in amperes, as a magnitude, whichever way it flows.
 - **`POWER`**: voltage × current, in watts.
 - **`MAX`**: the highest voltage, current and power seen since power-up or
-  the last reset. Hold OK: the card fills from left to right and the values
-  reset once it is full; let go earlier to keep them.
+  the last reset, counted while the overview, the graph or a Trigger page
+  shows (the pages with live readings). Hold OK: the card fills from left
+  to right and the values reset once it is full; let go earlier to keep
+  them.
 - **Protocol** (left in the `PROTOCOL` strip, which takes its colour): the
   first of these that applies.
   - `QC 2.0` / `QC 3.0`: this meter's Quick Charge request, while the
@@ -390,7 +395,9 @@ screen shows, or while Quick Charge runs.
   measured on one unit, and another unit's may differ by a few percent (see
   [Limitations](#limitations)).
 
-#### Energy
+#### 3. Energy
+
+<img src="pictures/energy_screen.webp" width="360" alt="Energy screen">
 
 The **Energy** screen (tab `ENERGY` in Monitor, after Lines) shows, in three
 outlined cards, **CHARGE** in Ah and **ENERGY** in Wh, with three decimals, and
@@ -405,7 +412,9 @@ checkpoint interval), `flash taken` or `save failed`, for example
 `< > tabs  hold OK reset  save 5s`. To start fresh, hold OK: the cards fill
 from left to right and reset once full.
 
-#### Graph
+#### 4. Graph
+
+<img src="pictures/graph_screen.webp" width="360" alt="Graph screen">
 
 The **Graph** screen (tab `GRAPH` in Monitor, after Energy) plots power
 (at first, green), voltage (yellow) or current (cyan) over the last
@@ -434,7 +443,7 @@ covers, so a short peak stays visible.
 The history is kept in RAM only (ten minutes, about 7 KB): it costs no
 flash writes, and a restart clears it and comes back on the overview.
 
-#### 3. PD Profiles
+#### 5. PD Profiles
 
 <img src="pictures/pd_profiles_screen.webp" width="360" alt="PD Profiles screen">
 
@@ -462,7 +471,7 @@ charger's fixed profiles, to request one.
   `EPR: unknown failure`, `EPR: timeout / bad reply` or
   `EPR: line busy, retry OK`.
 
-#### 4. PPS
+#### 6. PPS
 
 <img src="pictures/pps_screen.webp" width="360" alt="PPS screen">
 
@@ -472,7 +481,8 @@ programmable ranges, to request a voltage and current limit.
 - **`PPS RANGE`**: each PPS range the charger offers, a line each (the card
   takes one or two), for example `3.30-21.00V  up to 5.00A`.
 - **`SET VOLTAGE`**: the voltage to request, in 20 mV steps (100 mV while
-  held), from the bottom of the charger's range (often 3.3 V) to its top. The arrows show it is the value Left/Right change.
+  held), from the bottom of the charger's range (often 3.3 V) to its top.
+  The arrows show it is the value Left/Right change.
 - **`CURRENT LIMIT`**: the current limit to request, in 50 mA steps (250 mA
   while held).
 - **`OUTPUT`**: the live voltage and current, then on the right the state:
@@ -484,11 +494,9 @@ programmable ranges, to request a voltage and current limit.
   `< > amps  OK request`, or `< > tabs  waiting for the charger`; in
   `QC MODE`, `< > tabs  OK switch back to PD`.
 
-#### 5. AVS
+#### 7. AVS
 
 <img src="pictures/avs_screen.webp" width="360" alt="AVS screen">
-
-Photo thanks to [u/kurisutiano](https://www.reddit.com/user/kurisutiano/).
 
 This is the **AVS** screen (tab `AVS` in Trigger): the charger's
 adjustable voltage ranges (USB PD 3.2), to request a voltage. Unlike PPS, the
@@ -510,7 +518,7 @@ allows at the set voltage. SPR AVS runs from 9 V, at most 100 W; EPR AVS from
   `< > tabs  waiting for the charger`; in `QC MODE`,
   `< > tabs  OK switch back to PD`.
 
-#### 6. QC 2.0
+#### 8. QC 2.0
 
 <img src="pictures/qc2_screen.webp" width="360" alt="QC 2.0 screen">
 
@@ -542,7 +550,7 @@ the requests.
   `BACK stop  up to 20V on the output` (`BACK` once it failed); in
   `PD MODE`, `< > tabs  OK switch to QC, up to 20V`.
 
-#### 7. QC 3.0
+#### 9. QC 3.0
 
 <img src="pictures/qc3_screen.webp" width="360" alt="QC 3.0 screen">
 
@@ -566,7 +574,7 @@ screen; see [Quick Charge](#quick-charge).
   handshake, test and `PD MODE` hints as on the QC 2.0 screen, and `< > tabs`
   after `NO QC 3.0`.
 
-#### 8. PD Session
+#### 10. PD Session
 
 <img src="pictures/pd_session_screen.webp" width="360" alt="PD Session screen">
 
@@ -673,7 +681,7 @@ own PD negotiation. It scrolls (OK) through three sections.
 | `002B` | session ended without a contract |
 | `002C` | Hard Reset sent |
 
-#### 9. Charger
+#### 11. Charger
 
 <img src="pictures/charger_screen.webp" width="360" alt="Charger screen">
 
@@ -704,7 +712,7 @@ scrolls (OK) through the parts; a long offer takes two screens.
     names the reset cause (`POWER` is expected).
   - `5A TEST DID NOT START` / `HOLD OK TO TRY AGAIN`.
   - The `EPR: …` states listed under the
-    [PD Profiles](#3-pd-profiles) hint row.
+    [PD Profiles](#5-pd-profiles) hint row.
   - `NO PD SESSION`, `NO OFFER YET`.
 - **`KEEP:---- GAP:----MS`** (last row, in EPR mode): how many keep-alives
   the meter sent, and the longest gap between two PD messages it saw, in ms.
@@ -773,7 +781,7 @@ first battery, as the charger describes it.
 **Answer words** used in these sections: `OK`, `WAITING`, `NOT SUPPORTED`,
 `NO REPLY`, `BLOCKED`, `RESET`, `PD2 N/A` (not available under PD 2.0).
 
-#### 10. Cable
+#### 12. Cable
 
 <img src="pictures/cable_screen.webp" width="360" alt="Cable screen">
 
@@ -821,12 +829,12 @@ GET_STATUS`, `SECOND PLUG NO DATA`).
 **Status words**: `NOT QUERIED`, `ACK`, `NAK`, `BUSY NO RETRY`,
 `TIMEOUT NO RETRY`, `LIST INCOMPLETE`, `NOT SUPPORTED`.
 
-#### 11. System
+#### 13. System
 
 <img src="pictures/system_screen.webp" width="360" alt="System screen">
 
 This is the **System** screen (tab `SYSTEM` in Info): the meter's own health.
-It scrolls (OK) through two sections.
+It scrolls (OK) through three sections.
 
 **Sensor bus**
 
@@ -857,12 +865,19 @@ It scrolls (OK) through two sections.
   `MPU`, `RAMPAR`, `RAMECC`, `CLOCK`, `XTAL`, `MULTI`. After a plain plug-in
   only `POWER` is set.
 
+**`FLASH STORAGE`** (read-only)
+
+- **`ERR 00 AT 00000`**: the last failing flash operation this boot, its
+  error flags and start address (see [What is saved](#what-is-saved)).
+- **One row per storage sector**: its address, first word, and `FREE` with
+  how many words are erased (`FREE 0800` means an entirely blank sector).
+
 #### Settings
 
 <img src="pictures/settings_screen.webp" width="360" alt="Settings screen">
 
 This is the **Settings** screen (Back on the overview): display preferences
-and energy persistence. The photo predates the current rows.
+and energy persistence.
 
 - **`BRIGHTNESS`**: five bars, 20%, 40%, 60%, 80% and 95%. Saved; the backlight
   starts at the restored level, not always the default 60%.
@@ -888,9 +903,11 @@ Energy, Graph and System screens read as in sink mode.
 
 <img src="pictures/passthrough_overview_screen.webp" width="360" alt="Overview screen in passthrough">
 
-This is the **Overview** screen (tab `OVERVIEW` in Monitor) while a charger
-and a phone negotiate through the meter. The badge and status (`PD 3.0`,
-`CC2 9V 3.00A`) come from the messages the meter overheard, and the chevrons
+This is the **Overview** screen (tab `OVERVIEW` in Monitor) with a charger
+and a device on either side of the meter. The protocol and status come from
+the messages the meter overheard: in the photo the charger has sent its
+offer and no contract has followed yet (`PD`, `CC1 offer, 5V`); once the
+device requests one it reads like `PD 3.0`, `CC2 9V 3.00A`. The chevrons
 show which way power flows.
 
 #### 2. PD Sniff
@@ -1103,11 +1120,15 @@ Sink (slider at sink, then power up from a PD charger through a cable):
 
 3. The overview shows voltage, current and the flow chevrons. Tilt the meter:
    with rotation on auto, the screen follows, and Left and Right swap with
-   it. OK, Right: the lines page updates
+   it. On the overview, hold OK: `MAX` resets once the card has filled.
+   OK, Right: the lines page updates
    D+, D-, CC1 and CC2, and the CC pin the overview names reads above 0 V.
    Compare the values with a multimeter where the lines are reachable.
+   Right: Energy counts up under load. Right: Graph plots the last minutes;
+   OK and Left/Right switch the trace and window.
 4. Settings (Back on the overview): change brightness and rotation, then
-   unplug and plug in again. Both are kept. Reset peaks clears them.
+   unplug and plug in again. Both are kept. With energy memory on, the
+   Energy totals and time come back too.
 5. PD Profiles page (Trigger group, OK to reach its tabs): step through the
    profiles, confirm one, check the overview voltage, then go back to 5 V.
 6. PPS page (PPS charger): step voltage and current, confirm, check the
@@ -1163,7 +1184,8 @@ crates.io patch is needed. `fusb302-pd` has no controller driver dependency: its
 register map, bit fields and FIFO tokens come directly from the data sheet below.
 
 - `firmware/`: startup, peripheral ownership, async tasks, meter/UI and PD routing.
-- `firmware-core/`: board limits, buttons and panel geometry.
+- `firmware-core/`: board limits, buttons and navigation, panel geometry,
+  settings records, and the energy totals and graph history.
 - `firmware-image/`: shared container layout, builder, checksum validation and
   the self-unpacking release format.
 - `firmware-pack/`: host-only Rust release packing and auditing.
@@ -1267,7 +1289,8 @@ with synthetic files. They never discover or open a device.
 
 Diagnostic features are opt-in: `pd-hold-diagnostic` holds Rd without a sink
 session; `pd-boot-diagnostic` boots on the PD page and records progress;
-`cable-log` records cable inspection/fatal events; `i2c-rx-poll-diagnostic`
+`cable-log` records cable inspection/fatal events; `flash-probe` adds
+read-only flash sections to the System page; `i2c-rx-poll-diagnostic`
 enables the HAL's receive diagnostic. Flash logging writes persistent storage,
 so diagnostic images are not interchangeable with the normal build.
 
