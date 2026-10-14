@@ -168,10 +168,10 @@ What this firmware does **not** do, for now:
 | Button | Short press | Hold |
 | ------ | ----------- | ---- |
 | Left / Right | previous / next group, or tab once in a group's tabs; on a framed value, change it; while scrolling, scroll | repeats on PPS, AVS and QC 3.0 values and while scrolling |
-| OK | go into the group's tabs; on a tab, select, confirm, scroll or start (see each page) | 0.5 s: page action (cable query, full charger scan); on Overview, Graph and Energy, a fill sweeps left to right and resets the page once full (about 1 s); let go earlier to cancel |
+| OK | go into the group's tabs; on a tab, select, confirm, scroll or start (see each page) | 0.5 s: page action (cable query, full charger scan); on Overview, Energy and Graph, a fill sweeps left to right and resets the page once full (about 1 s); let go earlier to cancel |
 | Back | up one level: cancel the edit or scroll, leave the tabs; from a group, back to the overview; on the overview, open the settings | – |
 
-The pages sit in three groups: **Monitor** (Overview, Graph, Lines, Energy), **Trigger**
+The pages sit in three groups: **Monitor** (Overview, Lines, Energy, Graph), **Trigger**
 (PD Profiles, PPS, AVS, QC 2.0, QC 3.0) and **Info** (PD Session, Charger, Cable,
 System). The header shows the group's tabs as a strip, each in its own
 colour: the shown tab is named, the others fold to thin bars. A dot per group
@@ -196,7 +196,7 @@ meter in again.
   pull-downs off and sits between a charger and a device, which negotiate with
   each other as through a plain cable. The meter measures and logs their PD
   messages; it never sends, never acknowledges and never resets. Only the
-  overview, graph, lines, energy, PD session, system and settings pages are
+  overview, lines, energy, graph, PD session, system and settings pages are
   shown.
 
 ### Ways to connect
@@ -223,8 +223,9 @@ point the way it flows (they follow the screen rotation).
 | Page | Shows | Buttons |
 | ---- | ----- | ------- |
 | **Overview** | voltage, current, power; the highest of each since boot (`MAX`); protocol (`USB`, `TYPE-C`, `PD 2.0`, `PD 3.0`, `PPS`, `AVS`, `QC 2.0`, `QC 3.0`, `DIVIDER`, `1.2V DCP`, `BC1.2`) with the CC pin and contract; flow chevrons; a heartbeat dot | hold OK: reset `MAX`; Back: settings |
-| **Graph** | power, voltage or current over the last 1, 2, 5 or 10 minutes; the latest second's and the window's highest voltage, current and power | OK, Left/Right choose power, voltage or current, OK, Left/Right change the window, OK done; Back closes; hold OK: clear the graph |
 | **Lines** | D+, D-, CC1 and CC2 voltages | |
+| **Energy** | charge (Ah), energy (Wh) and the time since the last reset; how the totals are kept | hold OK: reset the totals |
+| **Graph** | power, voltage or current over the last 1, 2, 5 or 10 minutes; the latest second's and the window's highest voltage, current and power | OK, Left/Right choose power, voltage or current, OK, Left/Right change the window, OK done; Back closes; hold OK: clear the graph |
 | **PD Profiles** | the charger's fixed profiles, `ACTIVE` on the one in force; with PD off for Quick Charge only `QC MODE` | OK, Left/Right to choose, OK requests it, Back cancels; in `QC MODE` OK switches back to PD |
 | **PPS** | the charger's PPS ranges, the set voltage and current limit, the live output; `ACTIVE` or `NOT APPLIED`; with PD off for Quick Charge only `QC MODE` | OK, Left/Right voltage (20 mV, 100 mV held), OK, current limit (50 mA, 250 mA held), OK requests; in `QC MODE` OK switches back to PD |
 | **AVS** | the charger's SPR AVS ranges, the set voltage and the current the meter asks for at it, the live output; `ACTIVE` or `NOT APPLIED`; with PD off for Quick Charge only `QC MODE` | OK, Left/Right voltage (100 mV, 500 mV held), OK requests; in `QC MODE` OK switches back to PD |
@@ -363,35 +364,6 @@ use in the `PROTOCOL` strip along the bottom. The meter starts on it.
   runs; red when the sensor bus is closed (see the System screen).
 - **Hint row**: `< > tabs  hold OK reset`.
 
-#### Graph
-
-The **Graph** screen (tab `GRAPH` in Monitor, after Overview) plots power
-(at first, green), voltage (yellow) or current (cyan) over the last
-`1 MIN`, `2 MIN` (at first), `5 MIN` or `10 MIN`, newest on the right. Each second is the average of its readings; where a window has
-more seconds than the plot has pixels, a column shows the highest second it
-covers, so a short peak stays visible.
-
-- **`NOW/MAX`** (a card above the plot): for voltage, current and power,
-  the last full second's value, then the highest within the window, each on
-  its own, e.g. `9.01/9.10V  2.98/3.02A  26.85/27.40W`.
-- **Scale**: from zero to a round number at least 10% above the plotted
-  quantity's `MAX` (1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6 or 8 times a power of
-  ten: 22 W shows on a `25W` scale, 9 V on `10V`), named in grey at the top
-  left of the plot.
-- **Trace and window** (top right of the plot): `POWER  2 MIN`, the trace in its
-  colour. OK opens the trace (`< POWER >`): Left/Right choose power,
-  voltage or current. OK moves to the window (`< 2 MIN >` in cyan):
-  Left/Right change it. OK again, or Back at either step, closes. Both last
-  until a restart.
-- A second without a reading leaves a gap.
-- **Reset**: hold OK and the `NOW/MAX` card fills from left to right; once full,
-  the history clears and the plot starts over. Let go earlier to keep it.
-- **Hint row**: `< > tabs  OK choose  hold OK reset`, then `< > trace  OK time` and
-  `< > time  OK done`.
-
-The history is kept in RAM only (ten minutes, about 7 KB): it costs no
-flash writes, and a restart clears it and comes back on the overview.
-
 #### 2. Lines
 
 <img src="pictures/lines_screen.webp" width="360" alt="Lines screen">
@@ -427,6 +399,35 @@ The hint row ends with how the totals are kept: `RAM only`, `save 5s` (the
 checkpoint interval), `flash taken` or `save failed`, for example
 `< > tabs  hold OK reset  save 5s`. To start fresh, hold OK: the cards fill
 from left to right and reset once full.
+
+#### Graph
+
+The **Graph** screen (tab `GRAPH` in Monitor, after Energy) plots power
+(at first, green), voltage (yellow) or current (cyan) over the last
+`1 MIN`, `2 MIN` (at first), `5 MIN` or `10 MIN`, newest on the right. Each second is the average of its readings; where a window has
+more seconds than the plot has pixels, a column shows the highest second it
+covers, so a short peak stays visible.
+
+- **`NOW/MAX`** (a card above the plot): for voltage, current and power,
+  the last full second's value, then the highest within the window, each on
+  its own, e.g. `9.01/9.10V  2.98/3.02A  26.85/27.40W`.
+- **Scale**: from zero to a round number at least 10% above the plotted
+  quantity's `MAX` (1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6 or 8 times a power of
+  ten: 22 W shows on a `25W` scale, 9 V on `10V`), named in grey at the top
+  left of the plot.
+- **Trace and window** (top right of the plot): `POWER  2 MIN`, the trace in its
+  colour. OK opens the trace (`< POWER >`): Left/Right choose power,
+  voltage or current. OK moves to the window (`< 2 MIN >` in cyan):
+  Left/Right change it. OK again, or Back at either step, closes. Both last
+  until a restart.
+- A second without a reading leaves a gap.
+- **Reset**: hold OK and the `NOW/MAX` card fills from left to right; once full,
+  the history clears and the plot starts over. Let go earlier to keep it.
+- **Hint row**: `< > tabs  OK choose  hold OK reset`, then `< > trace  OK time` and
+  `< > time  OK done`.
+
+The history is kept in RAM only (ten minutes, about 7 KB): it costs no
+flash writes, and a restart clears it and comes back on the overview.
 
 #### 3. PD Profiles
 

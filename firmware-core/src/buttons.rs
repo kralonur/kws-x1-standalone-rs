@@ -150,7 +150,7 @@ impl Group {
 
     /// The group's tabs, in Left/Right order.
     const fn tabs(self) -> &'static [Tab] {
-        const MONITOR: [Tab; 4] = [Tab::Overview, Tab::Graph, Tab::Lines, Tab::Energy];
+        const MONITOR: [Tab; 4] = [Tab::Overview, Tab::Lines, Tab::Energy, Tab::Graph];
         const TRIGGER: [Tab; MAX_TABS] = [Tab::Fixed, Tab::Pps, Tab::Avs, Tab::Qc2, Tab::Qc3];
         const INFO: [Tab; 4] = [
             Tab::detail(Detail::Pd),
