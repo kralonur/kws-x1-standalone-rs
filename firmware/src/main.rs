@@ -31,6 +31,7 @@ mod qc_drive;
 mod pd_service;
 mod pd_sniff;
 mod render;
+mod ripple;
 mod settings_store;
 mod storage_diag;
 mod ui;
@@ -320,8 +321,14 @@ static ORIENTATION: Watch<CriticalSectionRawMutex, Orientation, 1> = Watch::new(
 /// the lines page is shown; `meter_task` draws them.
 static LINE_VOLTAGES: Watch<CriticalSectionRawMutex, Option<line_adc::LineVoltages>, 1> =
     Watch::new();
+/// ADC2 reference count; cleared when scans are idle or fail, never replaced
+/// with a nominal supply voltage for the ripple estimate.
+static ADC_REFERENCE: Watch<CriticalSectionRawMutex, Option<u16>, 1> = Watch::new();
 /// Quick Charge trigger state: `line_task` sends it, `meter_task` draws it.
 static QC_STATUS: Watch<CriticalSectionRawMutex, qc_drive::Status, 1> = Watch::new();
+/// Ripple captures: acquisition task publishes, display task consumes.
+static RIPPLE: Watch<CriticalSectionRawMutex, Option<firmware_core::ripple::Reading>, 1> =
+    Watch::new();
 
 /// Failed `intc::register` calls. The INTC is not reset by a jump into this
 /// image, so a `SEL` entry left mapped by the bootloader makes routing fail;
@@ -347,6 +354,15 @@ const PANEL_DMA_EVENTS: [(u16, embassy_hc32::intc::Line); 2] = [
         line(38),
     ),
     (panel::DMA_UNIT.error_event().0, line(39)),
+];
+/// DMA1 TC0 = 32 and ERR = 48 share group 1's lines 38..=43 with the
+/// panel; use separate lines so each handler touches only its own unit.
+const RIPPLE_DMA_EVENTS: [(u16, embassy_hc32::intc::Line); 2] = [
+    (
+        ripple::DMA_UNIT.complete_event(ripple::DMA_CHANNEL).0,
+        line(40),
+    ),
+    (ripple::DMA_UNIT.error_event().0, line(41)),
 ];
 /// NVIC priorities (lower is more urgent). Both stay below SysTick (0), so
 /// timing never starves; bus and tilt wakes rank ahead of the PD alert.
@@ -420,6 +436,16 @@ fn INT038() {
 #[cortex_m_rt::interrupt]
 fn INT039() {
     embassy_hc32::dma::on_interrupt(panel::DMA_UNIT);
+}
+
+/// Ripple DMA completion and error events.
+#[cortex_m_rt::interrupt]
+fn INT040() {
+    embassy_hc32::dma::on_interrupt(ripple::DMA_UNIT);
+}
+#[cortex_m_rt::interrupt]
+fn INT041() {
+    embassy_hc32::dma::on_interrupt(ripple::DMA_UNIT);
 }
 
 /// SPI3 TX-empty, physical idle and error sources (group 9, lines 86..88).
@@ -591,26 +617,32 @@ async fn held_high(tilt: &embassy_hc32::exti::ExtiInput) -> bool {
     false
 }
 
-/// Scan the line voltages at the meter's read pace while the overview, the
-/// lines or a Quick Charge tab is shown or the trigger runs, ADC2 idle
+/// Scan the line voltages and reference at the meter's read pace while the
+/// overview, lines, ripple or a Quick Charge tab is shown or the trigger runs, ADC2 idle
 /// otherwise, and step the Quick Charge trigger toward the request in force,
 /// whichever tab is shown. Without one it releases D+/D−.
 #[embassy_executor::task]
 async fn line_task(mut adc: line_adc::LineAdc, mut trigger: qc_drive::Trigger) {
     let lines_sender = LINE_VOLTAGES.sender();
+    let reference_sender = ADC_REFERENCE.sender();
     let status_sender = QC_STATUS.sender();
     loop {
         let input = BUTTON_STATE.try_get();
         let request = input.and_then(button_logic::Input::qc_request);
-        // The trigger watches D− during its handshake.
-        let lines =
-            if request.is_some() || input.is_some_and(|input| input.page.view().shows_lines()) {
-                let lines = adc.read().await;
-                lines_sender.send(lines);
-                lines
-            } else {
-                None
-            };
+        // The trigger watches D− during its handshake. Ripple also needs a
+        // current ADC2 reference, but it never takes ownership of that ADC.
+        let scan = if request.is_some()
+            || input.is_some_and(|input| {
+                let view = input.page.view();
+                view.shows_lines() || view == View::Ripple
+            }) {
+            adc.read().await
+        } else {
+            None
+        };
+        let lines = scan.map(|(lines, _)| lines);
+        lines_sender.send(lines);
+        reference_sender.send(scan.map(|(_, reference)| reference));
         // The trigger judges requests by the output, read here rather than
         // at the meter page's frame pace.
         let vbus_mv = match request {
@@ -837,6 +869,7 @@ async fn meter_task(
     saved: firmware_core::settings::Settings,
     mut energy_store: Option<energy_store::Store>,
     mut energy_save_status: energy_store::Status,
+    ripple_tenths_us_per_div: Option<u32>,
 ) {
     let fb = framebuffer();
     let mut input_updates = BUTTON_STATE.anon_receiver();
@@ -864,6 +897,10 @@ async fn meter_task(
     let mut last_raw_i: Option<u16> = None;
     let mut line_updates = LINE_VOLTAGES.anon_receiver();
     let mut lines = None;
+    let mut ripple_updates = RIPPLE.anon_receiver();
+    let mut ripple_reading: Option<firmware_core::ripple::Reading> = None;
+    let mut reference_updates = ADC_REFERENCE.anon_receiver();
+    let mut ripple_reference = None;
     let mut qc_updates = QC_STATUS.anon_receiver();
     let mut qc_status = qc_drive::Status::Off;
     // Peaks follow the meter page's reads; a reset hold on the overview
@@ -986,8 +1023,8 @@ async fn meter_task(
             next_read = now + METER_READ_PERIOD;
             let raw_v = read_meter(ina226::BUS_VOLTAGE).await;
             let raw_i = read_meter(ina226::CURRENT).await;
-            changed |=
-                (reads_current || pd_details) && (raw_v != last_raw_v || raw_i != last_raw_i);
+            changed |= (reads_current || pd_details || view == View::Ripple)
+                && (raw_v != last_raw_v || raw_i != last_raw_i);
             changed |= pd_details;
             last_raw_v = raw_v;
             last_raw_i = raw_i;
@@ -1036,6 +1073,21 @@ async fn meter_task(
         if let Some(update) = line_updates.try_changed() {
             lines = update;
             changed |= view.shows_lines();
+        }
+        // Freeze the reference together with the capture, so supply updates
+        // cannot change held statistics. Drain in-flight updates without using
+        // them; bus V/A above remain live, even while the trace is held.
+        if let Some(update) = reference_updates.try_changed()
+            && !input.ripple_hold
+        {
+            ripple_reference = update;
+            changed |= view == View::Ripple;
+        }
+        if let Some(update) = ripple_updates.try_changed()
+            && !input.ripple_hold
+        {
+            ripple_reading = update;
+            changed |= view == View::Ripple;
         }
         if let Some(update) = qc_updates.try_changed() {
             qc_status = update;
@@ -1128,6 +1180,25 @@ async fn meter_task(
                 View::Lines => {
                     render::clear(frame);
                     ui::draw_lines(&mut Canvas(frame), &header, lines);
+                }
+                View::Ripple => {
+                    render::clear(frame);
+                    ui::draw_ripple(
+                        &mut Canvas(frame),
+                        &header,
+                        &ui::Ripple {
+                            reading: ripple_reading.as_ref(),
+                            reference: ripple_reference,
+                            bus: reading(last_raw_v, last_raw_i),
+                            hold: input.ripple_hold,
+                            scale: input.ripple_scale,
+                            nominal_tenths_us_per_div: ripple_tenths_us_per_div,
+                            focus: match page {
+                                Page::Open(button_logic::Open::Ripple(focus)) => Some(focus),
+                                _ => None,
+                            },
+                        },
+                    );
                 }
                 View::Qc2(preview) => {
                     let mode = qc_mode(latest_observation());
@@ -1411,6 +1482,7 @@ async fn main(spawner: Spawner) {
 
     let backlight_pwm;
     let line_adc;
+    let mut ripple_adc;
     let qc_trigger;
     let button_inputs;
     let tilt_input;
@@ -1438,6 +1510,8 @@ async fn main(spawner: Spawner) {
             }
         };
         line_adc = adc;
+        // Independent PA2 capture. Failure leaves only ripple unavailable.
+        ripple_adc = ripple::new().await.ok();
         // PB3, PB4, PB8 and PB9 (free after the JTAG release) drive D+/D−
         // only for the Quick Charge page.
         qc_trigger = qc_drive::Trigger::new();
@@ -1513,6 +1587,14 @@ async fn main(spawner: Spawner) {
             }
         }
 
+        for (event, line) in RIPPLE_DMA_EVENTS {
+            if embassy_hc32::intc::register(event, line, BUS_PRIORITY).is_err() {
+                IRQ_REG_FAILURES.fetch_add(1, Ordering::Relaxed);
+                // Never start DMA when its wake sources are not both routed.
+                ripple_adc = None;
+            }
+        }
+
         // Configure the INA226 and the LIS3DH over the async master.
         for (reg, value) in ina226::INIT {
             if !write_meter(reg, value).await {
@@ -1558,6 +1640,9 @@ async fn main(spawner: Spawner) {
             settings,
             energy_store,
             energy_save_status,
+            ripple_adc
+                .as_ref()
+                .and_then(|_| ripple::nominal_tenths_us_per_div(clocks.pclk[2])),
         )
         .expect(ONE_SPAWN),
     );
@@ -1568,5 +1653,6 @@ async fn main(spawner: Spawner) {
     spawner.spawn(pulse_task().expect(ONE_SPAWN));
     spawner.spawn(tilt_task(tilt_input).expect(ONE_SPAWN));
     spawner.spawn(line_task(line_adc, qc_trigger).expect(ONE_SPAWN));
+    spawner.spawn(ripple::run(ripple_adc).expect(ONE_SPAWN));
     spawner.spawn(button_task(button_inputs, store, settings, requested, resume).expect(ONE_SPAWN));
 }

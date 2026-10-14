@@ -6,6 +6,7 @@
 //! the device.
 
 use crate::power_history::{GraphTrace, GraphWindow};
+use crate::ripple::Scale as RippleScale;
 use crate::settings::{Item, NextBoot, QcFindings, Screen, Settings};
 use qc_protocol::detect::Report;
 use qc_protocol::qc2::Voltage;
@@ -150,7 +151,13 @@ impl Group {
 
     /// The group's tabs, in Left/Right order.
     const fn tabs(self) -> &'static [Tab] {
-        const MONITOR: [Tab; 4] = [Tab::Overview, Tab::Lines, Tab::Energy, Tab::Graph];
+        const MONITOR: [Tab; MAX_TABS] = [
+            Tab::Overview,
+            Tab::Lines,
+            Tab::Energy,
+            Tab::Graph,
+            Tab::Ripple,
+        ];
         const TRIGGER: [Tab; MAX_TABS] = [Tab::Fixed, Tab::Pps, Tab::Avs, Tab::Qc2, Tab::Qc3];
         const INFO: [Tab; 4] = [
             Tab::detail(Detail::Pd),
@@ -195,6 +202,8 @@ pub enum Tab {
     Lines,
     /// Accumulated charge and energy.
     Energy,
+    /// Uncalibrated ADC ripple capture.
+    Ripple,
     /// Fixed PD profile selector.
     Fixed,
     /// PPS voltage and current selector.
@@ -218,6 +227,7 @@ impl From<Tab> for Screen {
             Tab::Overview | Tab::Graph => Self::Overview,
             Tab::Lines => Self::Lines,
             Tab::Energy => Self::Energy,
+            Tab::Ripple => Self::Ripple,
             Tab::Fixed => Self::Fixed,
             Tab::Pps => Self::Pps,
             Tab::Avs => Self::Avs,
@@ -239,6 +249,7 @@ impl From<Screen> for Tab {
             Screen::Overview => Self::Overview,
             Screen::Lines => Self::Lines,
             Screen::Energy => Self::Energy,
+            Screen::Ripple => Self::Ripple,
             Screen::Fixed => Self::Fixed,
             Screen::Pps => Self::Pps,
             Screen::Avs => Self::Avs,
@@ -260,7 +271,9 @@ impl Tab {
 
     pub const fn group(self) -> Group {
         match self {
-            Self::Overview | Self::Graph | Self::Lines | Self::Energy => Group::Monitor,
+            Self::Overview | Self::Graph | Self::Lines | Self::Energy | Self::Ripple => {
+                Group::Monitor
+            }
             Self::Fixed | Self::Pps | Self::Avs | Self::Qc2 | Self::Qc3 => Group::Trigger,
             Self::Detail { .. } => Group::Info,
         }
@@ -285,6 +298,7 @@ impl Tab {
                     | Self::Graph
                     | Self::Lines
                     | Self::Energy
+                    | Self::Ripple
                     | Self::Detail {
                         page: Detail::Pd | Detail::System,
                         ..
@@ -299,6 +313,15 @@ impl Tab {
         let index = tabs.iter().position(|tab| tab.same(self)).unwrap_or(0);
         cycle_where(tabs, index, forward, |tab| tab.available(passthrough)).unwrap_or(self)
     }
+}
+
+/// What the focused ripple page controls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RippleFocus {
+    /// OK toggles hold; long OK opens scale adjustment.
+    Capture,
+    /// Left/Right choose the vertical scale; OK or Back returns to capture.
+    Scale,
 }
 
 /// An open tab and what Left/Right and OK do there. The overview and the
@@ -322,6 +345,8 @@ pub enum Open {
     Detail { page: Detail, top: u16 },
     /// Left/Right change what the graph plots, or its window.
     Graph(GraphFocus),
+    /// Capture controls or vertical-scale adjustment within the ripple page.
+    Ripple(RippleFocus),
 }
 
 impl Open {
@@ -336,6 +361,7 @@ impl Open {
             Self::Qc3 => Tab::Qc3,
             Self::Detail { page, top } => Tab::Detail { page, top },
             Self::Graph(_) => Tab::Graph,
+            Self::Ripple(_) => Tab::Ripple,
         }
     }
 }
@@ -357,6 +383,7 @@ pub enum View {
     Graph(Option<GraphFocus>),
     Lines,
     Energy,
+    Ripple,
     Fixed {
         choosing: bool,
     },
@@ -653,6 +680,7 @@ impl Page {
                 Tab::Graph => View::Graph(None),
                 Tab::Lines => View::Lines,
                 Tab::Energy => View::Energy,
+                Tab::Ripple => View::Ripple,
                 Tab::Fixed => View::Fixed { choosing: false },
                 Tab::Pps => View::Pps(None),
                 Tab::Avs => View::Avs { adjusting: false },
@@ -677,6 +705,7 @@ impl Page {
                     scrolling: true,
                 },
                 Open::Graph(focus) => View::Graph(Some(focus)),
+                Open::Ripple(_) => View::Ripple,
             },
             Self::Settings(focus) => View::Settings(focus),
         }
@@ -710,6 +739,7 @@ impl Page {
                     | Open::Qc3
                     | Open::Detail { .. }
                     | Open::Graph(_)
+                    | Open::Ripple(RippleFocus::Scale)
             ) | Self::Settings(
                 SettingsFocus::Brightness | SettingsFocus::Rotation | SettingsFocus::EnergyMemory
             )
@@ -766,6 +796,9 @@ pub struct Input {
     /// What the graph plots and how far back it reaches; this boot only.
     pub graph_trace: GraphTrace,
     pub graph_window: GraphWindow,
+    /// Freeze only the ripple waveform/statistics; bus V/A stay live.
+    pub ripple_hold: bool,
+    pub ripple_scale: RippleScale,
 }
 
 impl Input {
@@ -1053,6 +1086,10 @@ impl Navigation {
     /// What a long OK does here: `None` when the page has no long OK, else
     /// the PD command it sends, if any.
     fn long_ok(&mut self) -> Option<Option<PdCommand>> {
+        if self.input.page == Page::Open(Open::Ripple(RippleFocus::Capture)) {
+            self.input.page = Page::Open(Open::Ripple(RippleFocus::Scale));
+            return Some(None);
+        }
         let Some(Tab::Detail { page, .. }) = self.input.page.tab() else {
             return None;
         };
@@ -1087,6 +1124,9 @@ impl Navigation {
             Page::Groups(_) | Page::Settings(SettingsFocus::Row(_)) => Page::default(),
             Page::Settings(focus) => Page::Settings(SettingsFocus::Row(focus.row())),
             Page::Tabs(tab) => Page::Groups(tab),
+            Page::Open(Open::Ripple(RippleFocus::Scale)) => {
+                Page::Open(Open::Ripple(RippleFocus::Capture))
+            }
             Page::Open(open) => Page::Tabs(open.tab()),
         };
     }
@@ -1136,7 +1176,15 @@ impl Navigation {
                 }
             }
             // The probe runs until it ends or Back.
-            Page::Open(Open::Probe(_)) => {}
+            Page::Open(Open::Probe(_) | Open::Ripple(RippleFocus::Capture)) => {}
+            Page::Open(Open::Ripple(RippleFocus::Scale)) => {
+                let all = RippleScale::ALL;
+                let index = all
+                    .iter()
+                    .position(|s| *s == input.ripple_scale)
+                    .unwrap_or(0);
+                input.ripple_scale = cycle(&all, index, forward);
+            }
             Page::Open(Open::Graph(GraphFocus::Trace)) => {
                 let all = GraphTrace::ALL;
                 let index = all
@@ -1174,6 +1222,14 @@ impl Navigation {
         let (page, command) = match input.page {
             Page::Groups(tab) => (Page::Tabs(tab), None),
             page @ Page::Tabs(Tab::Overview | Tab::Lines | Tab::Energy) => (page, None),
+            Page::Tabs(Tab::Ripple) => (Page::Open(Open::Ripple(RippleFocus::Capture)), None),
+            page @ Page::Open(Open::Ripple(RippleFocus::Capture)) => {
+                input.ripple_hold = !input.ripple_hold;
+                (page, None)
+            }
+            Page::Open(Open::Ripple(RippleFocus::Scale)) => {
+                (Page::Open(Open::Ripple(RippleFocus::Capture)), None)
+            }
             Page::Tabs(Tab::Graph) => (Page::Open(Open::Graph(GraphFocus::Trace)), None),
             Page::Open(Open::Graph(GraphFocus::Trace)) => {
                 (Page::Open(Open::Graph(GraphFocus::Window)), None)

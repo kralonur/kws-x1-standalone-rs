@@ -12,6 +12,7 @@ pub const APP_BASE: u32 = 0x10000;
 pub mod latch;
 pub mod panel;
 pub mod power_history;
+pub mod ripple;
 pub mod settings;
 pub mod stack;
 // Compatibility paths for the firmware; implementations live in the shared

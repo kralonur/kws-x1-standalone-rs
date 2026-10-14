@@ -9,7 +9,8 @@ use embedded_graphics::primitives::{
     Circle, Line, PrimitiveStyle, Rectangle, RoundedRectangle, StyledDrawable, Triangle,
 };
 use firmware_core::buttons::{
-    Detail, GraphFocus, Level, PpsFocus, Qc2Choice, QcOffer, RESET_STEPS, SettingsFocus, Tab,
+    Detail, GraphFocus, Level, PpsFocus, Qc2Choice, QcOffer, RESET_STEPS, RippleFocus,
+    SettingsFocus, Tab,
 };
 use firmware_core::dcp::Dcp;
 use firmware_core::energy::Totals;
@@ -294,6 +295,7 @@ fn tab_style(tab: Tab, passthrough: bool) -> (&'static str, Rgb565) {
     match tab {
         Tab::Overview => ("OVERVIEW", CYAN),
         Tab::Graph => ("GRAPH", CYAN),
+        Tab::Ripple => ("RIPPLE", CYAN),
         Tab::Lines => ("LINES", YELLOW),
         Tab::Energy => ("ENERGY", GREEN),
         Tab::Fixed => ("PD PROFILES", GREEN),
@@ -1353,6 +1355,207 @@ pub fn draw_lines<D: DrawTarget<Color = Rgb565>>(
         ],
     );
     hint(target, header, "< > tabs  approximate");
+}
+
+/// Waveform/statistics can be held independently of the live bus reading.
+pub struct Ripple<'a> {
+    pub reading: Option<&'a firmware_core::ripple::Reading>,
+    pub reference: Option<u16>,
+    pub bus: Option<Reading>,
+    pub hold: bool,
+    pub scale: firmware_core::ripple::Scale,
+    pub focus: Option<RippleFocus>,
+    pub nominal_tenths_us_per_div: Option<u32>,
+}
+
+/// Estimated voltage scale and nominal clock-derived timebase, not calibration.
+pub fn draw_ripple<D: DrawTarget<Color = Rgb565>>(
+    target: &mut D,
+    header: &Header<'_>,
+    page: &Ripple<'_>,
+) {
+    use crate::line_adc::REFERENCE_MV;
+    use firmware_core::ripple::{HORIZONTAL_DIVISIONS, Scale, VERTICAL_DIVISIONS};
+    // Pixels: metrics above a four-division, 56-pixel plot, live bus/scale
+    // below it, then status/nominal timebase and the control hint.
+    const VALUE_Y: i32 = 37;
+    const BUS_Y: i32 = 109;
+    const TOP: i32 = 40;
+    const BOTTOM: i32 = 96;
+    const STATUS_Y: i32 = 120;
+    const COLUMN_PITCH: i32 = 2;
+    draw_header(target, header);
+    let normalized = page.reading.zip(page.reference);
+    let mv = normalized.and_then(|(r, reference)| r.peak_to_peak_mv(reference, REFERENCE_MV));
+    let rms = normalized.and_then(|(r, reference)| r.rms_tenths_mv(reference, REFERENCE_MV));
+    let value = mv.map_or_else(
+        || Label::new().push(b"--"),
+        |mv| Label::new().fixed(u32::from(mv), 0),
+    );
+    value_with_unit(
+        target,
+        &BOLD,
+        &value,
+        "mV p-p",
+        Point::new(LEFT, VALUE_Y),
+        CYAN,
+    );
+    let rms = match rms {
+        Some(rms) => Label::new()
+            .push(b"RMS ")
+            .fixed(u32::from(rms), 1)
+            .push(b"mV"),
+        None => Label::new().push(b"RMS --mV"),
+    };
+    text(
+        target,
+        &PLAIN,
+        rms.as_str(),
+        Point::new(RIGHT, VALUE_Y - 1),
+        HorizontalAlignment::Right,
+        WHITE,
+    );
+    let bus = match page.bus {
+        Some(bus) => Label::new()
+            .push(b"U ")
+            .fixed(bus.mv, 3)
+            .push(b"V I ")
+            .push(if bus.ma < 0 { b"-" } else { b"" })
+            .fixed(bus.ma.unsigned_abs(), 3)
+            .push(b"A"),
+        None => Label::new().push(b"U --V I --A"),
+    };
+    text(
+        target,
+        &PLAIN,
+        bus.as_str(),
+        Point::new(LEFT, BUS_Y),
+        HorizontalAlignment::Left,
+        WHITE,
+    );
+    let plot = page
+        .reading
+        .map(|r| r.plot_scale(page.scale, page.reference, REFERENCE_MV));
+    let scale = match plot.and_then(|plot| plot.mv_per_div) {
+        Some(mv) => Label::new()
+            .push(if page.scale == Scale::Auto {
+                b"AUTO "
+            } else {
+                b"LOCK "
+            })
+            .fixed(u32::from(mv), 0)
+            .push(b"mV/div"),
+        None => Label::new().push(b"RAW AUTO"),
+    };
+    text(
+        target,
+        &PLAIN,
+        scale.as_str(),
+        Point::new(RIGHT, BUS_Y),
+        HorizontalAlignment::Right,
+        if page.focus == Some(RippleFocus::Scale) {
+            YELLOW
+        } else {
+            MUTED
+        },
+    );
+    if let (Some(reading), Some(plot)) = (page.reading, plot) {
+        let y = |count: u16| {
+            let count = i32::from(count).clamp(plot.min, plot.max);
+            BOTTOM - (count - plot.min) * (BOTTOM - TOP) / (plot.max - plot.min)
+        };
+        for division in 0..=VERTICAL_DIVISIONS as i32 {
+            let row = TOP + division * (BOTTOM - TOP) / VERTICAL_DIVISIONS as i32;
+            Line::new(Point::new(LEFT, row), Point::new(RIGHT - 1, row))
+                .into_styled(PrimitiveStyle::with_stroke(RULE, 1))
+                .draw(target)
+                .ok();
+        }
+        for division in 0..=HORIZONTAL_DIVISIONS as i32 {
+            let x = LEFT + division * (RIGHT - LEFT - 1) / HORIZONTAL_DIVISIONS as i32;
+            Line::new(Point::new(x, TOP), Point::new(x, BOTTOM))
+                .into_styled(PrimitiveStyle::with_stroke(RULE, 1))
+                .draw(target)
+                .ok();
+        }
+        let mut previous = None;
+        for (column, bin) in reading.trace.iter().enumerate() {
+            let x = LEFT + column as i32 * COLUMN_PITCH;
+            let low = y(bin.min);
+            let high = y(bin.max);
+            Line::new(Point::new(x, low), Point::new(x, high))
+                .into_styled(PrimitiveStyle::with_stroke(CYAN, 1))
+                .draw(target)
+                .ok();
+            let centre = Point::new(x, (low + high) / 2);
+            if let Some(previous) = previous {
+                Line::new(previous, centre)
+                    .into_styled(PrimitiveStyle::with_stroke(CYAN, 1))
+                    .draw(target)
+                    .ok();
+            }
+            previous = Some(centre);
+        }
+    } else {
+        text(
+            target,
+            &BOLD,
+            "NO CAPTURE",
+            Point::new(WIDTH as i32 / 2, (TOP + BOTTOM) / 2),
+            HorizontalAlignment::Center,
+            MUTED,
+        );
+    }
+    let clipped = page.reading.is_some_and(|r| r.clipped());
+    let limited = plot.is_some_and(|plot| plot.limited);
+    let status = Label::new().push(if page.hold { b"HOLD " } else { b"RUN " });
+    let status = match page.reading {
+        None => status.push(b"NO CAPTURE"),
+        Some(_) if clipped => status.push(b"CLIPPED lower bound"),
+        Some(_) if mv.is_none() => status.push(b"NO REF / raw"),
+        Some(_) if limited => status.push(b"OFF SCALE / uncal"),
+        Some(r) if page.focus == Some(RippleFocus::Scale) => status
+            .fixed(u32::from(r.peak_to_peak()), 0)
+            .push(b"ct / uncal"),
+        Some(r) => status.push(if r.triggered { b"T / uncal" } else { b"uncal" }),
+    };
+    text(
+        target,
+        &PLAIN,
+        status.as_str(),
+        Point::new(LEFT, STATUS_Y),
+        HorizontalAlignment::Left,
+        if clipped || limited {
+            ORANGE
+        } else if page.hold {
+            YELLOW
+        } else {
+            MUTED
+        },
+    );
+    // ASCII `us` is microseconds; `~` marks a nominal, unmeasured timebase.
+    let timebase = page.nominal_tenths_us_per_div.map_or_else(
+        || Label::new().push(b"--us/div"),
+        |time| Label::new().push(b"~").fixed(time, 1).push(b"us/div"),
+    );
+    text(
+        target,
+        &PLAIN,
+        timebase.as_str(),
+        Point::new(RIGHT, STATUS_Y),
+        HorizontalAlignment::Right,
+        MUTED,
+    );
+    hint(
+        target,
+        header,
+        match page.focus {
+            None => "< > tabs  OK open",
+            Some(RippleFocus::Scale) => "< > scale  OK/Back done",
+            Some(RippleFocus::Capture) if page.hold => "OK run  hold OK scale  Back exit",
+            Some(RippleFocus::Capture) => "OK hold  hold OK scale  Back exit",
+        },
+    );
 }
 
 /// How the PD side of the port stands, for the Quick Charge hints.

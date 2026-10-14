@@ -43,7 +43,7 @@ const SCAN_TIMEOUT: Duration = Duration::from_millis(3);
 /// driven at 0.55-3.23 V fit a gain-only scale (no offset) of 1083.7 mV,
 /// every point then within 5 mV. Other units' references may differ by a
 /// few percent.
-const REFERENCE_MV: u32 = 1083;
+pub const REFERENCE_MV: u16 = 1083;
 /// Software scale of each line: the CC inputs read half the line voltage
 /// (the source firmware doubles them), D+/D− are direct.
 const CC_SCALE: u32 = 2;
@@ -94,17 +94,20 @@ impl LineAdc {
         }
     }
 
-    /// Run one scan; `None` if it does not finish in time or the reference
-    /// reading is unusable.
-    pub async fn read(&mut self) -> Option<LineVoltages> {
+    /// Run one scan, returning line voltages and the reference count for
+    /// ripple normalization. `None` on timeout or an unusable reference.
+    pub async fn read(&mut self) -> Option<(LineVoltages, u16)> {
         let [cc1, cc2, dm, dp, reference] = self.adc.read().await.ok()?;
         let line = |count: u16, scale| millivolts(count, scale, reference);
-        Some(LineVoltages {
-            dp_mv: line(dp, DATA_SCALE)?,
-            dm_mv: line(dm, DATA_SCALE)?,
-            cc1_mv: line(cc1, CC_SCALE)?,
-            cc2_mv: line(cc2, CC_SCALE)?,
-        })
+        Some((
+            LineVoltages {
+                dp_mv: line(dp, DATA_SCALE)?,
+                dm_mv: line(dm, DATA_SCALE)?,
+                cc1_mv: line(cc1, CC_SCALE)?,
+                cc2_mv: line(cc2, CC_SCALE)?,
+            },
+            reference,
+        ))
     }
 }
 
@@ -116,6 +119,6 @@ fn millivolts(count: u16, scale: u32, reference: u16) -> Option<u16> {
         return None;
     }
     let reference = u32::from(reference);
-    let scaled = u32::from(count.min(FULL_SCALE)) * scale * REFERENCE_MV;
+    let scaled = u32::from(count.min(FULL_SCALE)) * scale * u32::from(REFERENCE_MV);
     u16::try_from((scaled + reference / 2) / reference).ok()
 }

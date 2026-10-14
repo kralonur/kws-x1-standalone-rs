@@ -26,8 +26,11 @@ use std::{
 const VECTOR_COUNT: usize = 160;
 const FIRST_IRQ: usize = 16;
 const SYSTICK_EXCEPTION: usize = 15;
-// Firmware startup's permitted non-default external interrupt vector indices.
-const CUSTOM_IRQS: [usize; 13] = [4, 13, 31, 38, 39, 86, 87, 88, 110, 111, 112, 113, 116];
+// Firmware startup's permitted non-default external interrupt vector indices,
+// including ripple DMA1 completion/error on 40/41.
+const CUSTOM_IRQS: [usize; 15] = [
+    4, 13, 31, 38, 39, 40, 41, 86, 87, 88, 110, 111, 112, 113, 116,
+];
 // The startup stack must lie strictly inside this linker-defined RAM region.
 const STACK_RAM_START: u32 = 0x20000000;
 const STACK_RAM_END: u32 = 0x20010000;
