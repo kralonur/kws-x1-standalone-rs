@@ -307,10 +307,15 @@ bottom line). `-` or `--.--` in a field means "not known yet". Hexadecimal
 values are raw register or message contents, shown for diagnosis.
 
 While Left/Right move between groups, every hint row reads
-`< > groups    OK tabs`. The scrolling screens (PD Session, Charger, Cable,
-System, PD Sniff) share one hint row: `OK scroll    < > tabs`, then
-`< > scroll    OK done` while scrolling, or `< > tabs    BACK groups` when
-everything fits on one screen.
+`< > groups  OK tabs`. The scrolling screens (PD Session, Charger, Cable,
+System, PD Sniff) share one hint row: `< > tabs  OK scroll`, then
+`< > scroll  OK done` while scrolling, or `< > tabs  BACK groups` when
+everything fits on one screen. Charger and Cable add their hold action:
+`hold OK scan` and `hold OK read`.
+
+Every hint row lists its buttons in the same order: Left/Right first, then
+OK, then a hold or Back, then any note, so on a tab it always starts with
+`< > tabs`.
 
 ### Sink mode
 
@@ -446,11 +451,11 @@ charger's fixed profiles, to request one.
   silent for [Quick Charge](#quick-charge), so there is no offer.
 - **Scrollbar**: on the right edge when there are more than five profiles
   (an EPR charger's 28 V adds one); choosing scrolls the list.
-- **Hint row**: `OK select a profile    < > tabs` (`OK select/scroll    < >
-  tabs` with the scrollbar), then while choosing
+- **Hint row**: `< > tabs  OK select a profile` (`< > tabs  OK select/scroll`
+  with the scrollbar), then while choosing
   `< > choose  OK request  BACK cancel`. Before the charger's offer arrives it
-  reads `waiting for the charger    < > tabs`; in `QC MODE`,
-  `OK switch back to PD`. While EPR is being entered or left, or after it
+  reads `< > tabs  waiting for the charger`; in `QC MODE`,
+  `< > tabs  OK switch back to PD`. While EPR is being entered or left, or after it
   failed, the PD screens show its state here instead: `EPR: entering mode`,
   `EPR: returning to SPR`, `EPR: cable not capable`, `EPR: VCONN failed`,
   `EPR: RDO bit missing`, `EPR: source unavailable`, `EPR: source PDO bit`,
@@ -464,21 +469,20 @@ charger's fixed profiles, to request one.
 This is the **PPS** screen (tab `PPS` in Trigger): the charger's
 programmable ranges, to request a voltage and current limit.
 
-- **Range row**: each PPS range the charger offers, for example
-  `3.30-21.00V  up to 5.00A`.
+- **`PPS RANGE`**: each PPS range the charger offers, a line each (the card
+  takes one or two), for example `3.30-21.00V  up to 5.00A`.
 - **`SET VOLTAGE`**: the voltage to request, in 20 mV steps (100 mV while
-  held), from the bottom of the charger's range (often 3.3 V) to its top.
-  The arrows show it is the value Left/Right change.
+  held), from the bottom of the charger's range (often 3.3 V) to its top. The arrows show it is the value Left/Right change.
 - **`CURRENT LIMIT`**: the current limit to request, in 50 mA steps (250 mA
   while held).
-- **`OUT`**: the live voltage and current.
-- **State**: `ACTIVE` (this setting is the contract in force), `NOT APPLIED`
-  (set but not requested yet), or empty.
+- **`OUTPUT`**: the live voltage and current, then on the right the state:
+  `ACTIVE` (this setting is the contract in force), `NOT APPLIED` (set but
+  not requested yet), or empty.
 - **`NO PPS` / `this charger offers no PPS range`**: nothing to set.
 - **`QC MODE`**: as on the PD Profiles screen.
-- **Hint row**: `OK adjust PPS    < > tabs`, `< > volts    OK next: current`,
-  `< > amps    OK request`, or `waiting for the charger    < > tabs`; in
-  `QC MODE`, `OK switch back to PD`.
+- **Hint row**: `< > tabs  OK adjust PPS`, `< > volts  OK next: current`,
+  `< > amps  OK request`, or `< > tabs  waiting for the charger`; in
+  `QC MODE`, `< > tabs  OK switch back to PD`.
 
 #### 5. AVS
 
@@ -492,19 +496,19 @@ charger does not limit the current: the meter asks for the most the range
 allows at the set voltage. SPR AVS runs from 9 V, at most 100 W; EPR AVS from
 15 V up to 30 V, at most 150 W and 5 A, and needs a real EPR cable.
 
-- **Range row**: each AVS range, for example
+- **`AVS RANGE`**: each AVS range, a line each, for example
   `9.00-20.00V  3.00A / 2.25A`: the SPR current up to 15 V, then above 15 V
   (only on a range that reaches 20 V); `15.00-30.00V EPR 140W`: an EPR range
   capped at 30 V and its power, which the current at each voltage follows.
 - **`SET VOLTAGE`**: the voltage to request, in 100 mV steps (500 mV while
   held), framed with arrows while Left/Right change it.
 - **`CURRENT`**: the current the request asks for at that voltage.
-- **`OUT`** and **state**: as on the PPS screen.
+- **`OUTPUT`**: as on the PPS screen.
 - **`NO AVS` / `this charger offers no AVS range`**: nothing to set.
 - **`QC MODE`**: as on the PD Profiles screen.
-- **Hint row**: `OK adjust AVS    < > tabs`, `< > volts    OK request`, or
-  `waiting for the charger    < > tabs`; in `QC MODE`,
-  `OK switch back to PD`.
+- **Hint row**: `< > tabs  OK adjust AVS`, `< > volts  OK request`, or
+  `< > tabs  waiting for the charger`; in `QC MODE`,
+  `< > tabs  OK switch back to PD`.
 
 #### 6. QC 2.0
 
@@ -529,14 +533,14 @@ the requests.
   `QC 3.0 steps +0.40V`, `back to 5V`). It ends in `NO CHARGING PORT` /
   `D+ and D- are not shorted` or `NO QUICK CHARGE` / `D- stayed high` when
   the charger has no Quick Charge.
-- **Hint row**: `OK choose a voltage    < > tabs`, then while choosing
-  `< > choose  OK request  BACK cancel`, and `OK change    < > tabs` once a
-  request runs. Until the charger follows it: `handshake    < > tabs`,
-  `waiting for VBUS    < > tabs`, `charger kept its output    OK change`,
-  `D+ D- not shorted    OK change` or `D- stayed high    OK change`. Before
-  the test `OK test the charger, up to 20V`, during it
-  `up to 20V on the output    BACK stop` (`BACK` once it failed); in
-  `PD MODE`, `OK switch to QC, tests up to 20V`.
+- **Hint row**: `< > tabs  OK choose a voltage`, then while choosing
+  `< > choose  OK request  BACK cancel`, and `< > tabs  OK change` once a
+  request runs. Until the charger follows it: `< > tabs  handshake`,
+  `< > tabs  waiting for VBUS`, `< > tabs  OK change  output unchanged`,
+  `< > tabs  OK change  no D+ D- short` or `< > tabs  OK change  D- stayed
+  high`. Before the test `< > tabs  OK test charger, up to 20V`, during it
+  `BACK stop  up to 20V on the output` (`BACK` once it failed); in
+  `PD MODE`, `< > tabs  OK switch to QC, up to 20V`.
 
 #### 7. QC 3.0
 
@@ -546,19 +550,19 @@ This is the **QC 3.0** screen (tab `QC 3.0` in Trigger): Quick Charge 3.0
 continuous mode, to set the output in 0.2 V steps. It is laid out as the PPS
 screen; see [Quick Charge](#quick-charge).
 
-- **Step range** (top): what the test found, else
+- **`STEPS`**: the step range the test found, else
   `3.6-12V by 0.2V  Class A` and `3.6-20V by 0.2V  Class B`.
 - **`SET VOLTAGE`**: the output the steps aim for, framed with arrows while
   Left/Right move it.
 - **`VBUS`**: the live bus voltage.
-- **`D+ … D- …`**: the lines as measured, to check the driven levels.
-- **State** (bottom right): `WAIT`, `STEPPING`, `ACTIVE` (the steps reached
-  the set voltage), `NO DCP` or `NO QC`.
+- **`LINES`**: D+ and D- as measured, to check the driven levels, then on
+  the right the state: `WAIT`, `STEPPING`, `ACTIVE` (the steps reached the
+  set voltage), `NO DCP` or `NO QC`.
 - **`PD MODE`** and **`TESTING THE CHARGER`**: as on the QC 2.0 screen.
 - **`NO QC 3.0` / `the charger ignored the steps`**: the test found no
   steps.
-- **Hint row**: `OK start at 5V    < > tabs`, then `< > 0.2V    OK done`
-  while adjusting, and `OK adjust    < > tabs` once the steps run; the
+- **Hint row**: `< > tabs  OK start at 5V`, then `< > 0.2V  OK done`
+  while adjusting, and `< > tabs  OK adjust` once the steps run; the
   handshake, test and `PD MODE` hints as on the QC 2.0 screen, and `< > tabs`
   after `NO QC 3.0`.
 
@@ -876,10 +880,9 @@ and energy persistence. The photo predates the current rows.
 
 ### Passthrough mode
 
-Passthrough shows six screens: Overview, Graph, Lines and Energy in Monitor, PD
-Sniff and System in Info; the Trigger group is left out. The Overview, Graph,
-Lines, Energy and System
-screens read as in sink mode.
+Passthrough shows six screens: Overview, Lines, Energy and Graph in Monitor, PD
+Sniff and System in Info; the Trigger group is left out. The Overview, Lines,
+Energy, Graph and System screens read as in sink mode.
 
 #### 1. Overview in passthrough
 
@@ -930,7 +933,7 @@ charger follows.
 
 **Switching out of PD.** Under a PD contract a USB-C charger ignores Quick
 Charge, so the Quick Charge screens show only `PD MODE`, and the PD Profiles
-and PPS screens stay in use. OK there (`OK switch to QC, tests up to 20V`)
+and PPS screens stay in use. OK there (`< > tabs  OK switch to QC, up to 20V`)
 switches: the meter restarts the charger with a Hard Reset and boots with PD
 silent (Rd held, nothing acknowledged), so the charger falls back to non-PD
 5 V and takes Quick Charge. The charger may restart one or two more times

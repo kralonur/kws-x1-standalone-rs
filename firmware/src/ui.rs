@@ -6,8 +6,7 @@
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
 use embedded_graphics::primitives::{
-    Circle, Line, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle, RoundedRectangle,
-    StyledDrawable, Triangle,
+    Circle, Line, PrimitiveStyle, Rectangle, RoundedRectangle, StyledDrawable, Triangle,
 };
 use firmware_core::buttons::{
     Detail, GraphFocus, Level, PpsFocus, Qc2Choice, QcOffer, RESET_STEPS, SettingsFocus, Tab,
@@ -454,22 +453,6 @@ fn fill<D: DrawTarget<Color = Rgb565>>(
         .ok();
 }
 
-/// A rounded card filled with `tint`, outlined in `border` when given.
-fn card<D: DrawTarget<Color = Rgb565>>(
-    target: &mut D,
-    area: Rectangle,
-    tint: Rgb565,
-    border: Option<Rgb565>,
-) {
-    let mut style = PrimitiveStyleBuilder::new().fill_color(tint);
-    if let Some(border) = border {
-        style = style.stroke_color(border).stroke_width(2);
-    }
-    RoundedRectangle::with_equal_corners(area, CORNER)
-        .draw_styled(&style.build(), target)
-        .ok();
-}
-
 fn rule<D: DrawTarget<Color = Rgb565>>(target: &mut D, y: i32) {
     fill(
         target,
@@ -714,8 +697,6 @@ const fn outlined_value(height: u32, ink: i32) -> i32 {
     let top = LABEL_BELOW_EDGE + 1;
     top + (height as i32 - 1 - top - ink) / 2 + ink
 }
-/// Card label baseline, from the card top.
-const CARD_LABEL: i32 = 11;
 /// Overview cards: voltage and current on top, power and peaks below, the
 /// protocol strip at the bottom. A value starts 2 px under the label's
 /// lower half and pads 3 px above the bottom edge.
@@ -799,22 +780,6 @@ fn rounded_outline<D: DrawTarget<Color = Rgb565>>(
     RoundedRectangle::with_equal_corners(area, corner)
         .draw_styled(&PrimitiveStyle::with_stroke(color, 1), target)
         .ok();
-}
-
-fn card_label<D: DrawTarget<Color = Rgb565>>(
-    target: &mut D,
-    area: Rectangle,
-    label: &str,
-    color: Rgb565,
-) {
-    text(
-        target,
-        &PLAIN,
-        label,
-        area.top_left + Point::new(6, CARD_LABEL),
-        HorizontalAlignment::Left,
-        color,
-    );
 }
 
 /// An outline in `outline` with `label` in `color` on its top edge, the
@@ -1407,7 +1372,7 @@ pub enum QcMode {
 /// only how to switch.
 fn pd_mode<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'_>) {
     notice(target, "PD MODE", "the charger ignores QC under PD", GREEN);
-    hint(target, header, "OK switch to QC, tests up to 20V");
+    hint(target, header, "< > tabs  OK switch to QC, up to 20V");
 }
 
 /// A PD tab while this boot keeps PD silent for Quick Charge: only how to
@@ -1419,14 +1384,14 @@ fn qc_mode<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'_>) {
         "PD is off while Quick Charge runs",
         ORANGE,
     );
-    hint(target, header, "OK switch back to PD");
+    hint(target, header, "< > tabs  OK switch back to PD");
 }
 
 /// Hint on a Quick Charge tab with nothing of its own running: the probe
 /// comes first while this boot has none, else `start`.
 fn qc_start_hint(qc: QcOffer, start: &'static str) -> &'static str {
     match qc.report() {
-        None => "OK test the charger, up to 20V",
+        None => "< > tabs  OK test charger, up to 20V",
         Some(_) => start,
     }
 }
@@ -1435,11 +1400,11 @@ fn qc_start_hint(qc: QcOffer, start: &'static str) -> &'static str {
 /// once the charger follows.
 fn qc_running_hint(status: Status, running: &'static str) -> &'static str {
     match status {
-        Status::Entering => "handshake    < > tabs",
-        Status::Failed(Failure::NotDcp) => "D+ D- not shorted    OK change",
-        Status::Failed(Failure::NoEntry) => "D- stayed high    OK change",
-        Status::Active(_, Some(Outcome::Waiting)) => "waiting for VBUS    < > tabs",
-        Status::Active(_, Some(Outcome::Ignored)) => "charger kept its output    OK change",
+        Status::Entering => "< > tabs  handshake",
+        Status::Failed(Failure::NotDcp) => "< > tabs  OK change  no D+ D- short",
+        Status::Failed(Failure::NoEntry) => "< > tabs  OK change  D- stayed high",
+        Status::Active(_, Some(Outcome::Waiting)) => "< > tabs  waiting for VBUS",
+        Status::Active(_, Some(Outcome::Ignored)) => "< > tabs  OK change  output unchanged",
         _ => running,
     }
 }
@@ -1520,8 +1485,8 @@ pub fn draw_qc2<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'
     }
     let hint_text = match (preview, request) {
         (Some(_), _) => "< > choose  OK request  BACK cancel",
-        (None, None) => qc_start_hint(qc, "OK choose a voltage    < > tabs"),
-        (None, Some(_)) => qc_running_hint(status, "OK change    < > tabs"),
+        (None, None) => qc_start_hint(qc, "< > tabs  OK choose a voltage"),
+        (None, Some(_)) => qc_running_hint(status, "< > tabs  OK change"),
     };
     hint(target, header, hint_text);
 }
@@ -1569,7 +1534,7 @@ pub fn draw_probe<D: DrawTarget<Color = Rgb565>>(
         if matches!(status, Status::Failed(_)) {
             "BACK"
         } else {
-            "up to 20V on the output    BACK stop"
+            "BACK stop  up to 20V on the output"
         },
     );
 }
@@ -1626,48 +1591,29 @@ pub fn draw_qc3<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'
             Some(class_range(Voltage::V20, b"  Class B")),
         ],
     };
-    for (index, range) in ranges.iter().flatten().enumerate() {
-        text(
-            target,
-            &PLAIN,
-            range.as_str(),
-            Point::new(LEFT, RANGE_BASELINE + RANGE_PITCH * index as i32),
-            HorizontalAlignment::Left,
-            CYAN,
-        );
-    }
+    let (volts_box, amps_box) = range_card(target, "STEPS", CYAN, ranges.into_iter().flatten());
 
     let set = match target_mv {
         Some(mv) => Label::new().hundredths(u32::from(mv)),
         None => Label::new().push(b"--.--"),
     };
-    card(
+    value_box(
         target,
-        PPS_VOLTS,
-        if adjusting { RULE } else { BLACK },
-        Some(if adjusting { YELLOW } else { RULE }),
-    );
-    card_label(target, PPS_VOLTS, "SET VOLTAGE", YELLOW);
-    value_with_unit(
-        target,
-        &READING,
-        &set,
+        volts_box,
+        "SET VOLTAGE",
+        set,
         "V",
-        PPS_VOLTS.top_left + PPS_VALUE,
-        if adjusting { WHITE } else { YELLOW },
+        YELLOW,
+        adjusting,
     );
-    if adjusting {
-        arrows(target, PPS_VOLTS, YELLOW);
-    }
-    card(target, PPS_AMPS, BLACK, Some(RULE));
-    card_label(target, PPS_AMPS, "VBUS", CYAN);
-    value_with_unit(
+    value_box(
         target,
-        &READING,
-        &volts_or_blank(reading.map(|r| r.mv)),
+        amps_box,
+        "VBUS",
+        volts_or_blank(reading.map(|r| r.mv)),
         "V",
-        PPS_AMPS.top_left + PPS_VALUE,
         CYAN,
+        false,
     );
 
     let readback = Label::new()
@@ -1676,15 +1622,7 @@ pub fn draw_qc3<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'
         .push(b"V  D- ")
         .push(line_volts(lines, |l| l.dm_mv).as_str().as_bytes())
         .push(b"V");
-    text(
-        target,
-        &PLAIN,
-        readback.as_str(),
-        Point::new(LEFT, PPS_STATUS_BASELINE),
-        HorizontalAlignment::Left,
-        WHITE,
-    );
-    let (state, color) = match status {
+    let state = match status {
         Status::Entering => ("WAIT", ORANGE),
         Status::Failed(Failure::NotDcp) => ("NO DCP", MAGENTA),
         Status::Failed(Failure::NoEntry) => ("NO QC", MAGENTA),
@@ -1692,21 +1630,14 @@ pub fn draw_qc3<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'
         Status::Stepping(_) => ("STEPPING", ORANGE),
         _ => ("", MUTED),
     };
-    text(
-        target,
-        &PLAIN,
-        state,
-        Point::new(RIGHT, PPS_STATUS_BASELINE),
-        HorizontalAlignment::Right,
-        color,
-    );
+    output_card(target, "LINES", readback.as_str(), state);
     hint(
         target,
         header,
         match target_mv {
-            _ if adjusting => "< > 0.2V    OK done",
-            None => qc_start_hint(qc, "OK start at 5V    < > tabs"),
-            Some(_) => qc_running_hint(status, "OK adjust    < > tabs"),
+            _ if adjusting => "< > 0.2V  OK done",
+            None => qc_start_hint(qc, "< > tabs  OK start at 5V"),
+            Some(_) => qc_running_hint(status, "< > tabs  OK adjust"),
         },
     );
 }
@@ -1896,7 +1827,7 @@ fn selector_row<D: DrawTarget<Color = Rgb565>>(
     let top = PROFILE_TOP + row as i32 * PROFILE_PITCH;
     if selected {
         let area = Rectangle::new(Point::new(4, top), Size::new(232, PROFILE_PITCH as u32 - 2));
-        card(target, area, RULE, Some(color));
+        rounded_outline(target, area, CORNER, color);
     }
     let baseline = top + 13;
     text(
@@ -1919,18 +1850,14 @@ fn selector_row<D: DrawTarget<Color = Rgb565>>(
     }
     if let Some((label, color)) = pill {
         let pill = Rectangle::new(Point::new(ROW_PILL_X, top + 3), ROW_PILL);
-        fill(
-            target,
-            RoundedRectangle::with_equal_corners(pill, Size::new(6, 6)),
-            color,
-        );
+        rounded_outline(target, pill, Size::new(6, 6), color);
         text(
             target,
             &PLAIN,
             label,
             Point::new(pill.center().x, baseline),
             HorizontalAlignment::Center,
-            BLACK,
+            color,
         );
     }
 }
@@ -2002,26 +1929,96 @@ pub fn draw_fixed<D: DrawTarget<Color = Rgb565>>(
         } else if editing {
             "< > choose  OK request  BACK cancel"
         } else if profiles.len() > PROFILE_ROWS {
-            "OK select/scroll    < > tabs"
+            "< > tabs  OK select/scroll"
         } else {
-            "OK select a profile    < > tabs"
+            "< > tabs  OK select a profile"
         }),
     );
 }
 
 /// Hint on the selector pages before the sink session has an offer.
-const VIEW_ONLY: &str = "waiting for the charger    < > tabs";
+const VIEW_ONLY: &str = "< > tabs  waiting for the charger";
 
-/// PPS value boxes.
-const PPS_VOLTS: Rectangle = Rectangle::new(Point::new(4, 52), Size::new(114, 44));
-const PPS_AMPS: Rectangle = Rectangle::new(Point::new(122, 52), Size::new(114, 44));
-/// A PPS box's value baseline, from the box's top-left corner.
-const PPS_VALUE: Point = Point::new(8, 37);
-/// Baseline of the line under the PPS boxes: the output and the state.
-const PPS_STATUS_BASELINE: i32 = 112;
-/// The range lines above the PPS boxes: the first baseline and the pitch.
-const RANGE_BASELINE: i32 = 34;
-const RANGE_PITCH: i32 = 12;
+/// PPS, AVS and QC 3.0 pages: the ranges card on top, as tall as its one
+/// or two `PLAIN` lines (sitting like values, 2 px apart), the value boxes
+/// filling the rest, and the output card along the bottom, shaped like the
+/// overview's protocol strip.
+const RANGE_LINES: usize = 2;
+const RANGE_PITCH: i32 = PLAIN_INK + 2;
+const RANGE_BASELINE: i32 = OUTLINED_TOP + STRIP_VALUE;
+const OUTPUT_CARD: Rectangle = Rectangle::new(
+    Point::new(4, CONTENT_BOTTOM + 1 - STRIP_HEIGHT as i32),
+    Size::new(232, STRIP_HEIGHT),
+);
+const OUTPUT_BASELINE: i32 = OUTPUT_CARD.top_left.y + STRIP_VALUE;
+/// Text inside those cards starts at their padding.
+const CARD_TEXT_LEFT: i32 = 4 + PAD;
+const CARD_TEXT_RIGHT: i32 = 4 + 232 - PAD;
+
+/// The ranges card, outlined in the page's `color`, around up to two lines;
+/// returns the voltage and current boxes' areas, filling the space down to
+/// the output card.
+fn range_card<D: DrawTarget<Color = Rgb565>>(
+    target: &mut D,
+    label: &str,
+    color: Rgb565,
+    lines: impl IntoIterator<Item = Label>,
+) -> (Rectangle, Rectangle) {
+    let mut shown: [Option<Label>; RANGE_LINES] = [None, None];
+    for (slot, line) in shown.iter_mut().zip(lines) {
+        *slot = Some(line);
+    }
+    let count = shown.iter().flatten().count().max(1) as i32;
+    let height = STRIP_VALUE + (count - 1) * RANGE_PITCH + OVERVIEW_PAD + 1;
+    let card = Rectangle::new(Point::new(4, OUTLINED_TOP), Size::new(232, height as u32));
+    outlined_card(target, card, label, color, 0);
+    for (index, line) in shown.iter().flatten().enumerate() {
+        text(
+            target,
+            &PLAIN,
+            line.as_str(),
+            Point::new(CARD_TEXT_LEFT, RANGE_BASELINE + RANGE_PITCH * index as i32),
+            HorizontalAlignment::Left,
+            color,
+        );
+    }
+    let top = OUTLINED_TOP + height + OUTLINED_SPACING;
+    let size = Size::new(
+        114,
+        (OUTPUT_CARD.top_left.y - OUTLINED_SPACING - top) as u32,
+    );
+    (
+        Rectangle::new(Point::new(4, top), size),
+        Rectangle::new(Point::new(122, top), size),
+    )
+}
+
+/// The output card: `line` on the left, `state` on the right, the card
+/// outlined in the state's colour.
+fn output_card<D: DrawTarget<Color = Rgb565>>(
+    target: &mut D,
+    label: &str,
+    line: &str,
+    (state, color): (&str, Rgb565),
+) {
+    outlined_card(target, OUTPUT_CARD, label, color, 0);
+    text(
+        target,
+        &PLAIN,
+        line,
+        Point::new(CARD_TEXT_LEFT, OUTPUT_BASELINE),
+        HorizontalAlignment::Left,
+        WHITE,
+    );
+    text(
+        target,
+        &PLAIN,
+        state,
+        Point::new(CARD_TEXT_RIGHT, OUTPUT_BASELINE),
+        HorizontalAlignment::Right,
+        color,
+    );
+}
 
 /// The PPS selector: the advertised ranges, the voltage and current boxes
 /// (the one Left/Right change is framed), and the live reading.
@@ -2047,29 +2044,26 @@ pub fn draw_pps<D: DrawTarget<Color = Rgb565>>(
         );
         return;
     }
-    for (index, range) in ranges.iter().take(2).enumerate() {
-        let line = Label::new()
-            .hundredths(u32::from(range.min_mv))
-            .push(b"-")
-            .hundredths(u32::from(range.max_mv))
-            .push(b"V  up to ")
-            .hundredths(u32::from(range.max_ma))
-            .push(b"A");
-        text(
-            target,
-            &PLAIN,
-            line.as_str(),
-            Point::new(LEFT, RANGE_BASELINE + RANGE_PITCH * index as i32),
-            HorizontalAlignment::Left,
-            MAGENTA,
-        );
-    }
+    let (volts_box, amps_box) = range_card(
+        target,
+        "PPS RANGE",
+        MAGENTA,
+        ranges.iter().map(|range| {
+            Label::new()
+                .hundredths(u32::from(range.min_mv))
+                .push(b"-")
+                .hundredths(u32::from(range.max_mv))
+                .push(b"V  up to ")
+                .hundredths(u32::from(range.max_ma))
+                .push(b"A")
+        }),
+    );
 
     let set = offer.preview.filter(|preview| preview.kind == Kind::Pps);
     let (volts, amps) = set_values(set);
     value_box(
         target,
-        PPS_VOLTS,
+        volts_box,
         "SET VOLTAGE",
         volts,
         "V",
@@ -2078,7 +2072,7 @@ pub fn draw_pps<D: DrawTarget<Color = Rgb565>>(
     );
     value_box(
         target,
-        PPS_AMPS,
+        amps_box,
         "CURRENT LIMIT",
         amps,
         "A",
@@ -2091,9 +2085,9 @@ pub fn draw_pps<D: DrawTarget<Color = Rgb565>>(
         header,
         offer.pd_notice.unwrap_or(match focus {
             _ if !offer.session => VIEW_ONLY,
-            Some(PpsFocus::Voltage) => "< > volts    OK next: current",
-            Some(PpsFocus::Current) => "< > amps    OK request",
-            None => "OK adjust PPS    < > tabs",
+            Some(PpsFocus::Voltage) => "< > volts  OK next: current",
+            Some(PpsFocus::Current) => "< > amps  OK request",
+            None => "< > tabs  OK adjust PPS",
         }),
     );
 }
@@ -2118,7 +2112,7 @@ pub fn draw_avs<D: DrawTarget<Color = Rgb565>>(
         notice(target, "NO AVS", "this charger offers no AVS range", YELLOW);
         return;
     }
-    for (index, range) in ranges.iter().take(2).enumerate() {
+    let line = |range: &AvsRange| {
         let line = Label::new()
             .hundredths(u32::from(range.min_mv))
             .push(b"-")
@@ -2126,7 +2120,7 @@ pub fn draw_avs<D: DrawTarget<Color = Rgb565>>(
             .push(b"V  ")
             .hundredths(u32::from(range.ma_15v))
             .push(b"A");
-        let line = if let Some(pdp) = range.pdp_w {
+        if let Some(pdp) = range.pdp_w {
             Label::new()
                 .hundredths(u32::from(range.min_mv))
                 .push(b"-")
@@ -2140,28 +2134,21 @@ pub fn draw_avs<D: DrawTarget<Color = Rgb565>>(
             line.push(b" / ")
                 .hundredths(u32::from(range.ma_20v))
                 .push(b"A")
-        };
-        text(
-            target,
-            &PLAIN,
-            line.as_str(),
-            Point::new(LEFT, RANGE_BASELINE + RANGE_PITCH * index as i32),
-            HorizontalAlignment::Left,
-            YELLOW,
-        );
-    }
+        }
+    };
+    let (volts_box, amps_box) = range_card(target, "AVS RANGE", YELLOW, ranges.iter().map(line));
     let set = offer.preview.filter(|preview| preview.kind == Kind::Avs);
     let (volts, amps) = set_values(set);
     value_box(
         target,
-        PPS_VOLTS,
+        volts_box,
         "SET VOLTAGE",
         volts,
         "V",
         YELLOW,
         adjusting,
     );
-    value_box(target, PPS_AMPS, "CURRENT", amps, "A", CYAN, false);
+    value_box(target, amps_box, "CURRENT", amps, "A", CYAN, false);
     supply_status(target, offer, set, live);
     hint(
         target,
@@ -2169,9 +2156,9 @@ pub fn draw_avs<D: DrawTarget<Color = Rgb565>>(
         offer.pd_notice.unwrap_or(if !offer.session {
             VIEW_ONLY
         } else if adjusting {
-            "< > volts    OK request"
+            "< > volts  OK request"
         } else {
-            "OK adjust AVS    < > tabs"
+            "< > tabs  OK adjust AVS"
         }),
     );
 }
@@ -2187,7 +2174,8 @@ fn set_values(set: Option<Supply>) -> (Label, Label) {
     }
 }
 
-/// One PPS/AVS value box, framed with arrows while Left/Right change it.
+/// One PPS/AVS/QC 3.0 value box: an outlined card, dim until Left/Right
+/// change it, then outlined in its colour with arrows.
 fn value_box<D: DrawTarget<Color = Rgb565>>(
     target: &mut D,
     area: Rectangle,
@@ -2197,19 +2185,19 @@ fn value_box<D: DrawTarget<Color = Rgb565>>(
     color: Rgb565,
     focused: bool,
 ) {
-    let (tint, border) = if focused {
-        (RULE, Some(color))
-    } else {
-        (BLACK, Some(RULE))
-    };
-    card(target, area, tint, border);
-    card_label(target, area, label, color);
+    labelled_outline(
+        target,
+        area,
+        label,
+        color,
+        if focused { color } else { RULE },
+    );
     value_with_unit(
         target,
         &READING,
         &value,
         unit,
-        area.top_left + PPS_VALUE,
+        area.top_left + Point::new(PAD, outlined_value(area.size.height, READING_INK)),
         if focused { WHITE } else { color },
     );
     if focused {
@@ -2217,8 +2205,8 @@ fn value_box<D: DrawTarget<Color = Rgb565>>(
     }
 }
 
-/// The line under the PPS/AVS boxes: the live output and whether the set
-/// level is the contract in force.
+/// The output card under the PPS/AVS boxes: the live output and whether
+/// the set level is the contract in force.
 fn supply_status<D: DrawTarget<Color = Rgb565>>(
     target: &mut D,
     offer: &Offer,
@@ -2231,30 +2219,15 @@ fn supply_status<D: DrawTarget<Color = Rgb565>>(
         (Some(_), false) => ("NOT APPLIED", ORANGE),
         (None, false) => ("", MUTED),
     };
-    if let Some(live) = live {
-        let line = Label::new()
-            .push(b"OUT ")
+    let line = match live {
+        Some(live) => Label::new()
             .hundredths(live.mv)
-            .push(b"V ")
+            .push(b"V  ")
             .hundredths(live.ma.unsigned_abs())
-            .push(b"A");
-        text(
-            target,
-            &PLAIN,
-            line.as_str(),
-            Point::new(LEFT, PPS_STATUS_BASELINE),
-            HorizontalAlignment::Left,
-            WHITE,
-        );
-    }
-    text(
-        target,
-        &PLAIN,
-        state.0,
-        Point::new(RIGHT, PPS_STATUS_BASELINE),
-        HorizontalAlignment::Right,
-        state.1,
-    );
+            .push(b"A"),
+        None => Label::new().push(b"--.--V  -.--A"),
+    };
+    output_card(target, "OUTPUT", line.as_str(), state);
 }
 
 /// Up and down arrows at a box's right edge: Right raises it, Left lowers it.
@@ -2284,9 +2257,23 @@ fn arrows<D: DrawTarget<Color = Rgb565>>(target: &mut D, area: Rectangle, color:
 /// Settings rows: first baseline and pitch.
 const SETTINGS_BASELINE: i32 = 35;
 const SETTINGS_PITCH: i32 = 18;
-/// Compact row highlights and edit frames leave room for all five settings.
+/// Settings row highlight and edit frame height.
 const SETTINGS_ROW_HEIGHT: u32 = 17;
-/// Baseline of the firmware version line, below the five rows and above the hint.
+
+/// The frame round a settings value while Left/Right change it.
+fn value_frame<D: DrawTarget<Color = Rgb565>>(target: &mut D, left: i32, baseline: i32) {
+    rounded_outline(
+        target,
+        Rectangle::new(
+            Point::new(left, baseline - 13),
+            Size::new(78, SETTINGS_ROW_HEIGHT),
+        ),
+        CORNER,
+        YELLOW,
+    );
+}
+/// Baseline of the firmware version line, below the rows and above the hint;
+/// the energy page's status line shares it.
 const VERSION_BASELINE: i32 = 117;
 /// This firmware's version, from its Cargo package.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -2305,14 +2292,20 @@ pub fn draw_settings<D: DrawTarget<Color = Rgb565>>(
         let baseline = SETTINGS_BASELINE + index as i32 * SETTINGS_PITCH;
         let selected = item == focus.row();
         if selected {
-            card(
+            // Dim while its value is being changed, which then takes the
+            // highlight.
+            rounded_outline(
                 target,
                 Rectangle::new(
                     Point::new(4, baseline - 13),
                     Size::new(232, SETTINGS_ROW_HEIGHT),
                 ),
-                RULE,
-                None,
+                CORNER,
+                if focus == SettingsFocus::Row(item) {
+                    YELLOW
+                } else {
+                    RULE
+                },
             );
             text(
                 target,
@@ -2346,15 +2339,7 @@ pub fn draw_settings<D: DrawTarget<Color = Rgb565>>(
             Item::Rotation => {
                 let editing = focus == SettingsFocus::Rotation;
                 if editing {
-                    card(
-                        target,
-                        Rectangle::new(
-                            Point::new(154, baseline - 13),
-                            Size::new(78, SETTINGS_ROW_HEIGHT),
-                        ),
-                        BLACK,
-                        Some(YELLOW),
-                    );
+                    value_frame(target, 154, baseline);
                 }
                 let value = match settings.rotation {
                     Rotation::Auto => "AUTO",
@@ -2372,15 +2357,7 @@ pub fn draw_settings<D: DrawTarget<Color = Rgb565>>(
             }
             Item::EnergyMemory => {
                 if focus == SettingsFocus::EnergyMemory {
-                    card(
-                        target,
-                        Rectangle::new(
-                            Point::new(154, baseline - 13),
-                            Size::new(78, SETTINGS_ROW_HEIGHT),
-                        ),
-                        BLACK,
-                        Some(YELLOW),
-                    );
+                    value_frame(target, 154, baseline);
                 }
                 text(
                     target,
@@ -2419,9 +2396,9 @@ pub fn draw_settings<D: DrawTarget<Color = Rgb565>>(
         target,
         header,
         match focus {
-            SettingsFocus::Brightness => "< > dimmer/brighter    OK done",
+            SettingsFocus::Brightness => "< > dimmer/brighter  OK done",
             SettingsFocus::Rotation => "< > auto/normal/flipped  OK done",
-            SettingsFocus::EnergyMemory => "shorter saves = more wear   OK done",
+            SettingsFocus::EnergyMemory => "< > interval  OK done (shorter wears)",
             _ => "< > choose  OK change  BACK exit",
         },
     );
@@ -2437,15 +2414,7 @@ fn brightness_bars<D: DrawTarget<Color = Rgb565>>(
 ) {
     let left = 160;
     if editing {
-        card(
-            target,
-            Rectangle::new(
-                Point::new(left - 6, baseline - 13),
-                Size::new(78, SETTINGS_ROW_HEIGHT),
-            ),
-            BLACK,
-            Some(YELLOW),
-        );
+        value_frame(target, left - 6, baseline);
     }
     for index in 0..BRIGHTNESS_PERCENT.len() {
         let height = 2 + 3 * index as u32;
@@ -2574,9 +2543,17 @@ pub fn draw_detail<D: DrawTarget<Color = Rgb565>>(
         target,
         header,
         match (scrolling, view.end > 0) {
-            (true, _) => "< > scroll    OK done",
-            (false, true) => "OK scroll    < > tabs",
-            (false, false) => "< > tabs    BACK groups",
+            (true, _) => "< > scroll  OK done",
+            (false, true) => match page {
+                Detail::Charger => "< > tabs  OK scroll  hold OK scan",
+                Detail::Cable => "< > tabs  OK scroll  hold OK read",
+                _ => "< > tabs  OK scroll",
+            },
+            (false, false) => match page {
+                Detail::Charger => "< > tabs  hold OK scan",
+                Detail::Cable => "< > tabs  hold OK read",
+                _ => "< > tabs  BACK groups",
+            },
         },
     );
     view
