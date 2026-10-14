@@ -61,7 +61,6 @@ const RULE: Rgb565 = Rgb565::new(5, 14, 7);
 const YELLOW_TINT: Rgb565 = Rgb565::new(5, 10, 0);
 const CYAN_TINT: Rgb565 = Rgb565::new(1, 9, 6);
 const GREEN_TINT: Rgb565 = Rgb565::new(1, 10, 1);
-const MAGENTA_TINT: Rgb565 = Rgb565::new(6, 4, 6);
 /// The reset hold's sweep, a neutral fill lighter than every tint, so each
 /// accent stays readable over it.
 const SWEEP: Rgb565 = Rgb565::new(10, 20, 10);
@@ -671,7 +670,7 @@ const SMALL_INK: i32 = 7;
 const READING_INK: i32 = 19;
 const POWER_INK: i32 = 27;
 
-/// Outlined cards, on the overview page: an outline in
+/// Outlined cards, on the overview and lines pages: an outline in
 /// the card's colour on the bare background, with its label in `SMALL`
 /// sitting on the top edge, the edge running through the label's middle
 /// and cut away round it. The first label's ink starts just under the
@@ -685,10 +684,19 @@ const OUTLINED_TOP: i32 = HEADER_RULE_Y + 2 + LABEL_ABOVE_EDGE;
 const OUTLINED_LABEL_LEFT: i32 = PAD + 2;
 /// Rows from one outlined card's bottom to the next one's top edge.
 const OUTLINED_SPACING: i32 = OUTLINED_GAP + LABEL_ABOVE_EDGE;
-/// The top edge of the outlined card `row` rows down, the cards `height`
-/// rows tall.
+/// The height of `rows` outlined cards filling the page, and the top edge
+/// of the card `row` rows down.
+const fn outlined_height(rows: i32) -> u32 {
+    ((CONTENT_BOTTOM + 1 - OUTLINED_TOP - (rows - 1) * OUTLINED_SPACING) / rows) as u32
+}
 const fn outlined_top(row: i32, height: u32) -> i32 {
     OUTLINED_TOP + row * (height as i32 + OUTLINED_SPACING)
+}
+/// The baseline, under an outlined card's top edge, of an `ink` row value
+/// centred between the label's lower half and the bottom edge.
+const fn outlined_value(height: u32, ink: i32) -> i32 {
+    let top = LABEL_BELOW_EDGE + 1;
+    top + (height as i32 - 1 - top - ink) / 2 + ink
 }
 /// Card label baseline and value baseline, from the card top.
 const CARD_LABEL: i32 = 11;
@@ -1285,10 +1293,25 @@ fn status(protocol: Protocol, cc: Option<u8>) -> Label {
 }
 
 /// Line cards, two by two: the data pair on top, the CC pair below.
-const DP_CARD: Rectangle = VOLTS_CARD;
-const DM_CARD: Rectangle = AMPS_CARD;
-const CC1_CARD: Rectangle = Rectangle::new(Point::new(4, 70), Size::new(114, 41));
-const CC2_CARD: Rectangle = Rectangle::new(Point::new(122, 70), Size::new(114, 41));
+/// Two rows of them fill the page.
+const LINE_CARD_HEIGHT: u32 = outlined_height(2);
+const LINE_VALUE: i32 = outlined_value(LINE_CARD_HEIGHT, READING_INK);
+const DP_CARD: Rectangle = Rectangle::new(
+    Point::new(4, outlined_top(0, LINE_CARD_HEIGHT)),
+    Size::new(114, LINE_CARD_HEIGHT),
+);
+const DM_CARD: Rectangle = Rectangle::new(
+    Point::new(122, outlined_top(0, LINE_CARD_HEIGHT)),
+    Size::new(114, LINE_CARD_HEIGHT),
+);
+const CC1_CARD: Rectangle = Rectangle::new(
+    Point::new(4, outlined_top(1, LINE_CARD_HEIGHT)),
+    Size::new(114, LINE_CARD_HEIGHT),
+);
+const CC2_CARD: Rectangle = Rectangle::new(
+    Point::new(122, outlined_top(1, LINE_CARD_HEIGHT)),
+    Size::new(114, LINE_CARD_HEIGHT),
+);
 
 /// A reading in volts from mV, or a blank one before the first.
 fn volts_or_blank(mv: Option<u32>) -> Label {
@@ -1303,21 +1326,20 @@ fn line_volts(lines: Option<LineVoltages>, mv: fn(&LineVoltages) -> u16) -> Labe
     volts_or_blank(lines.map(|l| u32::from(mv(&l))))
 }
 
-/// Tinted cards each showing a reading in volts: area, tint, accent, label
-/// and value.
+/// Outlined cards each showing a reading in volts: area, accent, label and
+/// value.
 fn volt_cards<D: DrawTarget<Color = Rgb565>>(
     target: &mut D,
-    cards: &[(Rectangle, Rgb565, Rgb565, &str, Label)],
+    cards: &[(Rectangle, Rgb565, &str, Label)],
 ) {
-    for (area, tint, color, label, value) in cards {
-        card(target, *area, *tint, None);
-        card_label(target, *area, label, *color);
+    for (area, color, label, value) in cards {
+        outlined_card(target, *area, label, *color, 0);
         value_with_unit(
             target,
             &READING,
             value,
             "V",
-            area.top_left + Point::new(6, CARD_VALUE),
+            area.top_left + Point::new(PAD, LINE_VALUE),
             *color,
         );
     }
@@ -1335,13 +1357,13 @@ pub fn draw_lines<D: DrawTarget<Color = Rgb565>>(
     volt_cards(
         target,
         &[
-            (DP_CARD, YELLOW_TINT, YELLOW, "D+", value(|l| l.dp_mv)),
-            (DM_CARD, CYAN_TINT, CYAN, "D-", value(|l| l.dm_mv)),
-            (CC1_CARD, GREEN_TINT, GREEN, "CC1", value(|l| l.cc1_mv)),
-            (CC2_CARD, MAGENTA_TINT, MAGENTA, "CC2", value(|l| l.cc2_mv)),
+            (DP_CARD, YELLOW, "D+", value(|l| l.dp_mv)),
+            (DM_CARD, CYAN, "D-", value(|l| l.dm_mv)),
+            (CC1_CARD, GREEN, "CC1", value(|l| l.cc1_mv)),
+            (CC2_CARD, MAGENTA, "CC2", value(|l| l.cc2_mv)),
         ],
     );
-    hint(target, header, "approximate    < > tabs");
+    hint(target, header, "< > tabs  approximate");
 }
 
 /// How the PD side of the port stands, for the Quick Charge hints.

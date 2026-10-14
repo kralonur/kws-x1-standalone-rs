@@ -407,7 +407,7 @@ screen shows, or while Quick Charge runs.
   in use carries the Type-C pull-up/pull-down level; a cable's VCONN shows on
   the other one.
 - `-.--`: no reading yet, or the last ADC scan failed.
-- **Hint row**: `approximate    < > tabs`. The internal reference was
+- **Hint row**: `< > tabs  approximate`. The internal reference was
   measured on one unit, and another unit's may differ by a few percent (see
   [Limitations](#limitations)).
 
