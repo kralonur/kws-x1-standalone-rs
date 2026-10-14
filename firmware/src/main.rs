@@ -1048,11 +1048,11 @@ async fn meter_task(
         }
 
         let secs = now.as_secs() as u32;
-        let pulses = PULSES.load(Ordering::Relaxed) & 1 != 0;
+        let pulses = PULSES.load(Ordering::Relaxed);
         // A latched bus turns the heartbeat dot red on the meter page.
         let pulse_now = if bus_failed() {
             FAULT
-        } else if pulses {
+        } else if pulses & 1 != 0 {
             ALIVE_A
         } else {
             ALIVE_B
@@ -1063,10 +1063,10 @@ async fn meter_task(
             last_secs = secs;
             dirty = true;
         }
-        if Some(pulse_now) != last_pulse {
-            last_pulse = Some(pulse_now);
-            // Only the meter page draws the heartbeat dot; opening it is an
-            // input change, which redraws it with the current colour.
+        if Some(pulses) != last_pulse {
+            last_pulse = Some(pulses);
+            // Only the meter page draws the heartbeat dot and the flow
+            // shimmer; opening it is an input change, which redraws them.
             dirty |= view == View::Overview;
         }
 
@@ -1097,6 +1097,8 @@ async fn meter_task(
                             cc: pd::attached_cc(&observation),
                             flipped: current_rotation == Orientation::Inverted,
                             alive: pulse_now,
+                            pulses,
+                            reset_hold: input.reset_hold,
                         },
                     );
                 }

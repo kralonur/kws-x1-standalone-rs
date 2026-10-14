@@ -176,7 +176,7 @@ The pages sit in three groups: **Monitor** (Overview, Graph, Lines, Energy), **T
 System). The header shows the group's tabs as a strip, each in its own
 colour: the shown tab is named, the others fold to thin bars. A dot per group
 sits on the right. The shown tab marks what Left/Right move: a bar beside its
-name and lit dots for groups (the hint row reads `< > groups    OK tabs`), an
+name and lit dots for groups (the hint row reads `< > groups  OK tabs`), an
 underline for tabs, and a filled tab once the page itself has them (choosing,
 editing or scrolling). A group comes back on the tab it last showed.
 
@@ -215,7 +215,7 @@ meter in again.
   measures at 5 V; the PD session page reports no capabilities, and the
   PD Profiles page shows `NO PD CHARGER`.
 
-Current is shown as a magnitude; chevrons on the overview's bottom row
+Current is shown as a magnitude; chevrons in the overview's protocol strip
 point the way it flows (they follow the screen rotation).
 
 ### Pages
@@ -318,16 +318,18 @@ everything fits on one screen.
 <img src="pictures/overview_screen.webp" width="360" alt="Overview screen">
 
 This is the **Overview** screen (tab `OVERVIEW` in Monitor): the live bus
-readings and the protocol in use. The meter starts on it, and its bottom line
-is the protocol status instead of a hint row.
+readings in outlined cards, each named on its top edge, and the protocol in
+use in the `PROTOCOL` strip along the bottom. The meter starts on it.
 
 - **`VOLTAGE`**: bus voltage, in volts. `--.--` until the first reading, or
   while the sensor bus is closed.
 - **`CURRENT`**: current in amperes, as a magnitude, whichever way it flows.
 - **`POWER`**: voltage × current, in watts.
 - **`MAX`**: the highest voltage, current and power seen since power-up or
-  the last `RESET MAX` in the settings.
-- **Protocol badge** (bottom left): the first of these that applies.
+  the last reset. Hold OK: the card fills from left to right and the values
+  reset once it is full; let go earlier to keep them.
+- **Protocol** (left in the `PROTOCOL` strip, which takes its colour): the
+  first of these that applies.
   - `QC 2.0` / `QC 3.0`: this meter's Quick Charge request, while the
     charger follows it. Status: the request (`9V`) or the output the steps
     set (`7.40V`).
@@ -350,14 +352,16 @@ is the protocol status instead of a hint row.
     after it ran.
   - `USB`: plain USB power (Type-C default current, or no Type-C at all).
   - `NONE`: no source identified yet.
-- **Status text** next to the badge: the CC pin in use (`CC1` or `CC2`),
+- **Status text** after the protocol, in white: the CC pin in use (`CC1` or `CC2`),
   then one of `no source`, `5V default`, `5V 1.50A`, `5V 3.00A`,
   `offer, 5V`, the contract (for example `9V 3.00A`), or the Quick Charge
   and port values above.
-- **Chevrons** `< < <` or `> > >`: the direction current flows, drawn above
-  a small threshold. They follow the screen rotation.
-- **Heartbeat dot** (bottom right): blinks while the meter runs; red when the
-  sensor bus is closed (see the System screen).
+- **Chevrons** `< < <` or `> > >` (in the strip): the direction current
+  flows, drawn above a small threshold. One is lit at a time, stepping the
+  way the current flows every half second. They follow the screen rotation.
+- **Heartbeat dot** (right end of the strip): blinks while the meter
+  runs; red when the sensor bus is closed (see the System screen).
+- **Hint row**: `< > tabs  hold OK reset`.
 
 #### Graph
 

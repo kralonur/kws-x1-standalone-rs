@@ -10,7 +10,7 @@ use embedded_graphics::primitives::{
     StyledDrawable, Triangle,
 };
 use firmware_core::buttons::{
-    Detail, GraphFocus, Level, PpsFocus, Qc2Choice, QcOffer, SettingsFocus, Tab,
+    Detail, GraphFocus, Level, PpsFocus, Qc2Choice, QcOffer, RESET_STEPS, SettingsFocus, Tab,
 };
 use firmware_core::dcp::Dcp;
 use firmware_core::energy::Totals;
@@ -43,6 +43,10 @@ const ROW: FontRenderer =
 /// Labels, hints, peaks and the page counter: ProFont 12 px.
 const PLAIN: FontRenderer =
     FontRenderer::new::<fonts::u8g2_font_profont12_mr>().with_ignore_unknown_chars(true);
+/// Outlined cards' labels: Nokia Small, proportional, so its digits are
+/// narrow.
+const SMALL: FontRenderer =
+    FontRenderer::new::<fonts::u8g2_font_NokiaSmallPlain_tr>().with_ignore_unknown_chars(true);
 
 const BLACK: Rgb565 = Rgb565::BLACK;
 const WHITE: Rgb565 = Rgb565::new(30, 61, 30);
@@ -58,6 +62,9 @@ const YELLOW_TINT: Rgb565 = Rgb565::new(5, 10, 0);
 const CYAN_TINT: Rgb565 = Rgb565::new(1, 9, 6);
 const GREEN_TINT: Rgb565 = Rgb565::new(1, 10, 1);
 const MAGENTA_TINT: Rgb565 = Rgb565::new(6, 4, 6);
+/// The reset hold's sweep, a neutral fill lighter than every tint, so each
+/// accent stays readable over it.
+const SWEEP: Rgb565 = Rgb565::new(10, 20, 10);
 
 /// Screen width and the left/right margins, in pixels.
 const WIDTH: u32 = 240;
@@ -315,6 +322,10 @@ pub struct Meter {
     pub flipped: bool,
     /// Heartbeat dot colour (alternates every pulse, red on a bus fault).
     pub alive: Rgb565,
+    /// Heartbeat pulses since boot, which step the flow chevrons' shimmer.
+    pub pulses: u32,
+    /// The reset hold's progress over the peaks, out of [`RESET_STEPS`].
+    pub reset_hold: u8,
 }
 
 /// Small text buffer for formatted numbers and labels; writes past the end are dropped.
@@ -451,6 +462,20 @@ fn rule<D: DrawTarget<Color = Rgb565>>(target: &mut D, y: i32) {
         target,
         Rectangle::new(Point::new(LEFT - 2, y), Size::new(WIDTH - 12, 1)),
         RULE,
+    );
+}
+
+/// The reset hold's sweep over `area`: `steps` of [`RESET_STEPS`] filled
+/// from the left, over the card's fill and under its text.
+fn sweep<D: DrawTarget<Color = Rgb565>>(target: &mut D, area: Rectangle, steps: u8) {
+    let width = area.size.width * u32::from(steps) / u32::from(RESET_STEPS);
+    fill(
+        target,
+        RoundedRectangle::with_equal_corners(
+            Rectangle::new(area.top_left, Size::new(width, area.size.height)),
+            CORNER,
+        ),
+        SWEEP,
     );
 }
 
@@ -591,7 +616,7 @@ fn hint<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'_>, cont
                 ..
             }
         ) {
-            "< > groups    OK tabs"
+            "< > groups  OK tabs"
         } else {
             content
         },
@@ -604,7 +629,7 @@ fn hint<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'_>, cont
 /// Badge text and colour for a protocol.
 fn protocol_badge(protocol: Protocol) -> (&'static str, Rgb565) {
     match protocol {
-        Protocol::Unknown => ("NONE", RULE),
+        Protocol::Unknown => ("NONE", MUTED),
         Protocol::TypeC { ma: 0 } => ("USB", WHITE),
         Protocol::TypeC { .. } => ("TYPE-C", WHITE),
         Protocol::PdOffer | Protocol::Pd { revision: None, .. } => ("PD", GREEN),
@@ -633,23 +658,125 @@ fn level_color(mv: u16) -> Rgb565 {
     }
 }
 
-/// Overview cards: voltage and current on top, power and peaks below.
-const VOLTS_CARD: Rectangle = Rectangle::new(Point::new(4, 25), Size::new(114, 41));
-const AMPS_CARD: Rectangle = Rectangle::new(Point::new(122, 25), Size::new(114, 41));
-const POWER_CARD: Rectangle = Rectangle::new(Point::new(4, 70), Size::new(150, 48));
-const PEAKS_CARD: Rectangle = Rectangle::new(Point::new(158, 70), Size::new(78, 48));
+/// The least padding inside a card, between its edge and its content, in
+/// pixels. Cards fill the page from under the header rule to 2 px above the
+/// hint row's ink, so a page with fewer cards gives each more room, its
+/// content centred.
+const PAD: i32 = 5;
+const CONTENT_BOTTOM: i32 = HINT_BASELINE - PLAIN_INK - 3;
+/// Rows the fonts ink above their baseline, measured by rendering them:
+/// `PLAIN` capitals and digits, `SMALL`, `READING` and `POWER` digits.
+const PLAIN_INK: i32 = 8;
+const SMALL_INK: i32 = 7;
+const READING_INK: i32 = 19;
+const POWER_INK: i32 = 27;
+
+/// Outlined cards, on the overview page: an outline in
+/// the card's colour on the bare background, with its label in `SMALL`
+/// sitting on the top edge, the edge running through the label's middle
+/// and cut away round it. The first label's ink starts just under the
+/// header rule, the next label's 2 clear rows under the cards above.
+const OUTLINED_GAP: i32 = 2;
+/// Rows of label ink above and below a card's top edge.
+const LABEL_ABOVE_EDGE: i32 = SMALL_INK / 2;
+const LABEL_BELOW_EDGE: i32 = SMALL_INK - LABEL_ABOVE_EDGE;
+const OUTLINED_TOP: i32 = HEADER_RULE_Y + 2 + LABEL_ABOVE_EDGE;
+/// A label's left edge, from its card's.
+const OUTLINED_LABEL_LEFT: i32 = PAD + 2;
+/// Rows from one outlined card's bottom to the next one's top edge.
+const OUTLINED_SPACING: i32 = OUTLINED_GAP + LABEL_ABOVE_EDGE;
+/// The top edge of the outlined card `row` rows down, the cards `height`
+/// rows tall.
+const fn outlined_top(row: i32, height: u32) -> i32 {
+    OUTLINED_TOP + row * (height as i32 + OUTLINED_SPACING)
+}
 /// Card label baseline and value baseline, from the card top.
 const CARD_LABEL: i32 = 11;
 const CARD_VALUE: i32 = 35;
-const POWER_VALUE: i32 = 43;
+/// Overview cards: voltage and current on top, power and peaks below, the
+/// protocol strip at the bottom. A value starts 2 px under the label's
+/// lower half and pads 3 px above the bottom edge.
+const OVERVIEW_PAD: i32 = 3;
+/// A value's baseline under its card's top edge, for an `ink` row font.
+const fn overview_value(ink: i32) -> i32 {
+    LABEL_BELOW_EDGE + 2 + ink
+}
+const fn overview_height(ink: i32) -> u32 {
+    (overview_value(ink) + OVERVIEW_PAD + 1) as u32
+}
+const OVERVIEW_VALUE: i32 = overview_value(READING_INK);
+const OVERVIEW_HEIGHT: u32 = overview_height(READING_INK);
+const VOLTS_CARD: Rectangle =
+    Rectangle::new(Point::new(4, OUTLINED_TOP), Size::new(114, OVERVIEW_HEIGHT));
+const AMPS_CARD: Rectangle = Rectangle::new(
+    Point::new(122, OUTLINED_TOP),
+    Size::new(114, OVERVIEW_HEIGHT),
+);
+const POWER_TOP: i32 = outlined_top(1, OVERVIEW_HEIGHT);
+const POWER_VALUE: i32 = overview_value(POWER_INK);
+const POWER_HEIGHT: u32 = overview_height(POWER_INK);
+const POWER_CARD: Rectangle =
+    Rectangle::new(Point::new(4, POWER_TOP), Size::new(150, POWER_HEIGHT));
+const PEAKS_CARD: Rectangle =
+    Rectangle::new(Point::new(158, POWER_TOP), Size::new(78, POWER_HEIGHT));
+/// The peaks' pitch, and their first baseline with the three rows centred
+/// in the card (they sit right, clear of the label).
+const PEAKS_PITCH: i32 = 9;
+const PEAKS_FIRST: i32 = (POWER_HEIGHT as i32 - PLAIN_INK - 2 * PEAKS_PITCH) / 2 + PLAIN_INK;
+/// The protocol strip, an outlined card along the bottom in the protocol's
+/// colour: its `PLAIN` line, the protocol then its status, sits like a
+/// value, padding 3 px above the bottom edge.
+const STRIP_VALUE: i32 = LABEL_BELOW_EDGE + 2 + PLAIN_INK;
+const STRIP_HEIGHT: u32 = (STRIP_VALUE + OVERVIEW_PAD + 1) as u32;
+const PROTOCOL_STRIP: Rectangle = Rectangle::new(
+    Point::new(4, CONTENT_BOTTOM + 1 - STRIP_HEIGHT as i32),
+    Size::new(232, STRIP_HEIGHT),
+);
+const _: () =
+    assert!(POWER_TOP + POWER_HEIGHT as i32 + OUTLINED_SPACING <= PROTOCOL_STRIP.top_left.y);
 /// Below this current magnitude no flow arrow is drawn, in mA: a chosen
 /// margin over the shunt's zero offset (40 INA226 counts), not a measured one.
 const FLOW_MIN_MA: u32 = 20;
-/// Right edge of the flow chevrons on the bottom row, in pixels: clear of
-/// the heartbeat dot.
-const FLOW_RIGHT: i32 = RIGHT - 10;
-/// Protocol pill along the bottom edge.
-const PILL: Rectangle = Rectangle::new(Point::new(4, 121), Size::new(52, 13));
+/// The strip's status baseline, and its chevrons' (`BOLD`, 10 rows of
+/// ink) one row lower, centred on it.
+const STRIP_BASELINE: i32 = PROTOCOL_STRIP.top_left.y + STRIP_VALUE;
+const STRIP_CHEVRON_BASELINE: i32 = STRIP_BASELINE + 1;
+/// Heartbeat dot diameter, and its centre at the strip's right padding.
+const DOT: u32 = 6;
+const STRIP_DOT: Point = Point::new(
+    PROTOCOL_STRIP.top_left.x + PROTOCOL_STRIP.size.width as i32 - PAD - DOT as i32 / 2,
+    STRIP_BASELINE - PLAIN_INK / 2,
+);
+/// Right edge of the flow chevrons, clear of the heartbeat dot, and how
+/// many there are.
+const FLOW_RIGHT: i32 = STRIP_DOT.x - DOT as i32;
+const FLOW_CHEVRONS: u32 = 3;
+
+/// An outlined card: an outline in `color` with `label` on its top edge,
+/// the edge cut away round the label. `steps` of the reset sweep fill the
+/// inside under the outline.
+fn outlined_card<D: DrawTarget<Color = Rgb565>>(
+    target: &mut D,
+    area: Rectangle,
+    label: &str,
+    color: Rgb565,
+    steps: u8,
+) {
+    sweep(target, area, steps);
+    labelled_outline(target, area, label, color, color);
+}
+
+/// A 1 px rounded outline round `area`, `corner` the corner radius.
+fn rounded_outline<D: DrawTarget<Color = Rgb565>>(
+    target: &mut D,
+    area: Rectangle,
+    corner: Size,
+    color: Rgb565,
+) {
+    RoundedRectangle::with_equal_corners(area, corner)
+        .draw_styled(&PrimitiveStyle::with_stroke(color, 1), target)
+        .ok();
+}
 
 fn card_label<D: DrawTarget<Color = Rgb565>>(
     target: &mut D,
@@ -662,6 +789,35 @@ fn card_label<D: DrawTarget<Color = Rgb565>>(
         &PLAIN,
         label,
         area.top_left + Point::new(6, CARD_LABEL),
+        HorizontalAlignment::Left,
+        color,
+    );
+}
+
+/// An outline in `outline` with `label` in `color` on its top edge, the
+/// edge cut away round the label.
+fn labelled_outline<D: DrawTarget<Color = Rgb565>>(
+    target: &mut D,
+    area: Rectangle,
+    label: &str,
+    color: Rgb565,
+    outline: Rgb565,
+) {
+    rounded_outline(target, area, CORNER, outline);
+    let left = area.top_left.x + OUTLINED_LABEL_LEFT;
+    fill(
+        target,
+        Rectangle::new(
+            Point::new(left - 2, area.top_left.y),
+            Size::new((width(&SMALL, label) + 4) as u32, 1),
+        ),
+        BLACK,
+    );
+    text(
+        target,
+        &SMALL,
+        label,
+        Point::new(left, area.top_left.y + LABEL_BELOW_EDGE),
         HorizontalAlignment::Left,
         color,
     );
@@ -689,34 +845,31 @@ pub fn draw_meter<D: DrawTarget<Color = Rgb565>>(
         ),
     };
     let cards = [
-        (VOLTS_CARD, YELLOW_TINT, YELLOW, "VOLTAGE", volts, "V"),
-        (AMPS_CARD, CYAN_TINT, CYAN, "CURRENT", amps, "A"),
+        (VOLTS_CARD, YELLOW, "VOLTAGE", volts, "V"),
+        (AMPS_CARD, CYAN, "CURRENT", amps, "A"),
     ];
-    for (area, tint, color, label, value, unit) in &cards {
-        card(target, *area, *tint, None);
-        card_label(target, *area, label, *color);
+    for (area, color, label, value, unit) in &cards {
+        outlined_card(target, *area, label, *color, 0);
         value_with_unit(
             target,
             &READING,
             value,
             unit,
-            area.top_left + Point::new(6, CARD_VALUE),
+            area.top_left + Point::new(PAD, OVERVIEW_VALUE),
             *color,
         );
     }
-    card(target, POWER_CARD, GREEN_TINT, None);
-    card_label(target, POWER_CARD, "POWER", GREEN);
+    outlined_card(target, POWER_CARD, "POWER", GREEN, 0);
     value_with_unit(
         target,
         &POWER,
         &power,
         "W",
-        POWER_CARD.top_left + Point::new(6, POWER_VALUE),
+        POWER_CARD.top_left + Point::new(PAD, POWER_VALUE),
         GREEN,
     );
 
-    card(target, PEAKS_CARD, MAGENTA_TINT, None);
-    card_label(target, PEAKS_CARD, "MAX", MAGENTA);
+    outlined_card(target, PEAKS_CARD, "MAX", MAGENTA, meter.reset_hold);
     let peaks = [
         (Label::new().hundredths(meter.peaks.mv).push(b"V"), YELLOW),
         (Label::new().hundredths(meter.peaks.ma).push(b"A"), CYAN),
@@ -728,8 +881,8 @@ pub fn draw_meter<D: DrawTarget<Color = Rgb565>>(
             &PLAIN,
             peak.as_str(),
             Point::new(
-                PEAKS_CARD.top_left.x + PEAKS_CARD.size.width as i32 - 6,
-                PEAKS_CARD.top_left.y + 22 + 11 * index as i32,
+                PEAKS_CARD.top_left.x + PEAKS_CARD.size.width as i32 - PAD,
+                PEAKS_CARD.top_left.y + PEAKS_FIRST + PEAKS_PITCH * index as i32,
             ),
             HorizontalAlignment::Right,
             *color,
@@ -737,38 +890,28 @@ pub fn draw_meter<D: DrawTarget<Color = Rgb565>>(
     }
 
     let (badge, color) = protocol_badge(meter.protocol);
-    fill(
+    outlined_card(target, PROTOCOL_STRIP, "PROTOCOL", color, 0);
+    let badge_end = text(
         target,
-        RoundedRectangle::with_equal_corners(PILL, Size::new(6, 6)),
+        &PLAIN,
+        badge,
+        Point::new(PROTOCOL_STRIP.top_left.x + PAD, STRIP_BASELINE),
+        HorizontalAlignment::Left,
         color,
     );
     text(
         target,
         &PLAIN,
-        badge,
-        Point::new(PILL.center().x, HINT_BASELINE - 1),
-        HorizontalAlignment::Center,
-        BLACK,
-    );
-    text(
-        target,
-        &PLAIN,
         status(meter.protocol, meter.cc).as_str(),
-        Point::new(
-            PILL.top_left.x + PILL.size.width as i32 + 6,
-            HINT_BASELINE - 1,
-        ),
+        Point::new(badge_end + PAD, STRIP_BASELINE),
         HorizontalAlignment::Left,
         WHITE,
     );
     if let Some(reading) = meter.reading {
-        flow(target, reading.ma, meter.flipped);
+        flow(target, reading.ma, meter.flipped, meter.pulses);
     }
-    fill(
-        target,
-        Circle::with_center(Point::new(RIGHT - 1, HINT_BASELINE - 5), 6),
-        meter.alive,
-    );
+    fill(target, Circle::with_center(STRIP_DOT, DOT), meter.alive);
+    hint(target, header, "< > tabs  hold OK reset");
 }
 
 /// Space between the trace and window labels, and the full-scale label's
@@ -860,6 +1003,12 @@ fn graph_row<D: DrawTarget<Color = Rgb565>>(
             color,
         );
     }
+}
+
+/// How far `content` advances in `font`, in pixels.
+fn width(font: &FontRenderer, content: &str) -> i32 {
+    font.get_rendered_dimensions(content, Point::zero(), VerticalPosition::Baseline)
+        .map_or(0, |dimensions| dimensions.advance.x)
 }
 
 /// The graph: `trace` over the last `window`, newest on the right, from zero
@@ -1073,28 +1222,40 @@ pub fn draw_energy<D: DrawTarget<Color = Rgb565>>(
     hint(target, header, "reset totals in settings    < > tabs");
 }
 
-/// Which way the current flows, as chevrons on the bottom row. Upright, the
+/// Which way the current flows, as chevrons in the protocol strip. Upright, the
 /// plug is on the left and the receptacle on the right; `flipped` (the frame
 /// turned 180 degrees) swaps them. Positive current runs from the receptacle
 /// to the plug (charger on the receptacle), negative the other way.
-fn flow<D: DrawTarget<Color = Rgb565>>(target: &mut D, ma: i32, flipped: bool) {
+fn flow<D: DrawTarget<Color = Rgb565>>(target: &mut D, ma: i32, flipped: bool, pulses: u32) {
     if ma.unsigned_abs() < FLOW_MIN_MA {
         return;
     }
     let toward_plug = ma > 0;
-    let chevrons = if toward_plug != flipped {
-        "< < <"
+    let (chevron, leftward) = if toward_plug != flipped {
+        ("<", true)
     } else {
-        "> > >"
+        (">", false)
     };
-    text(
-        target,
-        &BOLD,
-        chevrons,
-        Point::new(FLOW_RIGHT, HINT_BASELINE - 1),
-        HorizontalAlignment::Right,
-        CYAN,
-    );
+    // One chevron lit at a time, stepping with each pulse in the direction
+    // of the flow.
+    let step = (pulses % FLOW_CHEVRONS) as i32;
+    let lit = if leftward {
+        FLOW_CHEVRONS as i32 - 1 - step
+    } else {
+        step
+    };
+    let pitch = width(&BOLD, "> ");
+    let first = FLOW_RIGHT - (FLOW_CHEVRONS as i32 - 1) * pitch - width(&BOLD, chevron);
+    for index in 0..FLOW_CHEVRONS as i32 {
+        text(
+            target,
+            &BOLD,
+            chevron,
+            Point::new(first + index * pitch, STRIP_CHEVRON_BASELINE),
+            HorizontalAlignment::Left,
+            if index == lit { CYAN } else { MUTED },
+        );
+    }
 }
 
 /// "CC1  20V 3.00A": attached CC pin and contract.
