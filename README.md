@@ -121,10 +121,10 @@ What this firmware does **not** do, for now:
   advertisement, the fixed D+/D- voltages some ports use to tell their
   current (`DIVIDER`, `1.2V DCP`) and the BC1.2 short once the Quick Charge
   test found it; a BC1.2 port looks like a plain USB port until then.
-- **EPR is limited to 30 V and untested on hardware.** Fixed 28 V and EPR
-  AVS up to 30 V can be selected with a real EPR cable. Fixed 36/48 V remain
-  informational only. The fake marker remains 20 V/non-EPR. Keep-alive timing
-  under display load still requires hardware verification.
+- **EPR is limited to 30 V, and EPR AVS is untested.** Fixed 28 V works
+  with a real EPR cable and was tested on hardware. EPR AVS up to 30 V can be
+  selected the same way but has not been tried on a charger. Fixed 36/48 V
+  remain informational only. The fake marker remains 20 V/non-EPR.
 - **The battery readout is untested.** It is built from the USB PD 3.2
   specification and checked in the library tests, but no battery-reporting
   power bank has been tried yet.
@@ -145,8 +145,9 @@ What this firmware does **not** do, for now:
 - **The 5 A cable test is non-standard**, and works only with the meter's plug
   straight in the charger. See
   [Full charger offer and 5 A without a cable](#full-charger-offer-and-5-a-without-a-cable).
-- **No recording.** The graph keeps ten minutes in RAM only; nothing is
-  logged to flash or exported, and there is no USB data connection to a
+- **No logging or export.** The graph keeps ten minutes in RAM only and is
+  lost on restart; only energy totals can persist (see
+  [What is saved](#what-is-saved)). There is no USB data connection to a
   computer or app.
 - **No calibration setting.** The measurement uses a fixed sensor calibration.
   The line voltages use an internal reference of 1083 mV, the stock
@@ -157,9 +158,6 @@ What this firmware does **not** do, for now:
 - **The chosen profile is not remembered:** every boot starts at 5 V.
 - **About 4000 settings saves** in the device's lifetime (see
   [What is saved](#what-is-saved)).
-- **Flashing uses the Rust flasher on Windows, Linux or macOS** (see
-  [Flashing](#flashing)). Project `.X1C` images are generated directly from the
-  compiled application; no original firmware file is required.
 - **Not certified.** Compiling and hand-testing are not USB-IF or safety
   qualification.
 
@@ -1503,8 +1501,8 @@ retry or restoration needs separate approval of the exact image/hash.
 
 Linux flashing has passed final verification for both the generated project
 image and stock firmware; stock boot was confirmed. The x64 Windows GNU
-cross-build has also flashed project and stock firmware. Hardware operation with
-the Windows MSVC release build and macOS is not yet validated.
+cross-build has also flashed project and stock firmware, and the Windows MSVC
+and macOS release builds have flashed the project firmware.
 See [the safety contract](docs/SAFETY.md) for the full limits.
 
 #### GitHub builds and releases
