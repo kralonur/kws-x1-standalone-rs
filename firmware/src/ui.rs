@@ -382,6 +382,17 @@ impl Label {
         self.fixed(milli / 10, 2)
     }
 
+    /// Hours, minutes and seconds from ms, e.g. "1:02:03"; hours grow past 99.
+    fn duration(self, ms: u64) -> Self {
+        let seconds = ms / 1000;
+        let two = |value: u64| [b'0' + (value / 10) as u8, b'0' + (value % 10) as u8];
+        self.fixed_u64(seconds / 3600, 0)
+            .push(b":")
+            .push(&two(seconds / 60 % 60))
+            .push(b":")
+            .push(&two(seconds % 60))
+    }
+
     /// Watts from mW: two decimals, one from 100 W so it keeps five characters.
     fn watts(self, mw: u32) -> Self {
         if mw >= 100_000 {
@@ -670,7 +681,7 @@ const SMALL_INK: i32 = 7;
 const READING_INK: i32 = 19;
 const POWER_INK: i32 = 27;
 
-/// Outlined cards, on the overview and lines pages: an outline in
+/// Outlined cards, on the overview, lines and energy pages: an outline in
 /// the card's colour on the bare background, with its label in `SMALL`
 /// sitting on the top edge, the edge running through the label's middle
 /// and cut away round it. The first label's ink starts just under the
@@ -698,9 +709,8 @@ const fn outlined_value(height: u32, ink: i32) -> i32 {
     let top = LABEL_BELOW_EDGE + 1;
     top + (height as i32 - 1 - top - ink) / 2 + ink
 }
-/// Card label baseline and value baseline, from the card top.
+/// Card label baseline, from the card top.
 const CARD_LABEL: i32 = 11;
-const CARD_VALUE: i32 = 35;
 /// Overview cards: voltage and current on top, power and peaks below, the
 /// protocol strip at the bottom. A value starts 2 px under the label's
 /// lower half and pads 3 px above the bottom edge.
@@ -1163,71 +1173,62 @@ fn plot_column<D: DrawTarget<Color = Rgb565>>(
     *previous = Some(point);
 }
 
+/// Energy cards: charge, energy and time, three rows filling the page.
+const ENERGY_CARD_HEIGHT: u32 = outlined_height(3);
+const ENERGY_VALUE: i32 = outlined_value(ENERGY_CARD_HEIGHT, READING_INK);
+
 /// Totals remain visible on their own monitor tab without displacing live
-/// readings or peaks on the overview.
+/// readings or peaks on the overview; `reset_hold` is the reset hold's
+/// progress over them.
 pub fn draw_energy<D: DrawTarget<Color = Rgb565>>(
     target: &mut D,
     header: &Header<'_>,
     totals: Totals,
     memory: EnergyMemory,
     save_status: crate::energy_store::Status,
+    reset_hold: u8,
 ) {
     draw_header(target, header);
     let cards = [
         (
-            Rectangle::new(Point::new(4, 25), Size::new(232, 39)),
             "CHARGE",
-            totals.milliamp_hours(),
+            Label::new().fixed_u64(totals.milliamp_hours(), 3),
             "Ah",
             CYAN,
-            CYAN_TINT,
         ),
         (
-            Rectangle::new(Point::new(4, 68), Size::new(232, 39)),
             "ENERGY",
-            totals.milliwatt_hours(),
+            Label::new().fixed_u64(totals.milliwatt_hours(), 3),
             "Wh",
             GREEN,
-            GREEN_TINT,
         ),
+        ("TIME", Label::new().duration(totals.elapsed_ms), "", YELLOW),
     ];
-    for (area, label, value, unit, color, tint) in cards {
-        card(target, area, tint, None);
-        card_label(target, area, label, color);
+    for (index, (label, value, unit, color)) in cards.iter().enumerate() {
+        let top = outlined_top(index as i32, ENERGY_CARD_HEIGHT);
+        let area = Rectangle::new(Point::new(4, top), Size::new(232, ENERGY_CARD_HEIGHT));
+        outlined_card(target, area, label, *color, reset_hold);
         value_with_unit(
             target,
             &READING,
-            &Label::new().fixed_u64(value, 3),
+            value,
             unit,
-            area.top_left + Point::new(6, CARD_VALUE),
-            color,
+            Point::new(area.top_left.x + PAD, top + ENERGY_VALUE),
+            *color,
         );
     }
-    let status = if memory == EnergyMemory::Off {
-        Label::new().push(b"RAM ONLY - RESTART RESETS")
-    } else if save_status == crate::energy_store::Status::Occupied {
-        Label::new().push(b"ENERGY AREA OCCUPIED")
-    } else if save_status == crate::energy_store::Status::SaveFailed {
-        Label::new().push(b"FLASH SAVE FAILED")
-    } else {
-        Label::new()
-            .push(b"SAVE EVERY ")
-            .push(memory.label().as_bytes())
-            .push(b" - FLASH WEAR")
+    // How the totals are kept, as the hint's note: the cards fill the page.
+    let note: &[u8] = match (memory, save_status) {
+        (EnergyMemory::Off, _) => b"RAM only",
+        (_, crate::energy_store::Status::Occupied) => b"flash taken",
+        (_, crate::energy_store::Status::SaveFailed) => b"save failed",
+        (_, crate::energy_store::Status::Ready) => b"save ",
     };
-    text(
-        target,
-        &PLAIN,
-        status.as_str(),
-        Point::new(LEFT, VERSION_BASELINE),
-        HorizontalAlignment::Left,
-        if memory != EnergyMemory::Off && save_status != crate::energy_store::Status::Ready {
-            ORANGE
-        } else {
-            MUTED
-        },
-    );
-    hint(target, header, "reset totals in settings    < > tabs");
+    let mut hint_text = Label::new().push(b"< > tabs  hold OK reset  ").push(note);
+    if memory != EnergyMemory::Off && save_status == crate::energy_store::Status::Ready {
+        hint_text = hint_text.push(memory.label().as_bytes());
+    }
+    hint(target, header, hint_text.as_str());
 }
 
 /// Which way the current flows, as chevrons in the protocol strip. Upright, the

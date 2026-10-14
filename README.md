@@ -278,8 +278,8 @@ an interrupted migration on a later boot. Settings, logs outside that pair,
 firmware and the bootloader are not cleared. This one-time migration may also
 run with Energy memory Off; it is not a recurring boot erase. Blank or already
 initialized pairs need no cleanup. Unknown data is never treated as unused.
-`ENERGY AREA OCCUPIED` means the reserved sectors contain unrecognized data or
-settings this journal cannot claim. `FLASH SAVE FAILED` means a write or erase failed.
+On the Energy screen, `flash taken` means the reserved sectors contain unrecognized data or
+settings this journal cannot claim, and `save failed` means a write or erase failed.
 In either case totals are RAM-only and remain usable until power-off. Writes
 stop after a flash error for that boot. Settings also show `SETTINGS AREA FULL`
 or `SETTINGS WRITE FAILED` instead of silently promising that a failed change
@@ -413,14 +413,18 @@ screen shows, or while Quick Charge runs.
 
 #### Energy
 
-The **Energy** screen (tab `ENERGY` in Monitor, after Lines) shows **CHARGE** in
-Ah and **ENERGY** in Wh, with three decimals. It counts current magnitude in either
-direction, sampling voltage/current every nominal 100 ms regardless of the shown
-page. Failed samples and gaps over one second are not extrapolated. Counters
-continue from saved totals only when energy memory is enabled.
+The **Energy** screen (tab `ENERGY` in Monitor, after Lines) shows, in three
+outlined cards, **CHARGE** in Ah and **ENERGY** in Wh, with three decimals, and
+**TIME** since the last reset (`h:mm:ss`). It counts current magnitude in either direction, sampling
+voltage/current every nominal 100 ms regardless of the shown page. Failed
+samples and gaps over one second are not extrapolated; the time counts on
+through them. Counters and time continue from saved totals only when energy
+memory is enabled.
 
-The status line shows RAM-only operation, the checkpoint interval/flash-wear
-reminder, or a save failure. Use **RESET ENERGY** in Settings to start fresh.
+The hint row ends with how the totals are kept: `RAM only`, `save 5s` (the
+checkpoint interval), `flash taken` or `save failed`, for example
+`< > tabs  hold OK reset  save 5s`. To start fresh, hold OK: the cards fill
+from left to right and reset once full.
 
 #### 3. PD Profiles
 

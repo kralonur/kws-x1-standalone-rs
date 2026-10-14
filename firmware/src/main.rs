@@ -1121,6 +1121,7 @@ async fn meter_task(
                         energy.totals,
                         energy_memory,
                         energy_save_status,
+                        input.reset_hold,
                     );
                 }
                 View::Lines => {
