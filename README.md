@@ -371,20 +371,22 @@ The **Graph** screen (tab `GRAPH` in Monitor, after Overview) plots power
 more seconds than the plot has pixels, a column shows the highest second it
 covers, so a short peak stays visible.
 
-- **`NOW`**: the last full second's voltage, current and power.
-- **`MAX`**: the highest voltage, current and power within the window, each
-  on its own.
+- **`NOW/MAX`** (a card above the plot): for voltage, current and power,
+  the last full second's value, then the highest within the window, each on
+  its own, e.g. `9.01/9.10V  2.98/3.02A  26.85/27.40W`.
 - **Scale**: from zero to a round number at least 10% above the plotted
   quantity's `MAX` (1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6 or 8 times a power of
   ten: 22 W shows on a `25W` scale, 9 V on `10V`), named in grey at the top
   left of the plot.
-- **Trace and window** (bottom right): `POWER  2 MIN`, the trace in its
+- **Trace and window** (top right of the plot): `POWER  2 MIN`, the trace in its
   colour. OK opens the trace (`< POWER >`): Left/Right choose power,
   voltage or current. OK moves to the window (`< 2 MIN >` in cyan):
   Left/Right change it. OK again, or Back at either step, closes. Both last
   until a restart.
 - A second without a reading leaves a gap.
-- **Hint row**: `OK choose    < > tabs`, then `< > trace  OK time` and
+- **Reset**: hold OK and the `NOW/MAX` card fills from left to right; once full,
+  the history clears and the plot starts over. Let go earlier to keep it.
+- **Hint row**: `< > tabs  OK choose  hold OK reset`, then `< > trace  OK time` and
   `< > time  OK done`.
 
 The history is kept in RAM only (ten minutes, about 7 KB): it costs no

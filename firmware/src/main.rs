@@ -1111,6 +1111,7 @@ async fn meter_task(
                         input.graph_trace,
                         input.graph_window,
                         focus,
+                        input.reset_hold,
                     );
                 }
                 View::Energy => {

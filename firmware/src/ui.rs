@@ -40,6 +40,9 @@ const BOLD: FontRenderer =
 /// Settings rows: t0 14 px bold.
 const ROW: FontRenderer =
     FontRenderer::new::<fonts::u8g2_font_t0_14b_mr>().with_ignore_unknown_chars(true);
+/// The graph's now/max values, which must fit one line: 6x13, monospaced.
+const GRAPH_VALUES: FontRenderer =
+    FontRenderer::new::<fonts::u8g2_font_6x13_mr>().with_ignore_unknown_chars(true);
 /// Labels, hints, peaks and the page counter: ProFont 12 px.
 const PLAIN: FontRenderer =
     FontRenderer::new::<fonts::u8g2_font_profont12_mr>().with_ignore_unknown_chars(true);
@@ -675,9 +678,11 @@ fn level_color(mv: u16) -> Rgb565 {
 const PAD: i32 = 5;
 const CONTENT_BOTTOM: i32 = HINT_BASELINE - PLAIN_INK - 3;
 /// Rows the fonts ink above their baseline, measured by rendering them:
-/// `PLAIN` capitals and digits, `SMALL`, `READING` and `POWER` digits.
+/// `PLAIN` capitals and digits, `SMALL`, `GRAPH_VALUES`, `READING` and
+/// `POWER` digits.
 const PLAIN_INK: i32 = 8;
 const SMALL_INK: i32 = 7;
+const GRAPH_VALUES_INK: i32 = 9;
 const READING_INK: i32 = 19;
 const POWER_INK: i32 = 27;
 
@@ -932,17 +937,26 @@ pub fn draw_meter<D: DrawTarget<Color = Rgb565>>(
     hint(target, header, "< > tabs  hold OK reset");
 }
 
-/// Space between the trace and window labels, and the full-scale label's
-/// baseline below the plot's top line, in pixels.
+/// Space between the trace and window labels, and the baseline of the
+/// labels inside the plot (full scale, trace, window) below its top line,
+/// in pixels.
 const GRAPH_LABEL_GAP: i32 = 6;
 const GRAPH_SCALE_LABEL_BELOW_TOP: i32 = 10;
-/// Power graph: the now and max rows' baselines above the plot, the right
-/// edges of their volts and amps columns, and the plot.
-const GRAPH_NOW_BASELINE: i32 = 34;
-const GRAPH_MAX_BASELINE: i32 = 46;
-const GRAPH_VOLTS_RIGHT: i32 = 100;
-const GRAPH_AMPS_RIGHT: i32 = 160;
-const PLOT: Rectangle = Rectangle::new(Point::new(LEFT - 4, 51), Size::new(230, 70));
+/// Power graph: the now/max values in an outlined card above the plot,
+/// sitting like a value and padding 3 px above its bottom edge, and the
+/// plot filling the rest 2 clear rows under it.
+const GRAPH_ROW_VALUE: i32 = LABEL_BELOW_EDGE + 2 + GRAPH_VALUES_INK;
+const GRAPH_ROW_CARD: Rectangle = Rectangle::new(
+    Point::new(4, OUTLINED_TOP),
+    Size::new(232, (GRAPH_ROW_VALUE + OVERVIEW_PAD + 1) as u32),
+);
+const PLOT_TOP: i32 = GRAPH_ROW_CARD.top_left.y + GRAPH_ROW_CARD.size.height as i32 + OUTLINED_GAP;
+const PLOT: Rectangle = Rectangle::new(
+    Point::new(LEFT - 4, PLOT_TOP),
+    Size::new(230, (CONTENT_BOTTOM - PLOT_TOP + 1) as u32),
+);
+/// Right edge of the labels inside the plot.
+const PLOT_RIGHT: i32 = PLOT.top_left.x + PLOT.size.width as i32 - 2;
 /// The graph's full scale is the peak plus this headroom, in percent,
 /// rounded up to one of these steps (times a power of ten), so the top line
 /// is a round number the trace stays below: e.g. 22 W becomes 25 W.
@@ -977,49 +991,59 @@ fn scale_label(milli: u32) -> Label {
     }
 }
 
-/// One summary row: `label`, then volts, amps and watts in the overview's
-/// colours, or dashes without a reading.
+/// The now/max card: the latest second's and the window's highest volts,
+/// amps and watts ("9.01/9.10V") in the overview's colours, dashes for
+/// either without a reading, spread across the card with equal gaps under
+/// a `NOW/MAX` label.
 fn graph_row<D: DrawTarget<Color = Rgb565>>(
     target: &mut D,
-    label: &str,
-    color: Rgb565,
-    sample: Option<Sample>,
-    baseline: i32,
+    now: Option<Sample>,
+    max: Option<Sample>,
+    reset_hold: u8,
 ) {
+    let pair = |value: fn(Label, Sample) -> Label, blank: &[u8], unit: &[u8]| {
+        let half = |sample: Option<Sample>, label: Label| match sample {
+            Some(sample) => value(label, sample),
+            None => label.push(blank),
+        };
+        half(max, half(now, Label::new()).push(b"/")).push(unit)
+    };
+    let values = [
+        pair(|l, s| l.hundredths(s.mv.into()), b"--.--", b"V"),
+        pair(|l, s| l.hundredths(s.ma.into()), b"-.--", b"A"),
+        pair(|l, s| l.watts(s.mw), b"--.--", b"W"),
+    ];
+    let area = GRAPH_ROW_CARD;
+    outlined_card(target, area, "NOW/MAX", WHITE, reset_hold);
+    let label = Point::new(
+        area.top_left.x + OUTLINED_LABEL_LEFT,
+        area.top_left.y + LABEL_BELOW_EDGE,
+    );
     text(
         target,
-        &PLAIN,
-        label,
-        Point::new(LEFT, baseline),
+        &SMALL,
+        "/MAX",
+        label + Point::new(width(&SMALL, "NOW"), 0),
         HorizontalAlignment::Left,
-        color,
+        MAGENTA,
     );
-    let values = match sample {
-        Some(sample) => [
-            Label::new().hundredths(sample.mv.into()).push(b"V"),
-            Label::new().hundredths(sample.ma.into()).push(b"A"),
-            Label::new().watts(sample.mw).push(b"W"),
-        ],
-        None => [
-            Label::new().push(b"--.--V"),
-            Label::new().push(b"-.--A"),
-            Label::new().push(b"--.--W"),
-        ],
-    };
-    let columns = [
-        (GRAPH_VOLTS_RIGHT, YELLOW),
-        (GRAPH_AMPS_RIGHT, CYAN),
-        (RIGHT, GREEN),
-    ];
-    for (value, (right, color)) in values.iter().zip(columns) {
+    let left = area.top_left.x + PAD;
+    let right = area.top_left.x + area.size.width as i32 - PAD;
+    let widths = values
+        .each_ref()
+        .map(|value| width(&GRAPH_VALUES, value.as_str()));
+    let gap = (right - left - widths.iter().sum::<i32>()) / (widths.len() as i32 - 1);
+    let mut x = left;
+    for ((value, width), color) in values.iter().zip(widths).zip([YELLOW, CYAN, GREEN]) {
         text(
             target,
-            &PLAIN,
+            &GRAPH_VALUES,
             value.as_str(),
-            Point::new(right, baseline),
-            HorizontalAlignment::Right,
+            Point::new(x, area.top_left.y + GRAPH_ROW_VALUE),
+            HorizontalAlignment::Left,
             color,
         );
+        x += width + gap;
     }
 }
 
@@ -1031,7 +1055,7 @@ fn width(font: &FontRenderer, content: &str) -> i32 {
 
 /// The graph: `trace` over the last `window`, newest on the right, from zero
 /// to a round full scale above the window's highest second. `focus` is what Left/Right
-/// change, once opened.
+/// change, once opened; `reset_hold` the reset hold's progress.
 pub fn draw_graph<D: DrawTarget<Color = Rgb565>>(
     target: &mut D,
     header: &Header<'_>,
@@ -1039,11 +1063,11 @@ pub fn draw_graph<D: DrawTarget<Color = Rgb565>>(
     trace: GraphTrace,
     window: GraphWindow,
     focus: Option<GraphFocus>,
+    reset_hold: u8,
 ) {
     draw_header(target, header);
     let max = history.max(window);
-    graph_row(target, "NOW", WHITE, history.latest(), GRAPH_NOW_BASELINE);
-    graph_row(target, "MAX", MAGENTA, max, GRAPH_MAX_BASELINE);
+    graph_row(target, history.latest(), max, reset_hold);
 
     let top = PLOT.top_left.y;
     let bottom = top + PLOT.size.height as i32 - 1;
@@ -1065,14 +1089,49 @@ pub fn draw_graph<D: DrawTarget<Color = Rgb565>>(
         GraphTrace::Current => (CYAN, CYAN_TINT),
     };
     let scale = graph_scale(max.map_or(0, |max| trace.value(max)));
+    let label_baseline = top + GRAPH_SCALE_LABEL_BELOW_TOP;
     // Drawn first, so the trace stays on top where they meet.
     text(
         target,
         &PLAIN,
         scale_label(scale).push(trace.unit().as_bytes()).as_str(),
-        Point::new(PLOT.top_left.x + 2, top + GRAPH_SCALE_LABEL_BELOW_TOP),
+        Point::new(PLOT.top_left.x + 2, label_baseline),
         HorizontalAlignment::Left,
         MUTED,
+    );
+    // Top right of the plot, under the trace like the scale: the trace in
+    // its colour, then the window; arrows round the one Left/Right change.
+    let framed = |content: &str, focused: bool| {
+        if focused {
+            Label::new()
+                .push(b"< ")
+                .push(content.as_bytes())
+                .push(b" >")
+        } else {
+            Label::new().push(content.as_bytes())
+        }
+    };
+    let span = framed(window.label(), focus == Some(GraphFocus::Window));
+    let span_width = width(&PLAIN, span.as_str());
+    text(
+        target,
+        &PLAIN,
+        span.as_str(),
+        Point::new(PLOT_RIGHT, label_baseline),
+        HorizontalAlignment::Right,
+        if focus == Some(GraphFocus::Window) {
+            CYAN
+        } else {
+            MUTED
+        },
+    );
+    text(
+        target,
+        &PLAIN,
+        framed(trace.label(), focus == Some(GraphFocus::Trace)).as_str(),
+        Point::new(PLOT_RIGHT - span_width - GRAPH_LABEL_GAP, label_baseline),
+        HorizontalAlignment::Right,
+        color,
     );
     // A column per second, or, when the window has more seconds than the
     // plot has pixels, the highest of the seconds a pixel column covers, so
@@ -1091,47 +1150,11 @@ pub fn draw_graph<D: DrawTarget<Color = Rgb565>>(
     }
     plot_column(target, column, columns, scale, (color, tint), &mut previous);
 
-    // Bottom right: the trace in its colour, then the window; arrows round
-    // the one Left/Right change.
-    let framed = |content: &str, focused: bool| {
-        if focused {
-            Label::new()
-                .push(b"< ")
-                .push(content.as_bytes())
-                .push(b" >")
-        } else {
-            Label::new().push(content.as_bytes())
-        }
-    };
-    let span = framed(window.label(), focus == Some(GraphFocus::Window));
-    let span_width = PLAIN
-        .get_rendered_dimensions(span.as_str(), Point::zero(), VerticalPosition::Baseline)
-        .map_or(0, |dimensions| dimensions.advance.x);
-    text(
-        target,
-        &PLAIN,
-        span.as_str(),
-        Point::new(RIGHT, HINT_BASELINE),
-        HorizontalAlignment::Right,
-        if focus == Some(GraphFocus::Window) {
-            CYAN
-        } else {
-            MUTED
-        },
-    );
-    text(
-        target,
-        &PLAIN,
-        framed(trace.label(), focus == Some(GraphFocus::Trace)).as_str(),
-        Point::new(RIGHT - span_width - GRAPH_LABEL_GAP, HINT_BASELINE),
-        HorizontalAlignment::Right,
-        color,
-    );
     hint(
         target,
         header,
         match focus {
-            None => "OK choose    < > tabs",
+            None => "< > tabs  OK choose  hold OK reset",
             Some(GraphFocus::Trace) => "< > trace  OK time",
             Some(GraphFocus::Window) => "< > time  OK done",
         },
