@@ -1072,6 +1072,10 @@ impl Navigation {
         if let Some(tab) = self.input.page.tab() {
             self.last[tab.group() as usize] = tab;
         }
+        // A hold lasts only while Ripple is shown: coming back starts live.
+        if self.input.page.tab() != Some(Tab::Ripple) {
+            self.input.ripple_hold = false;
+        }
         if self.silent {
             command = command.filter(|c| *c == PdCommand::Restart);
         }
