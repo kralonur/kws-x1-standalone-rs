@@ -2,25 +2,32 @@
 //! logs after committing erase intent in their unused header words. Otherwise
 //! the pair is claimed only after both sectors were checked blank. An intact
 //! energy header authorizes recovery of an interrupted erase of its partner.
-//! Never erase the sector containing the newest complete checkpoint.
+//! Never erase the sector containing the newest complete checkpoint, except
+//! a previous-format sector once that checkpoint is carried into the pair.
 
 use crate::energy::Totals;
 
 /// Backend sector size in bytes; checked against `firmware::flash::SECTOR`.
 pub const SECTOR_BYTES: usize = 8192;
-/// Pair ownership/version marker ("EN01"), followed by its complement.
-const CLAIM: u32 = 0x454e_3031;
+/// Pair ownership/version marker ("EN02"), followed by its complement.
+const CLAIM: u32 = 0x454e_3032;
+/// The previous record format's marker ("EN01"), whose records lack the
+/// elapsed time. Boot preparation carries its newest checkpoint over.
+const V1_CLAIM: u32 = 0x454e_3031;
 const HEADER_BYTES: usize = 8;
 /// Legacy logs reserve 16 header bytes but use only their first word. Each
 /// remaining word can commit pair-migration intent ("ENMG"). A torn marker
 /// is skipped, never reprogrammed; another blank header word is used instead.
 const LEGACY_HEADER_BYTES: usize = 16;
 const MIGRATION: u32 = 0x454e_4d47;
-/// Sequence plus two u64 counters, their word-wise complements and a final
-/// nonblank commit word. Complements alone can equal erased words, so they
-/// cannot identify the last programmed word after a power cut.
-const DATA_WORDS: usize = 5;
+/// Sequence plus three u64 counters (charge, energy, elapsed time), their
+/// word-wise complements and a final nonblank commit word. Complements alone
+/// can equal erased words, so they cannot identify the last programmed word
+/// after a power cut.
+const DATA_WORDS: usize = 7;
 const RECORD_WORDS: usize = DATA_WORDS * 2 + 1;
+/// The previous format's data words: sequence, charge and energy.
+const V1_DATA_WORDS: usize = 5;
 /// Final record commit marker ("DONE"), written after all counter words.
 const COMMIT: u32 = 0x444f_4e45;
 const RECORD_BYTES: usize = RECORD_WORDS * 4;
@@ -52,8 +59,8 @@ pub struct Store<F> {
     failed: bool,
 }
 
-fn header(flash: &impl Storage, sector: usize) -> bool {
-    flash.read(sector, 0) == CLAIM && flash.read(sector, 4) == !CLAIM
+fn header(flash: &impl Storage, sector: usize, claim: u32) -> bool {
+    flash.read(sector, 0) == claim && flash.read(sector, 4) == !claim
 }
 
 fn blank(flash: &impl Storage, sector: usize) -> bool {
@@ -62,20 +69,84 @@ fn blank(flash: &impl Storage, sector: usize) -> bool {
         .all(|offset| flash.read(sector, offset) == u32::MAX)
 }
 
-fn record(flash: &impl Storage, sector: usize, offset: usize) -> Option<(u32, Totals)> {
-    let words: [u32; RECORD_WORDS] = core::array::from_fn(|i| flash.read(sector, offset + i * 4));
-    if words[RECORD_WORDS - 1] != COMMIT
-        || (0..DATA_WORDS).any(|i| words[i + DATA_WORDS] != !words[i])
-    {
+/// The record at `offset`, laid out with `data_words` (this format's or
+/// the previous one's, which reads as no elapsed time).
+fn record(
+    flash: &impl Storage,
+    sector: usize,
+    offset: usize,
+    data_words: usize,
+) -> Option<(u32, Totals)> {
+    let word = |i: usize| flash.read(sector, offset + i * 4);
+    if word(data_words * 2) != COMMIT || (0..data_words).any(|i| word(i + data_words) != !word(i)) {
         return None;
     }
+    let wide = |i: usize| u64::from(word(i)) | u64::from(word(i + 1)) << 32;
     Some((
-        words[0],
+        word(0),
         Totals {
-            ma_ms: u64::from(words[1]) | u64::from(words[2]) << 32,
-            uw_ms: u64::from(words[3]) | u64::from(words[4]) << 32,
+            ma_ms: wide(1),
+            uw_ms: wide(3),
+            elapsed_ms: if data_words > V1_DATA_WORDS {
+                wide(5)
+            } else {
+                0
+            },
         },
     ))
+}
+
+/// `sequence` is newer than `last`, across wrapping.
+fn later(sequence: u32, last: u32) -> bool {
+    sequence.wrapping_sub(last) as i32 > 0
+}
+
+fn record_words(sequence: u32, totals: Totals) -> [u32; RECORD_WORDS] {
+    let data = [
+        sequence,
+        totals.ma_ms as u32,
+        (totals.ma_ms >> 32) as u32,
+        totals.uw_ms as u32,
+        (totals.uw_ms >> 32) as u32,
+        totals.elapsed_ms as u32,
+        (totals.elapsed_ms >> 32) as u32,
+    ];
+    core::array::from_fn(|i| {
+        if i < DATA_WORDS {
+            data[i]
+        } else if i < DATA_WORDS * 2 {
+            !data[i - DATA_WORDS]
+        } else {
+            COMMIT
+        }
+    })
+}
+
+/// A previous-format pair: the sector to erase last (the one holding the
+/// newest checkpoint, if any) and that checkpoint.
+fn v1_pair(flash: &impl Storage) -> Option<(usize, Option<(u32, Totals)>)> {
+    let record_bytes = (V1_DATA_WORDS * 2 + 1) * 4;
+    let claimed = (0..2).filter(|&sector| header(flash, sector, V1_CLAIM));
+    let newest = claimed
+        .clone()
+        .flat_map(|sector| {
+            (HEADER_BYTES..=SECTOR_BYTES - record_bytes)
+                .step_by(record_bytes)
+                .filter_map(move |offset| {
+                    record(flash, sector, offset, V1_DATA_WORDS).map(|found| (sector, found))
+                })
+        })
+        .reduce(|newest, next| {
+            if later(next.1.0, newest.1.0) {
+                next
+            } else {
+                newest
+            }
+        });
+    match newest {
+        Some((sector, found)) => Some((sector, Some(found))),
+        None => claimed.min().map(|sector| (sector, None)),
+    }
 }
 
 /// Prepare only the reserved pair before protocol tasks start. No action is
@@ -83,8 +154,11 @@ fn record(flash: &impl Storage, sector: usize, offset: usize) -> Option<(u32, To
 /// are reclaimable, but only after durable intent proves both sectors were
 /// checked: the survivor's marker remains through erasing/claiming its partner,
 /// then the partner's energy header remains through erasing the survivor.
+/// A previous-format pair migrates the same way, its own header serving as
+/// the intent; its newest checkpoint is written to the partner before the
+/// partner's header, so it is never lost.
 pub fn prepare(flash: &mut impl Storage) -> Preparation {
-    let headers = [header(flash, 0), header(flash, 1)];
+    let headers = [header(flash, 0, CLAIM), header(flash, 1, CLAIM)];
     if headers.iter().any(|found| *found) {
         for (sector, claimed) in headers.into_iter().enumerate() {
             if !claimed && !blank(flash, sector) && !flash.erase(sector) {
@@ -93,21 +167,46 @@ pub fn prepare(flash: &mut impl Storage) -> Preparation {
         }
         return Preparation::Ready;
     }
+    let (survivor, carried) = match v1_pair(flash) {
+        Some(found) => found,
+        None => match legacy_survivor(flash) {
+            Ok(sector) => (sector, None),
+            Err(preparation) => return preparation,
+        },
+    };
+    let partner = 1 - survivor;
+    if !blank(flash, partner) && !flash.erase(partner) {
+        return Preparation::WriteFailed;
+    }
+    if let Some((sequence, totals)) = carried
+        && !flash.write(partner, HEADER_BYTES, &record_words(sequence, totals))
+    {
+        return Preparation::WriteFailed;
+    }
+    if !flash.write(partner, 0, &[CLAIM, !CLAIM]) || !flash.erase(survivor) {
+        return Preparation::WriteFailed;
+    }
+    Preparation::Ready
+}
+
+/// The legacy log sector to erase last, once migration intent is committed,
+/// or the outcome when there is nothing to migrate.
+fn legacy_survivor(flash: &mut impl Storage) -> Result<usize, Preparation> {
     let survivor = (0..2).find(|&sector| {
         flash.is_legacy_log(sector)
             && (4..LEGACY_HEADER_BYTES)
                 .step_by(4)
                 .any(|offset| flash.read(sector, offset) == MIGRATION)
     });
-    let survivor = match survivor {
-        Some(sector) => sector,
+    match survivor {
+        Some(sector) => Ok(sector),
         None => {
             let blanks = [blank(flash, 0), blank(flash, 1)];
             if (0..2).any(|sector| !blanks[sector] && !flash.is_legacy_log(sector)) {
-                return Preparation::Occupied;
+                return Err(Preparation::Occupied);
             }
             if blanks.into_iter().all(|found| found) {
-                return Preparation::Ready;
+                return Err(Preparation::Ready);
             }
             let slot = (0..2)
                 .filter(|&sector| flash.is_legacy_log(sector))
@@ -118,29 +217,21 @@ pub fn prepare(flash: &mut impl Storage) -> Preparation {
                 })
                 .find(|&(sector, offset)| flash.read(sector, offset) == u32::MAX);
             let Some((sector, offset)) = slot else {
-                return Preparation::WriteFailed;
+                return Err(Preparation::WriteFailed);
             };
             if !flash.write(sector, offset, &[MIGRATION]) {
-                return Preparation::WriteFailed;
+                return Err(Preparation::WriteFailed);
             }
-            sector
+            Ok(sector)
         }
-    };
-    let partner = 1 - survivor;
-    if !blank(flash, partner) && !flash.erase(partner) {
-        return Preparation::WriteFailed;
     }
-    if !flash.write(partner, 0, &[CLAIM, !CLAIM]) || !flash.erase(survivor) {
-        return Preparation::WriteFailed;
-    }
-    Preparation::Ready
 }
 
 impl<F: Storage> Store<F> {
     /// Read-only recovery. Foreign contents are left untouched; unavailable
     /// storage is reported rather than reclaiming settings or stock data.
     pub fn open(flash: F) -> Option<Self> {
-        let headers = [header(&flash, 0), header(&flash, 1)];
+        let headers = [header(&flash, 0, CLAIM), header(&flash, 1, CLAIM)];
         let claimed = headers.iter().any(|found| *found);
         if !claimed && !(blank(&flash, 0) && blank(&flash, 1)) {
             return None;
@@ -156,8 +247,8 @@ impl<F: Storage> Store<F> {
                 if (0..RECORD_WORDS).any(|i| flash.read(sector, offset + i * 4) != u32::MAX) {
                     next[sector] = offset + RECORD_BYTES;
                 }
-                if let Some((sequence, totals)) = record(&flash, sector, offset)
-                    && newest.is_none_or(|(last, _)| sequence.wrapping_sub(last) as i32 > 0)
+                if let Some((sequence, totals)) = record(&flash, sector, offset, DATA_WORDS)
+                    && newest.is_none_or(|(last, _)| later(sequence, last))
                 {
                     newest = Some((sequence, totals));
                     current = sector;
@@ -219,23 +310,10 @@ impl<F: Storage> Store<F> {
             offset = HEADER_BYTES;
         }
         let sequence = self.sequence.wrapping_add(1);
-        let data = [
-            sequence,
-            totals.ma_ms as u32,
-            (totals.ma_ms >> 32) as u32,
-            totals.uw_ms as u32,
-            (totals.uw_ms >> 32) as u32,
-        ];
-        let words: [u32; RECORD_WORDS] = core::array::from_fn(|i| {
-            if i < data.len() {
-                data[i]
-            } else if i < data.len() * 2 {
-                !data[i - data.len()]
-            } else {
-                COMMIT
-            }
-        });
-        if !self.flash.write(sector, offset, &words) {
+        if !self
+            .flash
+            .write(sector, offset, &record_words(sequence, totals))
+        {
             return false;
         }
         self.current = sector;
@@ -318,6 +396,7 @@ mod tests {
         Totals {
             ma_ms: n,
             uw_ms: n * 5000,
+            elapsed_ms: n * 100,
         }
     }
 
@@ -460,6 +539,54 @@ mod tests {
             assert_eq!(prepare(&mut interrupted), Preparation::Ready);
             assert_eq!(Store::open(interrupted).unwrap().totals(), totals(42));
         }
+    }
+
+    /// A previous-format sector holding a checkpoint per sequence.
+    fn v1_sector(flash: &mut Flash, sector: usize, sequences: core::ops::RangeInclusive<u32>) {
+        let record_bytes = (V1_DATA_WORDS * 2 + 1) * 4;
+        assert!(flash.write(sector, 0, &[V1_CLAIM, !V1_CLAIM]));
+        for (index, sequence) in sequences.enumerate() {
+            let t = totals(u64::from(sequence));
+            let data = [
+                sequence,
+                t.ma_ms as u32,
+                (t.ma_ms >> 32) as u32,
+                t.uw_ms as u32,
+                (t.uw_ms >> 32) as u32,
+            ];
+            let mut words: Vec<u32> = data.to_vec();
+            words.extend(data.iter().map(|word| !word));
+            words.push(COMMIT);
+            assert!(flash.write(sector, HEADER_BYTES + index * record_bytes, &words));
+        }
+    }
+
+    #[test]
+    fn previous_format_migration_keeps_newest_checkpoint_at_every_word_boundary() {
+        // Migration erases both previous-format sectors at boot; a power cut
+        // at any point must keep the newest checkpoint recoverable.
+        let mut original = Flash::new();
+        v1_sector(&mut original, 0, 1..=3);
+        v1_sector(&mut original, 1, 4..=5);
+        let carried = Totals {
+            elapsed_ms: 0,
+            ..totals(5)
+        };
+        let steps = SECTOR_BYTES / 2 + RECORD_WORDS + 2;
+        for stop in 0..steps {
+            let mut interrupted = original.clone();
+            interrupted.remaining = Some(stop);
+            assert_eq!(prepare(&mut interrupted), Preparation::WriteFailed);
+            interrupted.remaining = None;
+            assert_eq!(prepare(&mut interrupted), Preparation::Ready);
+            let mut store = Store::open(interrupted).unwrap();
+            assert_eq!(store.totals(), carried);
+            assert!(store.save(totals(6)));
+            assert_eq!(Store::open(store.flash).unwrap().totals(), totals(6));
+        }
+        let mut finished = original.clone();
+        assert_eq!(prepare(&mut finished), Preparation::Ready);
+        assert_eq!(Store::open(finished).unwrap().totals(), carried);
     }
 
     #[test]

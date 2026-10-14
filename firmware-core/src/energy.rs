@@ -1,4 +1,5 @@
-//! Charge and energy integration from fresh, timestamped meter samples.
+//! Charge and energy integration from fresh, timestamped meter samples, and
+//! the time since the totals were last reset.
 
 /// A gap beyond ten nominal 100 ms samples is unknown usage, not a reading
 /// to extrapolate indefinitely across a failed bus or a stalled task.
@@ -11,6 +12,8 @@ const UW_MS_PER_MWH: u64 = 3_600_000_000;
 pub struct Totals {
     pub ma_ms: u64,
     pub uw_ms: u64,
+    /// Time counted since the last reset, readings or not.
+    pub elapsed_ms: u64,
 }
 
 impl Totals {
@@ -26,6 +29,9 @@ impl Totals {
 pub struct Tracker {
     pub totals: Totals,
     previous: Option<(u64, u32, u32)>,
+    /// When the last sample was taken, reading or not; elapsed time runs
+    /// from it.
+    last_ms: Option<u64>,
 }
 
 impl Tracker {
@@ -33,12 +39,19 @@ impl Tracker {
         Self {
             totals,
             previous: None,
+            last_ms: None,
         }
     }
 
     /// Integrate the trapezoid between fresh samples, counting current in
-    /// either direction as throughput. Missing samples break the interval.
+    /// either direction as throughput. Missing samples break the interval;
+    /// elapsed time counts on through them.
     pub fn sample(&mut self, now_ms: u64, reading: Option<(u32, i32)>) {
+        if let Some(then) = self.last_ms {
+            let dt = now_ms.saturating_sub(then);
+            self.totals.elapsed_ms = self.totals.elapsed_ms.saturating_add(dt);
+        }
+        self.last_ms = Some(now_ms);
         let next = reading.map(|(mv, ma)| (now_ms, mv, ma.unsigned_abs()));
         if let (Some((then, mv, ma)), Some((now, next_mv, next_ma))) = (self.previous, next)
             && let Some(dt) = now.checked_sub(then).filter(|dt| *dt <= MAX_GAP_MS)
@@ -53,6 +66,7 @@ impl Tracker {
         self.previous = next;
     }
 
+    /// Zero the totals; elapsed time restarts from the last sample.
     pub fn reset(&mut self) {
         self.totals = Totals::default();
         self.previous = None;
@@ -78,6 +92,7 @@ mod tests {
         }
         assert_eq!(tracker.totals.milliamp_hours(), 2000);
         assert_eq!(tracker.totals.milliwatt_hours(), 10_000);
+        assert_eq!(tracker.totals.elapsed_ms, 3_600_000);
     }
 
     #[test]
@@ -87,11 +102,13 @@ mod tests {
         tracker.sample(100, None);
         tracker.sample(200, Some((5000, 1000)));
         tracker.sample(2000, Some((5000, 1000)));
-        assert_eq!(tracker.totals, Totals::default());
+        assert_eq!((tracker.totals.ma_ms, tracker.totals.uw_ms), (0, 0));
+        assert_eq!(tracker.totals.elapsed_ms, 2000);
         tracker.sample(2100, Some((5000, 1000)));
         assert_eq!(tracker.totals.ma_ms, 100_000);
         tracker.reset();
         tracker.sample(2200, Some((5000, 1000)));
-        assert_eq!(tracker.totals, Totals::default());
+        assert_eq!((tracker.totals.ma_ms, tracker.totals.uw_ms), (0, 0));
+        assert_eq!(tracker.totals.elapsed_ms, 100);
     }
 }

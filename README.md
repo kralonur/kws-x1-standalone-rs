@@ -257,11 +257,14 @@ are available for new settings/log allocations (about 4000 settings saves withou
 diagnostic logs). Existing records from older builds are still read. After this
 area fills, settings keep working until power-off but are no longer saved.
 
-**Energy memory** defaults to **Off**: Ah/Wh reset at every restart and no totals
+**Energy memory** defaults to **Off**: Ah/Wh and the time reset at every restart and no totals
 are written. Choose **5s, 10s, 30s or 60s** to restore the latest checkpoint and
-continue counting across restarts. Only changed totals are checkpointed. Changing
-an enabled interval or enabling memory also checkpoints current totals; `RESET
-ENERGY` clears both counters and checkpoints the reset when memory is enabled.
+continue counting across restarts. The time counts on while the meter runs, so
+every interval writes a checkpoint. Changing an enabled interval or enabling
+memory also checkpoints current totals; resetting on the Energy screen clears
+the counters and the time and checkpoints the reset when memory is enabled.
+Checkpoints from earlier builds, which kept no time, are carried over once at
+boot with the time at zero.
 Turning memory off leaves current totals on screen, but the next boot starts at
 zero. Re-enabling it uses the current run, not an old checkpoint.
 
@@ -288,10 +291,10 @@ window protection, `04` size/alignment, `08` read-back mismatch, `20` bus collis
 `AT` is that operation's start address. No error flag alone authorizes an erase.
 Neither the bootloader nor its boot-swap sector is touched.
 
-**Shorter intervals wear flash faster.** Each energy sector holds 186 checkpoints.
+**Shorter intervals wear flash faster.** Each energy sector holds 136 checkpoints.
 At the datasheet's minimum 10,000 erase cycles, two-sector rotation gives roughly
-3.72 million checkpoints: about **215 days at 5s** or **7 years at 60s** of continuous,
-changing usage. These are endurance estimates, not guarantees. Runtime sector
+2.72 million checkpoints: about **157 days at 5s** or **5 years at 60s** of continuous
+running. These are endurance estimates, not guarantees. Runtime sector
 erase pauses execution for up to roughly 20 ms; live PD timing needs hardware
 validation before treating an energy-memory build as qualified.
 

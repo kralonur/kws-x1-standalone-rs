@@ -238,8 +238,10 @@ Energy memory defaults Off, with no totals writes or restoration on boot.
 Enabled intervals are 5, 10, 30 and 60 seconds. Charge/energy integrate fresh
 voltage and current-magnitude samples, independent of navigation. Failed samples
 or gaps over one second break integration; missing usage is not invented.
-The selected interval checkpoints changed totals; enabling or changing an enabled
-interval, and resetting totals, also checkpoint immediately. Disabling memory
+Elapsed time since the last reset counts on through them.
+The selected interval checkpoints changed totals, and the elapsed time changes
+every interval; enabling or changing an enabled interval, and resetting totals,
+also checkpoint immediately. Disabling memory
 preserves the live counters but ignores old checkpoints on the next boot.
 
 Before I2C, panel DMA or protocol tasks start (and only after the upper code
@@ -261,9 +263,14 @@ Absent migration, the energy journal claims its pair only after verifying both
 sectors blank. The complemented version/ownership header in either sector
 establishes ownership of both, permitting recovery after a torn erase of its
 partner. Boot recovery never erases a sector with a valid energy header, so
-existing checkpoints are preserved.
-Each 44-byte record contains a sequence, two u64 counters, their word-wise
-complements and a final nonblank commit word. Boot scans both claimed sectors,
+existing checkpoints are preserved. A pair in the previous record format
+(`EN01`, without elapsed time) migrates once: its sector holding the newest
+checkpoint keeps its header while the partner is erased, given that checkpoint
+(elapsed time zero) and only then the current header, after which the old
+sector is erased. A power cut at any step leaves either the old header and its
+checkpoint or the new header and the carried one.
+Each 60-byte record contains a sequence, three u64 counters (charge, energy,
+elapsed time), their word-wise complements and a final nonblank commit word. Boot scans both claimed sectors,
 skips incomplete records and chooses the newest valid sequence. A full sector
 rotates to its partner, erasing only the older checkpoint sector. The newest
 complete checkpoint and its ownership header remain intact until the replacement
@@ -290,10 +297,10 @@ up to 20 ms plus six HCLK cycles for sector erase. Live PD response timing, the
 cycle-counter compensation and power-cut recovery require explicitly approved
 hardware validation; host fault-injection tests and a build do not qualify them.
 
-The pair holds 186 checkpoints per sector. Datasheet table 3-56 specifies at
+The pair holds 136 checkpoints per sector. Datasheet table 3-56 specifies at
 least 10,000 erase cycles (20-year retention at 85 C): two-sector rotation gives
-about 3.72 million checkpoints, roughly 215 days at 5s or seven years at 60s of
-continuous changing usage, not an endurance guarantee. All storage remains
+about 2.72 million checkpoints, roughly 157 days at 5s or five years at 60s of
+continuous running, not an endurance guarantee. All storage remains
 outside the firmware update erase range and survives updates. Flash references:
 [erase/program timing and endurance](https://oss-nc-beijing-2.cecloudcs.com/doc-ds/DS_HC32F460SeriesDatasheet_Rev1.61.pdf),
 [EFM operations](https://oss-nc-beijing-2.cecloudcs.com/doc-rm/RM_HC32F460_F45x_A460SeriesReferenceManual_Rev1.5.pdf).
