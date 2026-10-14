@@ -466,7 +466,8 @@ programmable ranges, to request a voltage and current limit.
 - **Range row**: each PPS range the charger offers, for example
   `3.30-21.00V  up to 5.00A`.
 - **`SET VOLTAGE`**: the voltage to request, in 20 mV steps (100 mV while
-  held). The arrows show it is the value Left/Right change.
+  held), from the bottom of the charger's range (often 3.3 V) to its top.
+  The arrows show it is the value Left/Right change.
 - **`CURRENT LIMIT`**: the current limit to request, in 50 mA steps (250 mA
   while held).
 - **`OUT`**: the live voltage and current.

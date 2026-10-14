@@ -127,7 +127,9 @@ impl shared::Limits for BoardLimits {
     const SINK_IDENTITY: shared::SinkIdentity = shared::SinkIdentity::UNASSIGNED;
     const SESSION_POLICY: shared::SessionPolicy = SESSION_POLICY;
     const MAX_REQUEST_MV: u32 = MAX_REQUEST_MV;
-    const MIN_PPS_MV: u32 = 5_000;
+    // No floor of our own: PPS goes down to the bottom of the charger's range.
+    // 3.3 V is the lowest SPR PPS voltage, below which the library refuses.
+    const MIN_PPS_MV: u32 = 3_300;
     const MAX_PPS_MV: u32 = MAX_PPS_MV;
     const TARGET_MV: u32 = TARGET_MV;
     const REQUEST_MA: u32 = REQUEST_MA;
