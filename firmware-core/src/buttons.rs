@@ -75,6 +75,13 @@ pub fn swap_arrows(raw: u8) -> u8 {
 pub const POLL_MS: u32 = 10;
 /// A long OK press (cable query on the cable page).
 const LONG_OK_SAMPLES: u32 = 500 / POLL_MS;
+/// Holding OK on the overview, graph or energy tab resets what it shows: the
+/// sweep shows after a tap's length, so a tap never flashes it, then fills
+/// for a second; the hold itself is the confirmation. Chosen, not measured.
+const RESET_DELAY_SAMPLES: u32 = 200 / POLL_MS;
+const RESET_SWEEP_SAMPLES: u32 = 1000 / POLL_MS;
+/// The sweep's progress steps; each redraws the page, so they stay coarse.
+pub const RESET_STEPS: u8 = 12;
 /// A held Left or Right repeats after this delay, at this period.
 const REPEAT_DELAY_SAMPLES: u32 = 500 / POLL_MS;
 const REPEAT_SAMPLES: u32 = 100 / POLL_MS;
@@ -743,11 +750,14 @@ pub struct Input {
     /// The PD controller only listens (passthrough mode, chosen at boot).
     pub passthrough: bool,
     pub settings: Settings,
-    /// Incremented by each peak reset request; the meter clears its peaks
-    /// when this changes.
+    /// Reset request counters: the meter task clears the overview's peaks,
+    /// the graph's history or the energy totals when one changes.
     pub peaks_reset: u8,
-    /// The meter task clears totals when this request counter changes.
+    pub graph_reset: u8,
     pub energy_reset: u8,
+    /// How far the reset hold has swept, out of [`RESET_STEPS`]; 0 when none
+    /// shows.
+    pub reset_hold: u8,
     pub qc: QcOffer,
     /// What the Quick Charge trigger asks of the charger, kept while other
     /// tabs show; `None` leaves D+/D− undriven. A PD contract (the charger
@@ -767,13 +777,25 @@ impl Input {
             _ => self.trigger,
         }
     }
+
+    /// The reset request counter a completed OK hold on the shown tab
+    /// advances, if the tab has one.
+    fn reset_counter(&mut self) -> Option<&mut u8> {
+        match self.page.tab()? {
+            Tab::Overview => Some(&mut self.peaks_reset),
+            Tab::Graph => Some(&mut self.graph_reset),
+            Tab::Energy => Some(&mut self.energy_reset),
+            _ => None,
+        }
+    }
 }
 
 /// Navigation and settings, owned by the input task rather than the renderer,
 /// so a render backlog never loses taps.
 ///
 /// Left and Right act when released, unless the press already repeated; OK
-/// acts when released unless it was held long.
+/// acts when released unless it was held long. Held on the overview, graph or
+/// energy tab, OK sweeps a reset across it, which resets once full.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Navigation {
     debounce: Debounced,
@@ -962,6 +984,7 @@ impl Navigation {
             self.held = 0;
         }
 
+        self.input.reset_hold = 0;
         if after & OK != 0 {
             self.ok_held += 1;
             if self.ok_held == LONG_OK_SAMPLES
@@ -969,6 +992,19 @@ impl Navigation {
             {
                 self.ok_long = true;
                 command = query;
+            }
+            let swept = self.ok_held.saturating_sub(RESET_DELAY_SAMPLES);
+            if !self.ok_long
+                && let Some(counter) = self.input.reset_counter()
+            {
+                if swept >= RESET_SWEEP_SAMPLES {
+                    *counter = counter.wrapping_add(1);
+                    self.ok_long = true;
+                } else {
+                    // Below `RESET_STEPS`, as `swept` is below the sweep.
+                    self.input.reset_hold =
+                        (swept * u32::from(RESET_STEPS) / RESET_SWEEP_SAMPLES) as u8;
+                }
             }
         } else {
             if falling & OK != 0 && !self.ok_long {
@@ -1188,14 +1224,6 @@ impl Navigation {
                     Item::Brightness => SettingsFocus::Brightness,
                     Item::Rotation => SettingsFocus::Rotation,
                     Item::EnergyMemory => SettingsFocus::EnergyMemory,
-                    Item::ResetEnergy => {
-                        input.energy_reset = input.energy_reset.wrapping_add(1);
-                        SettingsFocus::Row(item)
-                    }
-                    Item::ResetPeaks => {
-                        input.peaks_reset = input.peaks_reset.wrapping_add(1);
-                        SettingsFocus::Row(item)
-                    }
                 }),
                 None,
             ),

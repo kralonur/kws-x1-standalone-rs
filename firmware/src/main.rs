@@ -866,12 +866,14 @@ async fn meter_task(
     let mut lines = None;
     let mut qc_updates = QC_STATUS.anon_receiver();
     let mut qc_status = qc_drive::Status::Off;
-    // Peaks follow the meter page's reads; a settings or meter page reset
-    // request clears them.
+    // Peaks follow the meter page's reads; a reset hold on the overview
+    // clears them.
     let mut peaks = ui::Peaks::default();
     let mut peaks_reset = input.peaks_reset;
-    // The overview's power graph samples every read, whatever the page.
+    // The overview's power graph samples every read, whatever the page; a
+    // reset hold on the graph clears it.
     let mut power_history = History::default();
+    let mut graph_reset = input.graph_reset;
     let mut brightness = input.settings.brightness;
     // Reads are paced by an absolute deadline, never by subtracting from an
     // `Instant` (embassy-time panics on underflow, e.g. `Instant::now() - 200ms`
@@ -937,6 +939,10 @@ async fn meter_task(
         if input.peaks_reset != peaks_reset {
             peaks_reset = input.peaks_reset;
             peaks = ui::Peaks::default();
+        }
+        if input.graph_reset != graph_reset {
+            graph_reset = input.graph_reset;
+            power_history = History::default();
         }
         if input.settings.brightness != brightness {
             brightness = input.settings.brightness;

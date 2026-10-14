@@ -387,18 +387,10 @@ pub enum Item {
     Brightness,
     Rotation,
     EnergyMemory,
-    ResetEnergy,
-    ResetPeaks,
 }
 
 impl Item {
-    pub const ALL: [Self; 5] = [
-        Self::Brightness,
-        Self::Rotation,
-        Self::EnergyMemory,
-        Self::ResetEnergy,
-        Self::ResetPeaks,
-    ];
+    pub const ALL: [Self; 3] = [Self::Brightness, Self::Rotation, Self::EnergyMemory];
 }
 
 #[cfg(test)]

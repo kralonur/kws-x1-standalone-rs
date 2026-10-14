@@ -168,7 +168,7 @@ What this firmware does **not** do, for now:
 | Button | Short press | Hold |
 | ------ | ----------- | ---- |
 | Left / Right | previous / next group, or tab once in a group's tabs; on a framed value, change it; while scrolling, scroll | repeats on PPS, AVS and QC 3.0 values and while scrolling |
-| OK | go into the group's tabs; on a tab, select, confirm, scroll or start (see each page) | 0.5 s: page action (cable query, full charger scan) |
+| OK | go into the group's tabs; on a tab, select, confirm, scroll or start (see each page) | 0.5 s: page action (cable query, full charger scan); on Overview, Graph and Energy, a fill sweeps left to right and resets the page once full (about 1 s); let go earlier to cancel |
 | Back | up one level: cancel the edit or scroll, leave the tabs; from a group, back to the overview; on the overview, open the settings | – |
 
 The pages sit in three groups: **Monitor** (Overview, Graph, Lines, Energy), **Trigger**
@@ -222,8 +222,8 @@ point the way it flows (they follow the screen rotation).
 
 | Page | Shows | Buttons |
 | ---- | ----- | ------- |
-| **Overview** | voltage, current, power; the highest of each since boot (`MAX`); protocol (`USB`, `TYPE-C`, `PD 2.0`, `PD 3.0`, `PPS`, `AVS`, `QC 2.0`, `QC 3.0`, `DIVIDER`, `1.2V DCP`, `BC1.2`) with the CC pin and contract; flow chevrons; a heartbeat dot | Back: settings |
-| **Graph** | power, voltage or current over the last 1, 2, 5 or 10 minutes; the latest second's and the window's highest voltage, current and power | OK, Left/Right choose power, voltage or current, OK, Left/Right change the window, OK done; Back closes |
+| **Overview** | voltage, current, power; the highest of each since boot (`MAX`); protocol (`USB`, `TYPE-C`, `PD 2.0`, `PD 3.0`, `PPS`, `AVS`, `QC 2.0`, `QC 3.0`, `DIVIDER`, `1.2V DCP`, `BC1.2`) with the CC pin and contract; flow chevrons; a heartbeat dot | hold OK: reset `MAX`; Back: settings |
+| **Graph** | power, voltage or current over the last 1, 2, 5 or 10 minutes; the latest second's and the window's highest voltage, current and power | OK, Left/Right choose power, voltage or current, OK, Left/Right change the window, OK done; Back closes; hold OK: clear the graph |
 | **Lines** | D+, D-, CC1 and CC2 voltages | |
 | **PD Profiles** | the charger's fixed profiles, `ACTIVE` on the one in force; with PD off for Quick Charge only `QC MODE` | OK, Left/Right to choose, OK requests it, Back cancels; in `QC MODE` OK switches back to PD |
 | **PPS** | the charger's PPS ranges, the set voltage and current limit, the live output; `ACTIVE` or `NOT APPLIED`; with PD off for Quick Charge only `QC MODE` | OK, Left/Right voltage (20 mV, 100 mV held), OK, current limit (50 mA, 250 mA held), OK requests; in `QC MODE` OK switches back to PD |
@@ -234,7 +234,7 @@ point the way it flows (they follow the screen rotation).
 | **Charger** | the offer (`*` = needs a 5 A cable), the charger's identity, maker and peak ratings, power status and source info, a power bank's battery, the Quick Charge detection result | OK to scroll; hold OK: full scan (Quick Charge, PD, EPR, and the 5 A cable test with the plug in the charger) |
 | **Cable** | the cable's e-marker: identity, ratings, status and modes | OK to scroll; hold OK to read the e-marker (drops to fixed 5 V first) |
 | **System** | I2C bus state and counters, frame and button timing, stack use, `LAST RESET:` cause | OK to scroll |
-| **Settings** | `BRIGHTNESS` (5 levels, 60% at first), `ROTATION` (`AUTO` follows the tilt sensor, `NORMAL`, `FLIPPED`), `RESET MAX`, `VERSION` (shown only) | Left/Right row, OK change it, Left/Right value, OK or Back done |
+| **Settings** | `BRIGHTNESS` (5 levels, 60% at first), `ROTATION` (`AUTO` follows the tilt sensor, `NORMAL`, `FLIPPED`), `ENERGY MEMORY`, `VERSION` (shown only) | Left/Right row, OK change it, Left/Right value, OK or Back done |
 
 The selector pages only show the offer until a sink session has one. A
 profile is requested only after the final OK; Left/Right alone just preview.
@@ -843,8 +843,7 @@ It scrolls (OK) through two sections.
 <img src="pictures/settings_screen.webp" width="360" alt="Settings screen">
 
 This is the **Settings** screen (Back on the overview): display preferences
-and the overview's peaks, energy totals and persistence. The photo predates
-the added energy rows.
+and energy persistence. The photo predates the current rows.
 
 - **`BRIGHTNESS`**: five bars, 20%, 40%, 60%, 80% and 95%. Saved; the backlight
   starts at the restored level, not always the default 60%.
@@ -854,12 +853,11 @@ the added energy rows.
   over, the two arrow buttons swap.
 - **`ENERGY MEMORY`**: `OFF` (default), `5s`, `10s`, `30s` or `60s`. Saved.
   Shorter intervals lose less usage on power loss but cause more flash wear.
-- **`RESET ENERGY`**: OK clears Ah/Wh; with memory on, saves the reset immediately.
-- **`RESET MAX`**: OK clears the overview's `MAX` values.
 - **`VERSION`**: the firmware version, shown only; the cursor skips it. A failed
   settings save replaces its label with a storage-full or write-failure warning.
 - **Hint row**: `< > choose  OK change  BACK exit`, then
-  `< > dimmer/brighter    OK done` or `< > auto/normal/flipped  OK done`.
+  `< > dimmer/brighter  OK done`, `< > auto/normal/flipped  OK done` or
+  `< > interval  OK done (shorter wears)`.
 
 ### Passthrough mode
 
