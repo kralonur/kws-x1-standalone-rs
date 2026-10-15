@@ -9,6 +9,7 @@ use firmware_core::buttons::View;
 use firmware_core::ripple::{
     MIN_SAMPLE_CYCLES, PeakHistory, Reading, SAMPLE_COUNT, Sampling, Timebase, analyze,
 };
+use firmware_core::spectrum::Spectrum;
 
 /// Dedicated ripple DMA controller; the panel uses DMA2.
 pub const DMA_UNIT: Unit = Unit::Dma1;
@@ -54,6 +55,9 @@ pub async unsafe fn new() -> Result<Adc1, CaptureError> {
 pub async fn run(mut adc: Option<Adc1>, clock_hz: u32) {
     let sender = crate::RIPPLE.sender();
     let mut samples = [0u16; SAMPLE_COUNT];
+    // The spectrum's working buffer, kept with the task rather than on the
+    // stack.
+    let mut scratch = [0f32; SAMPLE_COUNT];
     let mut sample_cycles = MIN_SAMPLE_CYCLES;
     let mut timebase = Timebase::default();
     let mut history = PeakHistory::default();
@@ -74,6 +78,7 @@ pub async fn run(mut adc: Option<Adc1>, clock_hz: u32) {
                             .await
                             .map(|mut reading| {
                                 history.add(&mut reading);
+                                reading.spectrum = Spectrum::new(&samples, &mut scratch);
                                 reading
                             })
                     }

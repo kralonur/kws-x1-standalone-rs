@@ -14,6 +14,7 @@ pub mod panel;
 pub mod power_history;
 pub mod ripple;
 pub mod settings;
+pub mod spectrum;
 pub mod stack;
 // Compatibility paths for the firmware; implementations live in the shared
 // crate, plus the FUSB302 FIFO and STATUS0 adapters for `pd_rx`/`pd_sniff`.

@@ -1,5 +1,7 @@
 //! Ripple statistics, reference-normalized estimates and a mean-triggered trace.
 
+use crate::spectrum::Spectrum;
+
 /// Samples per capture, matching the established ADC DMA acquisition.
 pub const SAMPLE_COUNT: usize = 1024;
 /// Trace columns: two pixels each inside the display's 224-pixel plot.
@@ -106,6 +108,13 @@ pub struct Sampling {
     pub window: usize,
 }
 
+impl Sampling {
+    /// Samples per second at `adc_clock_hz`, for the spectrum's axis.
+    pub fn rate_hz(self, adc_clock_hz: u32) -> u32 {
+        adc_clock_hz / (u32::from(self.sample_cycles) + COMPARISON_CYCLES)
+    }
+}
+
 impl Timebase {
     pub const ALL: [Self; 5] = [
         Self::Us20,
@@ -182,6 +191,8 @@ pub struct Reading {
     /// The capture's timebase, so a held trace keeps its own label.
     pub timebase: Timebase,
     pub trace: [Envelope; TRACE_COLUMNS],
+    /// The whole capture's spectrum, set by the caller ([`Spectrum::new`]).
+    pub spectrum: Spectrum,
 }
 
 impl Reading {
@@ -341,6 +352,7 @@ pub fn analyze(samples: &[u16; SAMPLE_COUNT], timebase: Timebase, window: usize)
         triggered: trigger.is_some(),
         timebase,
         trace,
+        spectrum: Spectrum::EMPTY,
     }
 }
 

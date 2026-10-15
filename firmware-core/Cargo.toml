@@ -12,6 +12,8 @@ bench = false
 
 [dependencies]
 fusb302-pd.workspace = true
+libm.workspace = true
+microfft = { workspace = true, features = ["size-1024"] }
 pd-protocol.workspace = true
 qc-protocol.workspace = true
 usbpd.workspace = true

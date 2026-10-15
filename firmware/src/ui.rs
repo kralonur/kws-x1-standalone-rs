@@ -63,6 +63,9 @@ const RULE: Rgb565 = Rgb565::new(5, 14, 7);
 /// Dark card fills matching the accents above.
 const YELLOW_TINT: Rgb565 = Rgb565::new(5, 10, 0);
 const CYAN_TINT: Rgb565 = Rgb565::new(1, 9, 6);
+/// Ripple spectrum bars, dim behind the trace, and their peak labels.
+const SPECTRUM: Rgb565 = Rgb565::new(4, 12, 18);
+const SPECTRUM_LABEL: Rgb565 = Rgb565::new(12, 32, 31);
 const GREEN_TINT: Rgb565 = Rgb565::new(1, 10, 1);
 /// The reset hold's sweep, a neutral fill lighter than every tint, so each
 /// accent stays readable over it.
@@ -1383,6 +1386,9 @@ pub fn draw_ripple<D: DrawTarget<Color = Rgb565>>(
 ) {
     use crate::line_adc::REFERENCE_MV;
     use firmware_core::ripple::{HORIZONTAL_DIVISIONS, Scale, VERTICAL_DIVISIONS};
+    use firmware_core::spectrum::{self, FULL_HEIGHT};
+    // Peak frequencies show tenths of a kHz below 100 kHz, whole kHz above.
+    const KILO_HZ_DECIMALS_BELOW: u32 = 100_000;
     // Pixels: metrics above a four-division, 56-pixel plot, live bus/scale
     // below it, then run/hold, status, nominal timebase and the control hint.
     const VALUE_Y: i32 = 37;
@@ -1502,6 +1508,47 @@ pub fn draw_ripple<D: DrawTarget<Color = Rgb565>>(
                 .draw(target)
                 .ok();
         }
+        // The spectrum behind the trace: frequency left to right, heights
+        // relative to the strongest bin, peaks labelled at the top.
+        let spectrum = &reading.spectrum;
+        let bar = |height: u8| i32::from(height) * (BOTTOM - TOP) / i32::from(FULL_HEIGHT);
+        for (column, &height) in spectrum.bars.iter().enumerate() {
+            let x = LEFT + column as i32;
+            if bar(height) > 0 {
+                Line::new(Point::new(x, BOTTOM), Point::new(x, BOTTOM - bar(height)))
+                    .into_styled(PrimitiveStyle::with_stroke(SPECTRUM, 1))
+                    .draw(target)
+                    .ok();
+            }
+        }
+        let rate = page
+            .clock_hz
+            .and_then(|hz| Some(reading.timebase.sampling(hz)?.rate_hz(hz)));
+        if let Some(rate) = rate {
+            let mut peaks = Label::new();
+            for (index, position) in spectrum.peaks.iter().enumerate() {
+                let Some(position) = *position else { break };
+                let hz = spectrum::frequency_hz(position, rate);
+                if index > 0 {
+                    peaks = peaks.push(b" ");
+                }
+                peaks = peaks.push(&[b'1' + index as u8, b':']);
+                peaks = if hz < KILO_HZ_DECIMALS_BELOW {
+                    peaks.fixed(hz / 100, 1)
+                } else {
+                    peaks.fixed(hz / 1000, 0)
+                };
+                peaks = peaks.push(b"k");
+            }
+            text(
+                target,
+                &SMALL,
+                peaks.as_str(),
+                Point::new(RIGHT - 2, TOP + SMALL_INK + 1),
+                HorizontalAlignment::Right,
+                SPECTRUM_LABEL,
+            );
+        }
         let mut previous = None;
         for (column, bin) in reading.trace.iter().enumerate() {
             let x = LEFT + column as i32 * COLUMN_PITCH;
@@ -1519,6 +1566,21 @@ pub fn draw_ripple<D: DrawTarget<Color = Rgb565>>(
                     .ok();
             }
             previous = Some(centre);
+        }
+        // Peak numbers above their bars, over the trace so they stay legible.
+        for (index, position) in spectrum.peaks.iter().enumerate() {
+            let Some(position) = *position else { break };
+            let column = spectrum::column(position);
+            let top = BOTTOM - bar(spectrum.bars[column]);
+            let digit = [b'1' + index as u8];
+            text(
+                target,
+                &SMALL,
+                core::str::from_utf8(&digit).unwrap_or(""),
+                Point::new(LEFT + column as i32, (top - 1).max(TOP + 2 * SMALL_INK + 3)),
+                HorizontalAlignment::Center,
+                SPECTRUM_LABEL,
+            );
         }
     } else {
         text(
