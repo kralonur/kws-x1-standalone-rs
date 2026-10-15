@@ -63,9 +63,10 @@ const RULE: Rgb565 = Rgb565::new(5, 14, 7);
 /// Dark card fills matching the accents above.
 const YELLOW_TINT: Rgb565 = Rgb565::new(5, 10, 0);
 const CYAN_TINT: Rgb565 = Rgb565::new(1, 9, 6);
-/// Ripple spectrum bars, dim behind the trace, and their peak labels.
-const SPECTRUM: Rgb565 = Rgb565::new(4, 12, 18);
-const SPECTRUM_LABEL: Rgb565 = Rgb565::new(12, 32, 31);
+/// Ripple spectrum bars, dim purple behind the cyan trace, and their peak
+/// labels.
+const SPECTRUM: Rgb565 = Rgb565::new(12, 6, 14);
+const SPECTRUM_LABEL: Rgb565 = MAGENTA;
 const GREEN_TINT: Rgb565 = Rgb565::new(1, 10, 1);
 /// The reset hold's sweep, a neutral fill lighter than every tint, so each
 /// accent stays readable over it.
