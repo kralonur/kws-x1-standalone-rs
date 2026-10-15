@@ -76,6 +76,10 @@ fn ok_moves_focus_and_arrows_change_only_the_focused_setting() {
     assert!(!tap(&mut nav, RIGHT).ripple_hold);
     assert!(tap(&mut nav, RIGHT).ripple_hold);
     assert_eq!(tap(&mut nav, OK).page, TIME);
+    // A held trace would carry the old timebase: a new one runs live.
+    let retimed = tap(&mut nav, RIGHT);
+    assert_eq!(retimed.ripple_timebase, Timebase::Us20);
+    assert!(!retimed.ripple_hold);
     assert_eq!(tap(&mut nav, BACK).page, Page::Tabs(Tab::Ripple));
     assert_eq!(tap(&mut nav, RIGHT).page, Page::Tabs(Tab::Overview));
 }

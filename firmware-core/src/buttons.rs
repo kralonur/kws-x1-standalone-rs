@@ -807,6 +807,7 @@ pub struct Input {
     pub graph_window: GraphWindow,
     /// Freeze only the ripple waveform/statistics; bus V/A stay live.
     pub ripple_hold: bool,
+    /// Ripple time per division and vertical scale; this boot only.
     pub ripple_timebase: RippleTimebase,
     pub ripple_scale: RippleScale,
 }
@@ -1192,6 +1193,7 @@ impl Navigation {
             }
             // The probe runs until it ends or Back.
             Page::Open(Open::Probe(_)) => {}
+            // A held capture cannot be re-timed: a new timebase runs live.
             Page::Open(Open::Ripple(RippleFocus::Time)) => {
                 let all = RippleTimebase::ALL;
                 let index = all
@@ -1199,6 +1201,7 @@ impl Navigation {
                     .position(|t| *t == input.ripple_timebase)
                     .unwrap_or(0);
                 input.ripple_timebase = cycle(&all, index, forward);
+                input.ripple_hold = false;
             }
             Page::Open(Open::Ripple(RippleFocus::Scale)) => {
                 let all = RippleScale::ALL;
