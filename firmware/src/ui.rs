@@ -63,11 +63,11 @@ const RULE: Rgb565 = Rgb565::new(5, 14, 7);
 /// Dark card fills matching the accents above.
 const YELLOW_TINT: Rgb565 = Rgb565::new(5, 10, 0);
 const CYAN_TINT: Rgb565 = Rgb565::new(1, 9, 6);
+const GREEN_TINT: Rgb565 = Rgb565::new(1, 10, 1);
 /// Ripple spectrum bars, dim purple behind the cyan trace, and their peak
 /// labels.
 const SPECTRUM: Rgb565 = Rgb565::new(12, 6, 14);
 const SPECTRUM_LABEL: Rgb565 = MAGENTA;
-const GREEN_TINT: Rgb565 = Rgb565::new(1, 10, 1);
 /// The reset hold's sweep, a neutral fill lighter than every tint, so each
 /// accent stays readable over it.
 const SWEEP: Rgb565 = Rgb565::new(10, 20, 10);
@@ -1367,7 +1367,7 @@ pub struct Ripple<'a> {
     pub reference: Option<u16>,
     pub bus: Option<Reading>,
     pub hold: bool,
-    /// The selected timebase; a held capture keeps its own.
+    /// The selected timebase; a capture is labelled with its own.
     pub timebase: firmware_core::ripple::Timebase,
     pub scale: firmware_core::ripple::Scale,
     /// Open: the setting Left/Right change; OK focuses the next.
@@ -1534,10 +1534,11 @@ pub fn draw_ripple<D: DrawTarget<Color = Rgb565>>(
                     peaks = peaks.push(b" ");
                 }
                 peaks = peaks.push(&[b'1' + index as u8, b':']);
+                // Rounded to the shown digit: 100 Hz or 1 kHz.
                 peaks = if hz < KILO_HZ_DECIMALS_BELOW {
-                    peaks.fixed(hz / 100, 1)
+                    peaks.fixed((hz + 50) / 100, 1)
                 } else {
-                    peaks.fixed(hz / 1000, 0)
+                    peaks.fixed((hz + 500) / 1000, 0)
                 };
                 peaks = peaks.push(b"k");
             }
