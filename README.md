@@ -226,7 +226,7 @@ point the way it flows (they follow the screen rotation).
 | **Lines** | D+, D-, CC1 and CC2 voltages | |
 | **Energy** | charge (Ah), energy (Wh) and the time since the last reset; how the totals are kept | hold OK: reset the totals |
 | **Graph** | power, voltage or current over the last 1, 2, 5 or 10 minutes; the latest second's and the window's highest voltage, current and power | OK, Left/Right choose power, voltage or current, OK, Left/Right change the window, OK done; Back closes; hold OK: clear the graph |
-| **Ripple** | bus ripple waveform, peak-to-peak voltage, mean-removed RMS and nominal time per division | OK focuses; OK hold/run; hold OK: vertical scale; Back exits |
+| **Ripple** | bus ripple waveform, peak-to-peak voltage, mean-removed RMS and nominal time per division | OK focuses; then Left/Right: vertical scale, OK: hold/run; Back exits |
 | **PD Profiles** | the charger's fixed profiles, `ACTIVE` on the one in force; with PD off for Quick Charge only `QC MODE` | OK, Left/Right to choose, OK requests it, Back cancels; in `QC MODE` OK switches back to PD |
 | **PPS** | the charger's PPS ranges, the set voltage and current limit, the live output; `ACTIVE` or `NOT APPLIED`; with PD off for Quick Charge only `QC MODE` | OK, Left/Right voltage (20 mV, 100 mV held), OK, current limit (50 mA, 250 mA held), OK requests; in `QC MODE` OK switches back to PD |
 | **AVS** | the charger's SPR AVS ranges, the set voltage and the current the meter asks for at it, the live output; `ACTIVE` or `NOT APPLIED`; with PD off for Quick Charge only `QC MODE` | OK, Left/Right voltage (100 mV, 500 mV held), OK requests; in `QC MODE` OK switches back to PD |
@@ -466,10 +466,10 @@ so peaks can lie outside the visible trace.
   `OFF SCALE` means only the plot cuts off peaks. `NO REF / raw` means ADC
   counts replace voltage scaling.
 
-**OK** first focuses without freezing; subsequent presses toggle run/hold.
+**OK** first focuses without freezing. Focused, **Left/Right** select Auto or
+2–1000 mV/div and **OK** toggles run/hold; **Back** returns to tab navigation.
 `HOLD` freezes the trace, statistics and voltage reference, but not bus V/A.
-**Hold OK** for 500 ms to adjust scale; Left/Right select Auto or 2–1000 mV/div.
-OK or Back closes adjustment; Back again returns to tab navigation.
+A hold lasts until another tab is shown; coming back starts a live capture.
 
 The photo is a single-point cross-check, not a calibration: accuracy under
 load, at other ripple frequencies and the actual sampling cadence are not
@@ -950,7 +950,7 @@ voltage or change the device's PD contract.
 
 The fields, run/hold and scale controls, warnings and nominal timebase are the
 same as on the [Ripple screen above](#5-ripple). OK first focuses the page;
-subsequent presses toggle hold/run. Bus voltage/current stay live while held.
+then Left/Right change the scale and OK toggles hold/run. Bus voltage/current stay live while held.
 
 #### 3. PD Sniff
 

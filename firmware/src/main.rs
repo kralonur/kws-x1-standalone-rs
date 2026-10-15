@@ -1193,10 +1193,7 @@ async fn meter_task(
                             hold: input.ripple_hold,
                             scale: input.ripple_scale,
                             nominal_tenths_us_per_div: ripple_tenths_us_per_div,
-                            focus: match page {
-                                Page::Open(button_logic::Open::Ripple(focus)) => Some(focus),
-                                _ => None,
-                            },
+                            focused: page == Page::Open(button_logic::Open::Ripple),
                         },
                     );
                 }

@@ -9,8 +9,7 @@ use embedded_graphics::primitives::{
     Circle, Line, PrimitiveStyle, Rectangle, RoundedRectangle, StyledDrawable, Triangle,
 };
 use firmware_core::buttons::{
-    Detail, GraphFocus, Level, PpsFocus, Qc2Choice, QcOffer, RESET_STEPS, RippleFocus,
-    SettingsFocus, Tab,
+    Detail, GraphFocus, Level, PpsFocus, Qc2Choice, QcOffer, RESET_STEPS, SettingsFocus, Tab,
 };
 use firmware_core::dcp::Dcp;
 use firmware_core::energy::Totals;
@@ -1364,7 +1363,8 @@ pub struct Ripple<'a> {
     pub bus: Option<Reading>,
     pub hold: bool,
     pub scale: firmware_core::ripple::Scale,
-    pub focus: Option<RippleFocus>,
+    /// Focused: Left/Right change the scale and OK toggles hold.
+    pub focused: bool,
     pub nominal_tenths_us_per_div: Option<u32>,
 }
 
@@ -1453,11 +1453,7 @@ pub fn draw_ripple<D: DrawTarget<Color = Rgb565>>(
         scale.as_str(),
         Point::new(RIGHT, BUS_Y),
         HorizontalAlignment::Right,
-        if page.focus == Some(RippleFocus::Scale) {
-            YELLOW
-        } else {
-            MUTED
-        },
+        if page.focused { YELLOW } else { MUTED },
     );
     if let (Some(reading), Some(plot)) = (page.reading, plot) {
         let y = |count: u16| {
@@ -1513,11 +1509,9 @@ pub fn draw_ripple<D: DrawTarget<Color = Rgb565>>(
         None => status.push(b"NO CAPTURE"),
         Some(_) if clipped => status.push(b"CLIPPED lower bound"),
         Some(_) if mv.is_none() => status.push(b"NO REF / raw"),
-        Some(_) if limited => status.push(b"OFF SCALE / uncal"),
-        Some(r) if page.focus == Some(RippleFocus::Scale) => status
-            .fixed(u32::from(r.peak_to_peak()), 0)
-            .push(b"ct / uncal"),
-        Some(r) => status.push(if r.triggered { b"T / uncal" } else { b"uncal" }),
+        Some(_) if limited => status.push(b"OFF SCALE"),
+        Some(r) if r.triggered => status.push(b"T"),
+        Some(_) => status,
     };
     text(
         target,
@@ -1549,11 +1543,10 @@ pub fn draw_ripple<D: DrawTarget<Color = Rgb565>>(
     hint(
         target,
         header,
-        match page.focus {
-            None => "< > tabs  OK open",
-            Some(RippleFocus::Scale) => "< > scale  OK/Back done",
-            Some(RippleFocus::Capture) if page.hold => "OK run  hold OK scale  Back exit",
-            Some(RippleFocus::Capture) => "OK hold  hold OK scale  Back exit",
+        match (page.focused, page.hold) {
+            (false, _) => "< > tabs  OK open",
+            (true, true) => "< > scale  OK run  Back exit",
+            (true, false) => "< > scale  OK hold  Back exit",
         },
     );
 }
