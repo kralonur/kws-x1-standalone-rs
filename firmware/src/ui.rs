@@ -9,7 +9,8 @@ use embedded_graphics::primitives::{
     Circle, Line, PrimitiveStyle, Rectangle, RoundedRectangle, StyledDrawable, Triangle,
 };
 use firmware_core::buttons::{
-    Detail, GraphFocus, Level, PpsFocus, Qc2Choice, QcOffer, RESET_STEPS, SettingsFocus, Tab,
+    Detail, GraphFocus, Level, PpsFocus, Qc2Choice, QcOffer, RESET_STEPS, RippleFocus,
+    SettingsFocus, Tab,
 };
 use firmware_core::dcp::Dcp;
 use firmware_core::energy::Totals;
@@ -1362,11 +1363,17 @@ pub struct Ripple<'a> {
     pub reference: Option<u16>,
     pub bus: Option<Reading>,
     pub hold: bool,
+    /// The selected timebase; a held capture keeps its own.
+    pub timebase: firmware_core::ripple::Timebase,
     pub scale: firmware_core::ripple::Scale,
-    /// Focused: Left/Right change the scale and OK toggles hold.
-    pub focused: bool,
-    pub nominal_tenths_us_per_div: Option<u32>,
+    /// Open: the setting Left/Right change; OK focuses the next.
+    pub focus: Option<RippleFocus>,
+    /// ADC1's clock in Hz; without one, no timebase is reachable.
+    pub clock_hz: Option<u32>,
 }
+
+/// One space of ProFont 12 between run/hold and the capture status, in pixels.
+const RIPPLE_STATUS_GAP: i32 = 6;
 
 /// Estimated voltage scale and nominal clock-derived timebase, not calibration.
 pub fn draw_ripple<D: DrawTarget<Color = Rgb565>>(
@@ -1377,13 +1384,29 @@ pub fn draw_ripple<D: DrawTarget<Color = Rgb565>>(
     use crate::line_adc::REFERENCE_MV;
     use firmware_core::ripple::{HORIZONTAL_DIVISIONS, Scale, VERTICAL_DIVISIONS};
     // Pixels: metrics above a four-division, 56-pixel plot, live bus/scale
-    // below it, then status/nominal timebase and the control hint.
+    // below it, then run/hold, status, nominal timebase and the control hint.
     const VALUE_Y: i32 = 37;
     const BUS_Y: i32 = 109;
     const TOP: i32 = 40;
     const BOTTOM: i32 = 96;
     const STATUS_Y: i32 = 120;
     const COLUMN_PITCH: i32 = 2;
+    // Arrows round the setting Left/Right change, as on the graph, in
+    // yellow; `color` otherwise.
+    let setting = |target: &mut D, content: &str, field, point, alignment, color| {
+        let focused = page.focus == Some(field);
+        let label = if focused {
+            Label::new()
+                .push(b"< ")
+                .push(content.as_bytes())
+                .push(b" >")
+        } else {
+            Label::new().push(content.as_bytes())
+        };
+        let color = if focused { YELLOW } else { color };
+        text(target, &PLAIN, label.as_str(), point, alignment, color);
+        width(&PLAIN, label.as_str())
+    };
     draw_header(target, header);
     let normalized = page.reading.zip(page.reference);
     let mv = normalized.and_then(|(r, reference)| r.peak_to_peak_mv(reference, REFERENCE_MV));
@@ -1417,13 +1440,12 @@ pub fn draw_ripple<D: DrawTarget<Color = Rgb565>>(
     );
     let bus = match page.bus {
         Some(bus) => Label::new()
-            .push(b"U ")
             .fixed(bus.mv, 3)
-            .push(b"V I ")
+            .push(b"V ")
             .push(if bus.ma < 0 { b"-" } else { b"" })
             .fixed(bus.ma.unsigned_abs(), 3)
             .push(b"A"),
-        None => Label::new().push(b"U --V I --A"),
+        None => Label::new().push(b"--V --A"),
     };
     text(
         target,
@@ -1436,24 +1458,30 @@ pub fn draw_ripple<D: DrawTarget<Color = Rgb565>>(
     let plot = page
         .reading
         .map(|r| r.plot_scale(page.scale, page.reference, REFERENCE_MV));
-    let scale = match plot.and_then(|plot| plot.mv_per_div) {
-        Some(mv) => Label::new()
-            .push(if page.scale == Scale::Auto {
+    let scale = match (plot.and_then(|plot| plot.mv_per_div), page.scale) {
+        (Some(mv), scale) => Label::new()
+            .push(if scale == Scale::Auto {
                 b"AUTO "
             } else {
                 b"LOCK "
             })
             .fixed(u32::from(mv), 0)
             .push(b"mV/div"),
-        None => Label::new().push(b"RAW AUTO"),
+        // Before a capture: the chosen scale, not yet a voltage.
+        (None, Scale::Auto) if page.reading.is_none() => Label::new().push(b"AUTO"),
+        (None, scale) if page.reading.is_none() => Label::new()
+            .push(b"LOCK ")
+            .fixed(u32::from(scale.millivolts().unwrap_or(0)), 0)
+            .push(b"mV/div"),
+        (None, _) => Label::new().push(b"RAW AUTO"),
     };
-    text(
+    setting(
         target,
-        &PLAIN,
         scale.as_str(),
+        RippleFocus::Scale,
         Point::new(RIGHT, BUS_Y),
         HorizontalAlignment::Right,
-        if page.focused { YELLOW } else { MUTED },
+        MUTED,
     );
     if let (Some(reading), Some(plot)) = (page.reading, plot) {
         let y = |count: u16| {
@@ -1504,38 +1532,43 @@ pub fn draw_ripple<D: DrawTarget<Color = Rgb565>>(
     }
     let clipped = page.reading.is_some_and(|r| r.clipped());
     let limited = plot.is_some_and(|plot| plot.limited);
-    let status = Label::new().push(if page.hold { b"HOLD " } else { b"RUN " });
+    let capture_width = setting(
+        target,
+        if page.hold { "HOLD" } else { "RUN" },
+        RippleFocus::Capture,
+        Point::new(LEFT, STATUS_Y),
+        HorizontalAlignment::Left,
+        if page.hold { WHITE } else { MUTED },
+    );
     let status = match page.reading {
-        None => status.push(b"NO CAPTURE"),
-        Some(_) if clipped => status.push(b"CLIPPED lower bound"),
-        Some(_) if mv.is_none() => status.push(b"NO REF / raw"),
-        Some(_) if limited => status.push(b"OFF SCALE"),
-        Some(r) if r.triggered => status.push(b"T"),
-        Some(_) => status,
+        None => "NO CAPTURE",
+        Some(_) if clipped => "CLIPPED",
+        Some(_) if mv.is_none() => "NO REF",
+        Some(_) if limited => "OFF SCALE",
+        Some(r) if r.triggered => "T",
+        Some(_) => "",
     };
     text(
         target,
         &PLAIN,
-        status.as_str(),
-        Point::new(LEFT, STATUS_Y),
+        status,
+        Point::new(LEFT + capture_width + RIPPLE_STATUS_GAP, STATUS_Y),
         HorizontalAlignment::Left,
-        if clipped || limited {
-            ORANGE
-        } else if page.hold {
-            YELLOW
-        } else {
-            MUTED
-        },
+        if clipped || limited { ORANGE } else { MUTED },
     );
     // ASCII `us` is microseconds; `~` marks a nominal, unmeasured timebase.
-    let timebase = page.nominal_tenths_us_per_div.map_or_else(
-        || Label::new().push(b"--us/div"),
-        |time| Label::new().push(b"~").fixed(time, 1).push(b"us/div"),
-    );
-    text(
+    let timebase = page.reading.map_or(page.timebase, |r| r.timebase);
+    let timebase = match page.clock_hz.and_then(|hz| timebase.sampling(hz)) {
+        Some(_) => Label::new()
+            .push(b"~")
+            .fixed(timebase.us_per_div(), 0)
+            .push(b"us/div"),
+        None => Label::new().push(b"--us/div"),
+    };
+    setting(
         target,
-        &PLAIN,
         timebase.as_str(),
+        RippleFocus::Time,
         Point::new(RIGHT, STATUS_Y),
         HorizontalAlignment::Right,
         MUTED,
@@ -1543,10 +1576,11 @@ pub fn draw_ripple<D: DrawTarget<Color = Rgb565>>(
     hint(
         target,
         header,
-        match (page.focused, page.hold) {
-            (false, _) => "< > tabs  OK open",
-            (true, true) => "< > scale  OK run  Back exit",
-            (true, false) => "< > scale  OK hold  Back exit",
+        match page.focus {
+            None => "< > tabs  OK open",
+            Some(RippleFocus::Time) => "< > time  OK scale  hold OK reset",
+            Some(RippleFocus::Scale) => "< > scale  OK run/hold  hold OK reset",
+            Some(RippleFocus::Capture) => "< > run/hold  OK time  hold OK reset",
         },
     );
 }

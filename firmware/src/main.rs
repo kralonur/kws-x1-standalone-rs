@@ -869,7 +869,8 @@ async fn meter_task(
     saved: firmware_core::settings::Settings,
     mut energy_store: Option<energy_store::Store>,
     mut energy_save_status: energy_store::Status,
-    ripple_tenths_us_per_div: Option<u32>,
+    // ADC1's clock in Hz for the nominal ripple timebase; `None` without a capture.
+    ripple_clock_hz: Option<u32>,
 ) {
     let fb = framebuffer();
     let mut input_updates = BUTTON_STATE.anon_receiver();
@@ -1191,9 +1192,13 @@ async fn meter_task(
                             reference: ripple_reference,
                             bus: reading(last_raw_v, last_raw_i),
                             hold: input.ripple_hold,
+                            timebase: input.ripple_timebase,
+                            clock_hz: ripple_clock_hz,
                             scale: input.ripple_scale,
-                            nominal_tenths_us_per_div: ripple_tenths_us_per_div,
-                            focused: page == Page::Open(button_logic::Open::Ripple),
+                            focus: match page {
+                                Page::Open(button_logic::Open::Ripple(focus)) => Some(focus),
+                                _ => None,
+                            },
                         },
                     );
                 }
@@ -1637,9 +1642,7 @@ async fn main(spawner: Spawner) {
             settings,
             energy_store,
             energy_save_status,
-            ripple_adc
-                .as_ref()
-                .and_then(|_| ripple::nominal_tenths_us_per_div(clocks.pclk[2])),
+            ripple_adc.as_ref().map(|_| clocks.pclk[2]),
         )
         .expect(ONE_SPAWN),
     );
@@ -1650,6 +1653,6 @@ async fn main(spawner: Spawner) {
     spawner.spawn(pulse_task().expect(ONE_SPAWN));
     spawner.spawn(tilt_task(tilt_input).expect(ONE_SPAWN));
     spawner.spawn(line_task(line_adc, qc_trigger).expect(ONE_SPAWN));
-    spawner.spawn(ripple::run(ripple_adc).expect(ONE_SPAWN));
+    spawner.spawn(ripple::run(ripple_adc, clocks.pclk[2]).expect(ONE_SPAWN));
     spawner.spawn(button_task(button_inputs, store, settings, requested, resume).expect(ONE_SPAWN));
 }

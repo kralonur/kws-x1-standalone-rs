@@ -6,7 +6,7 @@
 //! the device.
 
 use crate::power_history::{GraphTrace, GraphWindow};
-use crate::ripple::Scale as RippleScale;
+use crate::ripple::{Scale as RippleScale, Timebase as RippleTimebase};
 use crate::settings::{Item, NextBoot, QcFindings, Screen, Settings};
 use qc_protocol::detect::Report;
 use qc_protocol::qc2::Voltage;
@@ -336,8 +336,8 @@ pub enum Open {
     Detail { page: Detail, top: u16 },
     /// Left/Right change what the graph plots, or its window.
     Graph(GraphFocus),
-    /// Left/Right choose the vertical scale; OK toggles hold.
-    Ripple,
+    /// Left/Right change the focused ripple setting; OK focuses the next.
+    Ripple(RippleFocus),
 }
 
 impl Open {
@@ -352,7 +352,7 @@ impl Open {
             Self::Qc3 => Tab::Qc3,
             Self::Detail { page, top } => Tab::Detail { page, top },
             Self::Graph(_) => Tab::Graph,
-            Self::Ripple => Tab::Ripple,
+            Self::Ripple(_) => Tab::Ripple,
         }
     }
 }
@@ -417,6 +417,24 @@ impl View {
 pub enum GraphFocus {
     Trace,
     Window,
+}
+
+/// What Left/Right change on the open ripple tab, in OK's order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RippleFocus {
+    Time,
+    Scale,
+    Capture,
+}
+
+impl RippleFocus {
+    const fn next(self) -> Self {
+        match self {
+            Self::Time => Self::Scale,
+            Self::Scale => Self::Capture,
+            Self::Capture => Self::Time,
+        }
+    }
 }
 
 /// What Left/Right change on the open PPS tab.
@@ -696,7 +714,7 @@ impl Page {
                     scrolling: true,
                 },
                 Open::Graph(focus) => View::Graph(Some(focus)),
-                Open::Ripple => View::Ripple,
+                Open::Ripple(_) => View::Ripple,
             },
             Self::Settings(focus) => View::Settings(focus),
         }
@@ -730,7 +748,7 @@ impl Page {
                     | Open::Qc3
                     | Open::Detail { .. }
                     | Open::Graph(_)
-                    | Open::Ripple
+                    | Open::Ripple(_)
             ) | Self::Settings(
                 SettingsFocus::Brightness | SettingsFocus::Rotation | SettingsFocus::EnergyMemory
             )
@@ -789,6 +807,7 @@ pub struct Input {
     pub graph_window: GraphWindow,
     /// Freeze only the ripple waveform/statistics; bus V/A stay live.
     pub ripple_hold: bool,
+    pub ripple_timebase: RippleTimebase,
     pub ripple_scale: RippleScale,
 }
 
@@ -1081,6 +1100,14 @@ impl Navigation {
     /// What a long OK does here: `None` when the page has no long OK, else
     /// the PD command it sends, if any.
     fn long_ok(&mut self) -> Option<Option<PdCommand>> {
+        // Open ripple: back to the default timebase, auto scale and live.
+        if let Page::Open(Open::Ripple(_)) = self.input.page {
+            let input = &mut self.input;
+            input.ripple_timebase = RippleTimebase::default();
+            input.ripple_scale = RippleScale::default();
+            input.ripple_hold = false;
+            return Some(None);
+        }
         let Some(Tab::Detail { page, .. }) = self.input.page.tab() else {
             return None;
         };
@@ -1165,13 +1192,24 @@ impl Navigation {
             }
             // The probe runs until it ends or Back.
             Page::Open(Open::Probe(_)) => {}
-            Page::Open(Open::Ripple) => {
+            Page::Open(Open::Ripple(RippleFocus::Time)) => {
+                let all = RippleTimebase::ALL;
+                let index = all
+                    .iter()
+                    .position(|t| *t == input.ripple_timebase)
+                    .unwrap_or(0);
+                input.ripple_timebase = cycle(&all, index, forward);
+            }
+            Page::Open(Open::Ripple(RippleFocus::Scale)) => {
                 let all = RippleScale::ALL;
                 let index = all
                     .iter()
                     .position(|s| *s == input.ripple_scale)
                     .unwrap_or(0);
                 input.ripple_scale = cycle(&all, index, forward);
+            }
+            Page::Open(Open::Ripple(RippleFocus::Capture)) => {
+                input.ripple_hold = !input.ripple_hold;
             }
             Page::Open(Open::Graph(GraphFocus::Trace)) => {
                 let all = GraphTrace::ALL;
@@ -1210,11 +1248,8 @@ impl Navigation {
         let (page, command) = match input.page {
             Page::Groups(tab) => (Page::Tabs(tab), None),
             page @ Page::Tabs(Tab::Overview | Tab::Lines | Tab::Energy) => (page, None),
-            Page::Tabs(Tab::Ripple) => (Page::Open(Open::Ripple), None),
-            page @ Page::Open(Open::Ripple) => {
-                input.ripple_hold = !input.ripple_hold;
-                (page, None)
-            }
+            Page::Tabs(Tab::Ripple) => (Page::Open(Open::Ripple(RippleFocus::Time)), None),
+            Page::Open(Open::Ripple(focus)) => (Page::Open(Open::Ripple(focus.next())), None),
             Page::Tabs(Tab::Graph) => (Page::Open(Open::Graph(GraphFocus::Trace)), None),
             Page::Open(Open::Graph(GraphFocus::Trace)) => {
                 (Page::Open(Open::Graph(GraphFocus::Window)), None)

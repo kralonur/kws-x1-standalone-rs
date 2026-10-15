@@ -4,12 +4,11 @@
 pub const SAMPLE_COUNT: usize = 1024;
 /// Trace columns: two pixels each inside the display's 224-pixel plot.
 pub const TRACE_COLUMNS: usize = 112;
-/// Show half the capture, leaving the other half for trigger alignment.
-pub const TRACE_SAMPLES: usize = SAMPLE_COUNT / 2;
+/// Most samples a trace shows, leaving 384 for trigger alignment: enough
+/// for 500 us/div at the slowest sampling on the faster 37.5 MHz clock.
+pub const MAX_WINDOW: usize = SAMPLE_COUNT * 5 / 8;
 /// Eight horizontal divisions across the displayed trace's sample bins.
 pub const HORIZONTAL_DIVISIONS: u32 = 8;
-/// Ten tenths of a microsecond per microsecond, one million µs per second.
-const TENTHS_US_PER_SECOND: u64 = 10_000_000;
 /// Maximum count from a right-aligned 12-bit ADC result.
 pub const FULL_SCALE: u16 = (1 << 12) - 1;
 /// Built-in amplifier gain configured by the capture driver.
@@ -71,6 +70,87 @@ impl Scale {
     }
 }
 
+/// Shortest sampling time in ADC cycles, the capture's settling minimum
+/// (datasheet table 3-38's formula; see the capture driver).
+pub const MIN_SAMPLE_CYCLES: u8 = 20;
+/// Longest sampling time: SSTRn is an 8-bit cycle count (RM 16.4.11).
+const MAX_SAMPLE_CYCLES: u8 = u8::MAX;
+/// Successive comparison takes 13 ADCLK cycles at 12 bits (RM 16.3.8).
+const COMPARISON_CYCLES: u32 = 13;
+/// One million µs per second.
+const US_PER_SECOND: u64 = 1_000_000;
+/// Captures in the smoothed p-p readout, about 3 s at the 100 ms capture
+/// cadence. The reference firmware keeps up to 30 (recovered behavior).
+const PEAK_HISTORY: usize = 30;
+/// Smoothed p-p weights in percent: mean and maximum of the history. The
+/// reference firmware's faster-timebase blend (recovered behavior); it uses
+/// 75/25 in slower modes.
+const PEAK_MEAN_PERCENT: u32 = 65;
+const PEAK_MAX_PERCENT: u32 = 35;
+
+/// Horizontal timebase in a scope's 1-2-5 steps; transient, never persisted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Timebase {
+    Us20,
+    #[default]
+    Us50,
+    Us100,
+    Us200,
+    Us500,
+}
+
+/// How a timebase is acquired: ADC sampling cycles and samples plotted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sampling {
+    pub sample_cycles: u8,
+    pub window: usize,
+}
+
+impl Timebase {
+    pub const ALL: [Self; 5] = [
+        Self::Us20,
+        Self::Us50,
+        Self::Us100,
+        Self::Us200,
+        Self::Us500,
+    ];
+
+    pub const fn us_per_div(self) -> u32 {
+        match self {
+            Self::Us20 => 20,
+            Self::Us50 => 50,
+            Self::Us100 => 100,
+            Self::Us200 => 200,
+            Self::Us500 => 500,
+        }
+    }
+
+    /// The nearest sampling to this timebase at `adc_clock_hz`: as many
+    /// samples as possible (up to [`MAX_WINDOW`]), each as fast as settling allows when the screen is
+    /// shorter, and at least one sample per trace column. `None` when the
+    /// clock cannot reach it. Nominal: rounding leaves it within about 1%.
+    pub fn sampling(self, adc_clock_hz: u32) -> Option<Sampling> {
+        let screen_cycles = u64::from(self.us_per_div())
+            * u64::from(HORIZONTAL_DIVISIONS)
+            * u64::from(adc_clock_hz)
+            / US_PER_SECOND;
+        let fastest = u64::from(MIN_SAMPLE_CYCLES) + u64::from(COMPARISON_CYCLES);
+        let slowest = u64::from(MAX_SAMPLE_CYCLES) + u64::from(COMPARISON_CYCLES);
+        // Round up, so the window never needs more than the maximum.
+        let cycles = screen_cycles
+            .div_ceil(MAX_WINDOW as u64)
+            .clamp(fastest, slowest);
+        let window = usize::try_from((screen_cycles + cycles / 2) / cycles).ok()?;
+        if !(TRACE_COLUMNS..=MAX_WINDOW).contains(&window) {
+            return None;
+        }
+        Some(Sampling {
+            sample_cycles: u8::try_from(cycles - u64::from(COMPARISON_CYCLES)).ok()?,
+            window,
+        })
+    }
+}
+
 /// Mean-centred plot bounds in ADC counts; may extend beyond the ADC rails.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlotScale {
@@ -78,6 +158,7 @@ pub struct PlotScale {
     pub max: i32,
     /// Missing reference means a raw-count autoscale, never a voltage scale.
     pub mv_per_div: Option<u16>,
+    /// A fixed scale cuts off peaks.
     pub limited: bool,
 }
 
@@ -95,7 +176,11 @@ pub struct Reading {
     pub mean: u16,
     /// RMS after exact DC removal, in sixteenths of an ADC count.
     rms_counts_x16: u32,
+    /// Peak-to-peak counts blended over recent captures; see [`PeakHistory`].
+    smoothed: u16,
     pub triggered: bool,
+    /// The capture's timebase, so a held trace keeps its own label.
+    pub timebase: Timebase,
     pub trace: [Envelope; TRACE_COLUMNS],
 }
 
@@ -105,7 +190,7 @@ impl Reading {
         self.max - self.min
     }
 
-    /// Estimated mV from the shared ADC reference, rounding only the final
+    /// Smoothed peak-to-peak as estimated mV from the shared ADC reference, rounding only the final
     /// input-equivalent ratio rather than truncating an intermediate voltage.
     /// `reference_mv` is the application's internal-reference calibration.
     /// No estimate is available with a zero/saturated reference or overflow.
@@ -113,7 +198,7 @@ impl Reading {
         if reference_count == 0 || reference_count >= FULL_SCALE || reference_mv == 0 {
             return None;
         }
-        let numerator = u64::from(self.peak_to_peak()) * u64::from(reference_mv);
+        let numerator = u64::from(self.smoothed) * u64::from(reference_mv);
         let denominator = u64::from(reference_count) * u64::from(PGA_GAIN);
         u16::try_from((numerator + denominator / 2) / denominator).ok()
     }
@@ -130,6 +215,7 @@ impl Reading {
         u16::try_from((numerator + denominator / 2) / denominator).ok()
     }
 
+    /// Auto picks the smallest step that fits the larger excursion from the mean.
     pub fn plot_scale(&self, scale: Scale, reference: Option<u16>, reference_mv: u16) -> PlotScale {
         let excursion = u32::from((self.max - self.mean).max(self.mean - self.min)).max(1);
         let mv_per_div = reference
@@ -170,19 +256,40 @@ impl Reading {
     }
 }
 
-/// Nominal time per horizontal division, in tenths of a microsecond.
-/// Uses the trace window, not the full statistics capture or UI update period.
-/// Clock accuracy, acquisition overhead and lost samples are not measured here.
-pub fn nominal_tenths_us_per_div(adc_clock_hz: u32, cycles_per_sample: u16) -> Option<u32> {
-    if adc_clock_hz == 0 || cycles_per_sample == 0 {
-        return None;
-    }
-    let numerator = TRACE_SAMPLES as u64 * u64::from(cycles_per_sample) * TENTHS_US_PER_SECOND;
-    let denominator = u64::from(adc_clock_hz) * u64::from(HORIZONTAL_DIVISIONS);
-    u32::try_from((numerator + denominator / 2) / denominator).ok()
+/// Rolling peak-to-peak history behind the smoothed readout, so one noisy
+/// capture does not make the number jump. Cleared when the input changes.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PeakHistory {
+    values: [u16; PEAK_HISTORY],
+    len: usize,
+    next: usize,
 }
 
-pub fn analyze(samples: &[u16; SAMPLE_COUNT]) -> Reading {
+impl PeakHistory {
+    /// Add the capture's peak-to-peak and set its smoothed value: the
+    /// weighted mean and maximum of the history, rounded.
+    pub fn add(&mut self, reading: &mut Reading) {
+        self.values[self.next] = reading.peak_to_peak();
+        self.next = (self.next + 1) % PEAK_HISTORY;
+        self.len = (self.len + 1).min(PEAK_HISTORY);
+        let values = &self.values[..self.len];
+        let sum: u32 = values.iter().map(|&value| u32::from(value)).sum();
+        let max = values.iter().copied().max().map_or(0, u32::from);
+        let len = self.len as u32;
+        let weighted = PEAK_MEAN_PERCENT * sum + PEAK_MAX_PERCENT * max * len;
+        let total = (PEAK_MEAN_PERCENT + PEAK_MAX_PERCENT) * len;
+        reading.smoothed = ((weighted + total / 2) / total) as u16;
+    }
+
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
+
+/// Statistics over the whole capture, trace over the first `window`
+/// samples from the trigger ([`Sampling::window`]).
+pub fn analyze(samples: &[u16; SAMPLE_COUNT], timebase: Timebase, window: usize) -> Reading {
+    let window = window.clamp(TRACE_COLUMNS, MAX_WINDOW);
     let mut min = u16::MAX;
     let mut max = 0;
     let mut sum = 0u32;
@@ -204,7 +311,7 @@ pub fn analyze(samples: &[u16; SAMPLE_COUNT]) -> Reading {
     // Arm at or below the mean, fire above it plus the hysteresis band.
     let level = mean + (max - min) / TRIGGER_BAND_DIVISOR;
     let mut armed = false;
-    let trigger = samples[..=SAMPLE_COUNT - TRACE_SAMPLES]
+    let trigger = samples[..=SAMPLE_COUNT - window]
         .iter()
         .position(|&sample| {
             let fired = armed && sample > level;
@@ -213,8 +320,8 @@ pub fn analyze(samples: &[u16; SAMPLE_COUNT]) -> Reading {
         });
     let start = trigger.unwrap_or(0);
     let trace = core::array::from_fn(|column| {
-        let first = start + column * TRACE_SAMPLES / TRACE_COLUMNS;
-        let end = start + (column + 1) * TRACE_SAMPLES / TRACE_COLUMNS;
+        let first = start + column * window / TRACE_COLUMNS;
+        let end = start + (column + 1) * window / TRACE_COLUMNS;
         let mut bin = Envelope {
             min: u16::MAX,
             max: 0,
@@ -230,7 +337,9 @@ pub fn analyze(samples: &[u16; SAMPLE_COUNT]) -> Reading {
         max,
         mean,
         rms_counts_x16,
+        smoothed: max - min,
         triggered: trigger.is_some(),
+        timebase,
         trace,
     }
 }
@@ -239,16 +348,59 @@ pub fn analyze(samples: &[u16; SAMPLE_COUNT]) -> Reading {
 mod tests {
     use super::*;
 
+    /// The widest trace window, as at the slower timebases.
+    const WINDOW: usize = SAMPLE_COUNT / 2;
+
     #[test]
-    fn nominal_timebase_uses_trace_span_clock_and_conversion_cycles() {
-        // Protect both clock profiles and the half-capture/eight-division
-        // mapping; copying full-capture timing would double these labels.
-        assert_eq!(nominal_tenths_us_per_div(30_000_000, 33), Some(704));
-        assert_eq!(nominal_tenths_us_per_div(37_500_000, 33), Some(563));
-        assert_eq!(nominal_tenths_us_per_div(30_000_000, 24), Some(512));
-        assert_eq!(nominal_tenths_us_per_div(0, 33), None);
-        assert_eq!(nominal_tenths_us_per_div(30_000_000, 0), None);
-        assert_eq!(nominal_tenths_us_per_div(1, u16::MAX), None);
+    fn timebases_stay_near_their_label_within_adc_limits() {
+        // Both clock profiles must land each 1-2-5 step within 1% using only
+        // settable sampling times and windows the trace can show.
+        for clock in [30_000_000, 37_500_000] {
+            for timebase in Timebase::ALL {
+                let Some(sampling) = timebase.sampling(clock) else {
+                    panic!("{timebase:?} unreachable at {clock} Hz");
+                };
+                assert!(sampling.sample_cycles >= MIN_SAMPLE_CYCLES);
+                assert!((TRACE_COLUMNS..=MAX_WINDOW).contains(&sampling.window));
+                let cycles = u64::from(sampling.sample_cycles) + u64::from(COMPARISON_CYCLES);
+                let screen_us =
+                    (sampling.window as u64 * cycles * US_PER_SECOND) as f64 / f64::from(clock);
+                let label = f64::from(timebase.us_per_div() * HORIZONTAL_DIVISIONS);
+                assert!(
+                    (screen_us / label - 1.0).abs() < 0.01,
+                    "{timebase:?} {clock}"
+                );
+            }
+        }
+        assert_eq!(Timebase::Us20.sampling(0), None);
+    }
+
+    #[test]
+    fn smoothed_peak_to_peak_blends_history_mean_and_maximum() {
+        // One spiky capture lifts the readout without replacing it, and the
+        // spike ages out after a full history instead of sticking.
+        let mut history = PeakHistory::default();
+        let capture = |peak: u16| {
+            let mut samples = [1000; SAMPLE_COUNT];
+            samples[0] += peak;
+            analyze(&samples, Timebase::Us50, WINDOW)
+        };
+        let mut reading = capture(100);
+        history.add(&mut reading);
+        assert_eq!(reading.smoothed, 100);
+        let mut reading = capture(200);
+        history.add(&mut reading);
+        // 0.65 * 150 + 0.35 * 200 = 167.5, rounded half-up.
+        assert_eq!(reading.smoothed, 168);
+        for _ in 0..PEAK_HISTORY {
+            reading = capture(100);
+            history.add(&mut reading);
+        }
+        assert_eq!(reading.smoothed, 100);
+        history.clear();
+        let mut reading = capture(40);
+        history.add(&mut reading);
+        assert_eq!(reading.smoothed, 40);
     }
 
     #[test]
@@ -270,7 +422,7 @@ mod tests {
             (FULL_SCALE, 1344, 1650),
         ] {
             samples[0] = counts;
-            let reading = analyze(&samples);
+            let reading = analyze(&samples, Timebase::Us50, WINDOW);
             assert_eq!(
                 reading.peak_to_peak_mv(reference, REFERENCE_MV),
                 Some(expected)
@@ -279,7 +431,7 @@ mod tests {
             assert_eq!(reading.peak_to_peak_mv(FULL_SCALE, REFERENCE_MV), None);
             assert_eq!(reading.peak_to_peak_mv(reference, 0), None);
         }
-        let reading = analyze(&samples);
+        let reading = analyze(&samples, Timebase::Us50, WINDOW);
         assert_eq!(reading.peak_to_peak_mv(1, REFERENCE_MV), None);
     }
 
@@ -288,7 +440,7 @@ mod tests {
         for baseline in [1000, 2000] {
             let mut samples = [baseline; SAMPLE_COUNT];
             samples[SAMPLE_COUNT / 2..].fill(baseline + 20);
-            let reading = analyze(&samples);
+            let reading = analyze(&samples, Timebase::Us50, WINDOW);
             assert_eq!(reading.rms_tenths_mv(1344, 1083), Some(40));
             assert_eq!(reading.rms_tenths_mv(1500, 1083), Some(36));
             assert_eq!(reading.rms_tenths_mv(0, 1083), None);
@@ -297,10 +449,13 @@ mod tests {
         }
         let mut samples = [2047; SAMPLE_COUNT];
         samples[SAMPLE_COUNT / 2..].fill(2048);
-        assert_eq!(analyze(&samples).rms_tenths_mv(1344, 1083), Some(2));
+        assert_eq!(
+            analyze(&samples, Timebase::Us50, WINDOW).rms_tenths_mv(1344, 1083),
+            Some(2)
+        );
         samples[..SAMPLE_COUNT / 2].fill(0);
         samples[SAMPLE_COUNT / 2..].fill(FULL_SCALE);
-        let reading = analyze(&samples);
+        let reading = analyze(&samples, Timebase::Us50, WINDOW);
         assert_eq!(reading.rms_tenths_mv(1344, 1083), Some(8249));
         assert_eq!(reading.rms_tenths_mv(1, 1083), None);
     }
@@ -309,7 +464,7 @@ mod tests {
     fn plot_scales_preserve_spikes_and_flag_locked_range_limits() {
         let mut samples = [1000; SAMPLE_COUNT];
         samples[SAMPLE_COUNT - 1] = 1100;
-        let reading = analyze(&samples);
+        let reading = analyze(&samples, Timebase::Us50, WINDOW);
         let auto = reading.plot_scale(Scale::Auto, Some(1344), 1083);
         assert_eq!(auto.mv_per_div, Some(50));
         assert!(auto.min <= i32::from(reading.min));
@@ -331,7 +486,7 @@ mod tests {
         );
         samples.fill(0);
         samples[0] = FULL_SCALE;
-        let reading = analyze(&samples);
+        let reading = analyze(&samples, Timebase::Us50, WINDOW);
         let auto = reading.plot_scale(Scale::Auto, Some(1344), 1083);
         assert_eq!(auto.mv_per_div, Some(1000));
         assert!(auto.min < 0);
@@ -340,7 +495,7 @@ mod tests {
 
     #[test]
     fn flat_capture_has_no_trigger_or_invented_ripple() {
-        let reading = analyze(&[2048; SAMPLE_COUNT]);
+        let reading = analyze(&[2048; SAMPLE_COUNT], Timebase::Us50, WINDOW);
         assert_eq!((reading.min, reading.max, reading.mean), (2048, 2048, 2048));
         assert_eq!(reading.peak_to_peak(), 0);
         assert_eq!(reading.rms_tenths_mv(1344, 1083), Some(0));
@@ -361,7 +516,7 @@ mod tests {
         let mut samples = [1000; SAMPLE_COUNT];
         samples[10..20].fill(3000);
         samples[SAMPLE_COUNT - 1] = FULL_SCALE;
-        let reading = analyze(&samples);
+        let reading = analyze(&samples, Timebase::Us50, WINDOW);
         assert_eq!(
             reading.mean,
             (samples.iter().map(|&v| u32::from(v)).sum::<u32>() / SAMPLE_COUNT as u32) as u16
@@ -379,11 +534,11 @@ mod tests {
         // Without hysteresis the noise below crossed the mean at sample 1
         // and the trace jumped between captures.
         let mut samples = [1000; SAMPLE_COUNT];
-        samples[TRACE_SAMPLES..].fill(1100);
+        samples[WINDOW..].fill(1100);
         for (index, sample) in samples[..100].iter_mut().enumerate() {
             *sample = if index % 2 == 0 { 1053 } else { 1056 };
         }
-        let reading = analyze(&samples);
+        let reading = analyze(&samples, Timebase::Us50, WINDOW);
         assert_eq!(reading.mean, 1055);
         assert!(reading.triggered);
         assert_eq!(
@@ -398,13 +553,13 @@ mod tests {
     #[test]
     fn late_crossing_uses_untriggered_window_and_bins_keep_narrow_peaks() {
         let mut samples = [2000; SAMPLE_COUNT];
-        samples[TRACE_SAMPLES + 1] = 4000;
-        let reading = analyze(&samples);
+        samples[WINDOW + 1] = 4000;
+        let reading = analyze(&samples, Timebase::Us50, WINDOW);
         assert!(!reading.triggered);
         assert!(reading.trace.iter().all(|bin| bin.max == 2000));
         // A one-sample peak must survive binning when it is in the window.
         samples[2] = 4000;
-        let reading = analyze(&samples);
+        let reading = analyze(&samples, Timebase::Us50, WINDOW);
         assert!(reading.triggered);
         assert_eq!(
             reading.trace[0],
