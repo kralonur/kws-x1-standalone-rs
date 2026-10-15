@@ -119,6 +119,18 @@ pub fn cable_lines(observation: Observation, page: u32, svid: Option<u16>) -> [[
             let (reason, hint) = cable_failure(report.status, spr.cable_modes.sync);
             put(&mut rows[1], reason);
             put(&mut rows[2], hint);
+            // The last NAK's VDM Header and the revision it came back at,
+            // so a rejected request can be told apart from the photo.
+            if report.status == CableStatus::Nak && report.count > 0 {
+                put(&mut rows[2], b"VDM 00000000 PD?");
+                hex(&mut rows[2], 4, (report.objects[0] >> 16) as u16);
+                hex(&mut rows[2], 8, report.objects[0] as u16);
+                rows[2][15] = match report.revision {
+                    1 => b'2',
+                    2 => b'3',
+                    _ => b'?',
+                };
+            }
         }
         return rows;
     }
