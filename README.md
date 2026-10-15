@@ -226,7 +226,7 @@ point the way it flows (they follow the screen rotation).
 | **Lines** | D+, D-, CC1 and CC2 voltages | |
 | **Energy** | charge (Ah), energy (Wh) and the time since the last reset; how the totals are kept | hold OK: reset the totals |
 | **Graph** | power, voltage or current over the last 1, 2, 5 or 10 minutes; the latest second's and the window's highest voltage, current and power | OK, Left/Right choose power, voltage or current, OK, Left/Right change the window, OK done; Back closes; hold OK: clear the graph |
-| **Ripple** | bus ripple waveform, peak-to-peak voltage, mean-removed RMS and nominal time per division | OK focuses; then Left/Right: vertical scale, OK: hold/run; Back exits |
+| **Ripple** | bus ripple waveform, smoothed peak-to-peak voltage, mean-removed RMS and nominal time per division | OK focuses the time per division; OK moves to the vertical scale, then run/hold; Left/Right change the one in `< >`; long OK restores the defaults; Back exits |
 | **PD Profiles** | the charger's fixed profiles, `ACTIVE` on the one in force; with PD off for Quick Charge only `QC MODE` | OK, Left/Right to choose, OK requests it, Back cancels; in `QC MODE` OK switches back to PD |
 | **PPS** | the charger's PPS ranges, the set voltage and current limit, the live output; `ACTIVE` or `NOT APPLIED`; with PD off for Quick Charge only `QC MODE` | OK, Left/Right voltage (20 mV, 100 mV held), OK, current limit (50 mA, 250 mA held), OK requests; in `QC MODE` OK switches back to PD |
 | **AVS** | the charger's SPR AVS ranges, the set voltage and the current the meter asks for at it, the live output; `ACTIVE` or `NOT APPLIED`; with PD off for Quick Charge only `QC MODE` | OK, Left/Right voltage (100 mV, 500 mV held), OK requests; in `QC MODE` OK switches back to PD |
@@ -451,23 +451,33 @@ The screen reads 24 mV p-p / 5.0 mV RMS, the scope 27 mV / 5 mV. Both were froze
 same moment, so the captures are not synchronized and the waveforms can differ slightly.*
 
 The **Ripple** screen (tab `RIPPLE` in Monitor, after Graph) captures fast
-bus-voltage variations. Statistics cover 1024 samples; the plot shows 512,
-so peaks can lie outside the visible trace.
+bus-voltage variations. Statistics cover 1024 samples; the plot shows at
+most 640, so peaks can lie outside the visible trace.
 
-- **`mV p-p`**: highest minus lowest sample.
+- **`mV p-p`**: highest minus lowest sample, smoothed over the last 30
+  captures (about 3 s): 65% their average, 35% their maximum, like the stock
+  firmware. It restarts when the timebase changes or the capture resumes.
 - **`RMS`**: ripple RMS with the capture's mean removed, not total bus RMS.
   The scope's RMS can include a nonzero mean and is not always directly comparable.
-- **`U` / `I`**: live bus voltage and signed current, including during hold.
-- **`AUTO` / `LOCK …mV/div`**: automatic or fixed vertical scale.
-- **`~70.4us/div`** or **`~56.3us/div`**, depending on clock profile: nominal
-  microseconds per division, clock-derived rather than measured or calibrated.
+- **`V` / `A`**: live bus voltage and signed current, including during hold.
+- **`AUTO` / `LOCK …mV/div`**: automatic (default) or fixed vertical scale,
+  2–1000 mV/div.
+- **`~50us/div`**: nominal microseconds per division in scope steps of 20,
+  50, 100, 200 and 500, clock-derived rather than measured or calibrated
+  (the sampling lands within 1% of each step). 20 and 50 us/div show fewer
+  samples at the top rate (about 0.9 MS/s at 30 MHz ADC clock); the slower
+  steps sample more slowly. Ripple above roughly half the sample rate
+  aliases, so chargers switching at hundreds of kHz are out of reach.
 - **Status**: `T` means a rising trigger was found, with hysteresis against
   noise. `CLIPPED` means an ADC rail was reached: amplitude is a lower bound.
-  `OFF SCALE` means only the plot cuts off peaks. `NO REF / raw` means ADC
+  `OFF SCALE` means only a fixed scale cuts off peaks. `NO REF` means ADC
   counts replace voltage scaling.
 
-**OK** first focuses without freezing. Focused, **Left/Right** select Auto or
-2–1000 mV/div and **OK** toggles run/hold; **Back** returns to tab navigation.
+**OK** first focuses the time per division without freezing. Each further
+**OK** moves to the next setting: time per division, vertical scale, then
+`RUN`/`HOLD`. The one **Left/Right** change is yellow, between `< >`. A long
+**OK** restores 50 us/div, auto scale and run; **Back** returns to tab
+navigation.
 `HOLD` freezes the trace, statistics and voltage reference, but not bus V/A.
 A hold lasts until another tab is shown; coming back starts a live capture.
 
@@ -948,9 +958,10 @@ The **Ripple** screen (`RIPPLE` in Monitor, after Graph) also works with a charg
 and device connected through the meter. It only measures: it does not request a
 voltage or change the device's PD contract.
 
-The fields, run/hold and scale controls, warnings and nominal timebase are the
-same as on the [Ripple screen above](#5-ripple). OK first focuses the page;
-then Left/Right change the scale and OK toggles hold/run. Bus voltage/current stay live while held.
+The fields, run/hold and timebase controls and warnings are the same as on the
+[Ripple screen above](#5-ripple): OK steps through time per division, vertical
+scale and run/hold, Left/Right change the focused one, and a long OK restores
+the defaults. Bus voltage/current stay live while held.
 
 #### 3. PD Sniff
 
