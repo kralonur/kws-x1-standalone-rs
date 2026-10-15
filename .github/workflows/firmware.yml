@@ -32,7 +32,7 @@ jobs:
         run: |
           cargo fmt --all -- --check
           cargo clippy -p firmware --all-features --target thumbv7em-none-eabihf --locked -- -D warnings
-          cargo clippy -p firmware-pack --all-targets --locked -- -D warnings
+          cargo clippy --workspace --exclude firmware --all-targets --locked -- -D warnings
           cargo test -p firmware-pack --test cli --locked
       - name: Build normal release firmware without diagnostic features
         run: cargo build --release -p firmware --target thumbv7em-none-eabihf --locked

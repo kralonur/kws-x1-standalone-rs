@@ -1,10 +1,21 @@
 name: flasher
 
+# Build only when the flasher or its image library changes; flasher-v tags
+# always build (GitHub skips path filters for tag pushes). Run it by hand
+# after a dependency update the flasher uses.
 on:
   push:
     branches: [main]
     tags: ['flasher-v[0-9]+.*']
+    paths:
+      - 'flasher/**'
+      - 'firmware-image/**'
+      - '.github/workflows/flasher.yml'
   pull_request:
+    paths:
+      - 'flasher/**'
+      - 'firmware-image/**'
+      - '.github/workflows/flasher.yml'
   workflow_dispatch:
 
 permissions:
