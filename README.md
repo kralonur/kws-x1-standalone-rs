@@ -226,7 +226,7 @@ point the way it flows (they follow the screen rotation).
 | **Lines** | D+, D-, CC1 and CC2 voltages | |
 | **Energy** | charge (Ah), energy (Wh) and the time since the last reset; how the totals are kept | hold OK: reset the totals |
 | **Graph** | power, voltage or current over the last 1, 2, 5 or 10 minutes; the latest second's and the window's highest voltage, current and power | OK, Left/Right choose power, voltage or current, OK, Left/Right change the window, OK done; Back closes; hold OK: clear the graph |
-| **Ripple** | bus ripple waveform, smoothed peak-to-peak voltage, mean-removed RMS and nominal time per division | OK focuses the time per division; OK moves to the vertical scale, then run/hold; Left/Right change the one in `< >`; long OK restores the defaults; Back exits |
+| **Ripple** | bus ripple waveform, smoothed peak-to-peak voltage, mean-removed RMS and nominal time per division | OK focuses the time per division; OK moves to the vertical scale, then run/hold; Left/Right change the one in `< >`; hold OK: restore the defaults; Back exits |
 | **PD Profiles** | the charger's fixed profiles, `ACTIVE` on the one in force; with PD off for Quick Charge only `QC MODE` | OK, Left/Right to choose, OK requests it, Back cancels; in `QC MODE` OK switches back to PD |
 | **PPS** | the charger's PPS ranges, the set voltage and current limit, the live output; `ACTIVE` or `NOT APPLIED`; with PD off for Quick Charge only `QC MODE` | OK, Left/Right voltage (20 mV, 100 mV held), OK, current limit (50 mA, 250 mA held), OK requests; in `QC MODE` OK switches back to PD |
 | **AVS** | the charger's SPR AVS ranges, the set voltage and the current the meter asks for at it, the live output; `ACTIVE` or `NOT APPLIED`; with PD off for Quick Charge only `QC MODE` | OK, Left/Right voltage (100 mV, 500 mV held), OK requests; in `QC MODE` OK switches back to PD |
@@ -446,7 +446,7 @@ flash writes, and a restart clears it and comes back on the overview.
 
 <img src="pictures/ripple_scope_comparison.webp" width="600" alt="Ripple screen next to a DSO Shell oscilloscope, showing similar downward steps in bus ripple">
 
-*Ripple screen next to a DSO Shell (DSO150) oscilloscope, both at 10 mV/div, under no load (trigger mode).
+*Ripple screen (an earlier version, before the timebase and spectrum) next to a DSO Shell (DSO150) oscilloscope, both at 10 mV/div, under no load (trigger mode).
 The screen reads 24 mV p-p / 5.0 mV RMS, the scope 27 mV / 5 mV. Both were frozen by hand at nearly the
 same moment, so the captures are not synchronized and the waveforms can differ slightly.*
 
@@ -455,8 +455,9 @@ bus-voltage variations. Statistics cover 1024 samples; the plot shows at
 most 640, so peaks can lie outside the visible trace.
 
 - **`mV p-p`**: highest minus lowest sample, smoothed over the last 30
-  captures (about 3 s): 65% their average, 35% their maximum, like the stock
-  firmware. It restarts when the timebase changes or the capture resumes.
+  captures (about 3 s): 65% their average, 35% their maximum, a blend
+  recovered from the stock firmware. It restarts when the timebase changes
+  or the capture resumes.
 - **`RMS`**: ripple RMS with the capture's mean removed, not total bus RMS.
   The scope's RMS can include a nonzero mean and is not always directly comparable.
 - **`V` / `A`**: live bus voltage and signed current, including during hold.
@@ -465,10 +466,13 @@ most 640, so peaks can lie outside the visible trace.
 - **`~50us/div`**: nominal microseconds per division in scope steps of 20,
   50, 100, 200 and 500, clock-derived rather than measured or calibrated
   (the sampling lands within 1% of each step). 20 and 50 us/div show fewer
-  samples at the top rate (about 0.9 MS/s at 30 MHz ADC clock); the slower
-  steps sample more slowly. Ripple above roughly half the sample rate
-  aliases, so chargers switching at hundreds of kHz are out of reach.
-- **Spectrum** (blue, behind the trace): the whole capture's frequency
+  samples at the top rate (about 0.9 MS/s at a 30 MHz ADC clock, 1.1 MS/s at
+  37.5 MHz); the slower steps sample more slowly, down to about 160 kS/s at
+  500 us/div. Ripple above half the sample rate aliases: the fastest steps
+  can represent up to about 450 kHz, which covers typical charger switching
+  frequencies (often around 65–130 kHz) but not the fastest chargers. The
+  analog input's bandwidth is not characterized.
+- **Spectrum** (purple, behind the trace): the whole capture's frequency
   content, from 0 at the left to half the sample rate at the right, heights
   relative to the strongest frequency (not a voltage scale). `1 2 3` mark the
   three strongest peaks, listed as `1:27.7k 2:55.4k 3:83.1k` at the top of
@@ -482,11 +486,13 @@ most 640, so peaks can lie outside the visible trace.
 
 **OK** first focuses the time per division without freezing. Each further
 **OK** moves to the next setting: time per division, vertical scale, then
-`RUN`/`HOLD`. The one **Left/Right** change is yellow, between `< >`. A long
-**OK** restores 50 us/div, auto scale and run; **Back** returns to tab
-navigation.
-`HOLD` freezes the trace, statistics and voltage reference, but not bus V/A.
-A hold lasts until another tab is shown; coming back starts a live capture.
+`RUN`/`HOLD`. The one **Left/Right** change is yellow, between `< >`.
+Holding **OK** restores 50 us/div, auto scale and run; **Back** returns to
+tab navigation.
+`HOLD` freezes the trace, spectrum, statistics and voltage reference, but not
+bus V/A. A different vertical scale redraws the held capture; a different
+time per division starts a live capture, since the held one was taken at the
+old rate. A hold lasts until another tab is shown; coming back starts live.
 
 The photo is a single-point cross-check, not a calibration: accuracy under
 load, at other ripple frequencies and the actual sampling cadence are not
@@ -967,8 +973,8 @@ voltage or change the device's PD contract.
 
 The fields, run/hold and timebase controls and warnings are the same as on the
 [Ripple screen above](#5-ripple): OK steps through time per division, vertical
-scale and run/hold, Left/Right change the focused one, and a long OK restores
-the defaults. Bus voltage/current stay live while held.
+scale and run/hold, Left/Right change the focused one, and holding OK
+restores the defaults. Bus voltage/current stay live while held.
 
 #### 3. PD Sniff
 

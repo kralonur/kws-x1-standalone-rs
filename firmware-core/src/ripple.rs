@@ -6,8 +6,9 @@ use crate::spectrum::Spectrum;
 pub const SAMPLE_COUNT: usize = 1024;
 /// Trace columns: two pixels each inside the display's 224-pixel plot.
 pub const TRACE_COLUMNS: usize = 112;
-/// Most samples a trace shows, leaving 384 for trigger alignment: enough
-/// for 500 us/div at the slowest sampling on the faster 37.5 MHz clock.
+/// Most samples a trace shows, leaving 384 for trigger alignment. At 512,
+/// 500 us/div on the faster 37.5 MHz clock would need longer than the
+/// ADC's 255-cycle maximum sampling time.
 pub const MAX_WINDOW: usize = SAMPLE_COUNT * 5 / 8;
 /// Eight horizontal divisions across the displayed trace's sample bins.
 pub const HORIZONTAL_DIVISIONS: u32 = 8;
@@ -135,9 +136,10 @@ impl Timebase {
     }
 
     /// The nearest sampling to this timebase at `adc_clock_hz`: as many
-    /// samples as possible (up to [`MAX_WINDOW`]), each as fast as settling allows when the screen is
-    /// shorter, and at least one sample per trace column. `None` when the
-    /// clock cannot reach it. Nominal: rounding leaves it within about 1%.
+    /// samples as possible (up to [`MAX_WINDOW`]), or, for a shorter screen,
+    /// fewer samples at the fastest rate settling allows; at least one per
+    /// trace column. `None` when the clock cannot reach it. Nominal:
+    /// rounding leaves it within 1% (tested for both clock profiles).
     pub fn sampling(self, adc_clock_hz: u32) -> Option<Sampling> {
         let screen_cycles = u64::from(self.us_per_div())
             * u64::from(HORIZONTAL_DIVISIONS)
@@ -201,8 +203,9 @@ impl Reading {
         self.max - self.min
     }
 
-    /// Smoothed peak-to-peak as estimated mV from the shared ADC reference, rounding only the final
-    /// input-equivalent ratio rather than truncating an intermediate voltage.
+    /// Smoothed peak-to-peak as estimated mV from the shared ADC reference,
+    /// rounding only the final input-equivalent ratio rather than truncating
+    /// an intermediate voltage.
     /// `reference_mv` is the application's internal-reference calibration.
     /// No estimate is available with a zero/saturated reference or overflow.
     pub fn peak_to_peak_mv(&self, reference_count: u16, reference_mv: u16) -> Option<u16> {
@@ -268,7 +271,8 @@ impl Reading {
 }
 
 /// Rolling peak-to-peak history behind the smoothed readout, so one noisy
-/// capture does not make the number jump. Cleared when the input changes.
+/// capture does not make the number jump. The caller clears it when the
+/// sample rate changes or capture pauses.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PeakHistory {
     values: [u16; PEAK_HISTORY],
@@ -360,7 +364,7 @@ pub fn analyze(samples: &[u16; SAMPLE_COUNT], timebase: Timebase, window: usize)
 mod tests {
     use super::*;
 
-    /// The widest trace window, as at the slower timebases.
+    /// A half-capture trace window, which these cases were written for.
     const WINDOW: usize = SAMPLE_COUNT / 2;
 
     #[test]

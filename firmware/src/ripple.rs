@@ -25,7 +25,9 @@ const INPUT_PIN: u8 = 2;
 const FAST_SAMPLE_TIME: SampleTime =
     SampleTime::new(MIN_SAMPLE_CYCLES).expect("20 cycles is in range");
 /// A chosen generous capture bound, in milliseconds, not a sample-rate claim.
-/// The slowest capture, 1024 samples of 268 cycles at 30 MHz, takes 9.2 ms.
+/// Even the longest settable sampling, 255 + 13 cycles per sample at the
+/// slower 30 MHz clock, takes 9.2 ms for 1024 samples; the timebases use
+/// at most 6.4 ms.
 const CAPTURE_TIMEOUT: Duration = Duration::from_millis(20);
 /// UI capture cadence, in milliseconds; no acquisition between captures.
 const UPDATE_PERIOD: Duration = Duration::from_millis(100);
