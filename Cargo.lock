@@ -926,7 +926,7 @@ checksum = "a513e167849a384b7f9b746e517604398518590a9142f4846a32e3c2a4de7b11"
 [[package]]
 name = "pd-protocol"
 version = "0.1.0"
-source = "git+https://github.com/kralonur/embedded-charging-protocols-rs?rev=adbe909808f62d831b95397368a28b161cdb63b0#adbe909808f62d831b95397368a28b161cdb63b0"
+source = "git+https://github.com/kralonur/embedded-charging-protocols-rs?rev=25f80d398c6a3cc0340c1d05ca23865dabc632ba#25f80d398c6a3cc0340c1d05ca23865dabc632ba"
 dependencies = [
  "usbpd",
  "usbpd-traits",
@@ -977,7 +977,7 @@ dependencies = [
 [[package]]
 name = "qc-protocol"
 version = "0.1.0"
-source = "git+https://github.com/kralonur/embedded-charging-protocols-rs?rev=adbe909808f62d831b95397368a28b161cdb63b0#adbe909808f62d831b95397368a28b161cdb63b0"
+source = "git+https://github.com/kralonur/embedded-charging-protocols-rs?rev=25f80d398c6a3cc0340c1d05ca23865dabc632ba#25f80d398c6a3cc0340c1d05ca23865dabc632ba"
 
 [[package]]
 name = "quote"
