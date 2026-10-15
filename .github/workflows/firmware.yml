@@ -82,6 +82,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
+          # A hyphenated tag (firmware-v0.7.1-test.1) is a test build: never Latest.
+          prerelease=()
+          if [[ "$RELEASE_TAG" == *-*-* ]]; then
+            prerelease=(--prerelease)
+          fi
           gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
-            --verify-tag --generate-notes \
+            --verify-tag --generate-notes "${prerelease[@]}" \
             firmware.X1C SHA256SUMS LICENSE-MIT LICENSE-APACHE
