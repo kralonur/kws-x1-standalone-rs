@@ -850,6 +850,10 @@ first, then asks the cable. It scrolls (OK) through several sections.
 
 - `HOLD OK TO ASK AT 5V`, `DISCOVERY IN PROGRESS`, `NO DISCOVERY YET`,
   `PD HALTED SEE PD PAGE`, `NO VALID IDENTITY`.
+- After OK is held without a PD 3.0 contract: `NO PD ON THIS PORT` or
+  `PD 2.0 ON THIS PORT`, then `E-MARKER NOT READ` and `NEEDS A PD 3.0 PORT`.
+  The cable can only be asked under a PD 3.0 contract; a USB-A port never
+  has PD, even on a PD charger.
 - `METER PLUG IN CHARGER:` then `ACTS AS 5A CABLE` (in the test) or
   `NOT ACTING AS 5A CABLE` / `5A TEST: CHARGER PAGE`.
 - Failures: `CABLE ID NAK`, `CABLE ID BUSY NO RETRY`, `CABLE: CHARGER BUSY`,

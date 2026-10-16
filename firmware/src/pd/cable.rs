@@ -10,6 +10,9 @@ type Lines = [[u8; WIDE_COLUMNS]; 8];
 
 /// USB PD vSafe5V nominal, in mV: cable reads run only on a fixed 5V contract.
 const VSAFE5V_MV: u16 = 5000;
+/// The charger's PD major revision a cable query needs, as `peer_revision`
+/// records it.
+const PD3: u8 = 3;
 /// Rows below a section's heading.
 const SECTION_ROWS: usize = 7;
 /// Sections for the readable summary ahead of the raw identity, enough for
@@ -102,11 +105,13 @@ pub fn cable_svid_index(observation: Observation, page: u32) -> Option<u16> {
 /// latest SVID reply and selected mode, plus decoded identity fields.
 /// Encoded values use hexadecimal; they are claims, not electrical
 /// measurements. A section that continues the previous one has no heading.
+/// `asked`: OK was held on this page since boot.
 pub fn cable_lines(
     observation: Observation,
     page: u32,
     svid: Option<u16>,
     svids: &dyn firmware_core::pd_svids::Store,
+    asked: bool,
 ) -> Lines {
     use firmware_core::{pd_cable_details, pd_cable_modes::Status};
     let mut rows = [[b' '; WIDE_COLUMNS]; 8];
@@ -128,16 +133,26 @@ pub fn cable_lines(
         return rows;
     };
     let Some(report) = spr.cable_report else {
-        put(
-            &mut rows[1],
-            if observation.phase == Phase::Failed {
-                b"PD HALTED SEE PD PAGE"
-            } else if spr.cable_active {
-                b"DISCOVERY IN PROGRESS"
-            } else {
-                b"HOLD OK TO ASK AT 5V"
-            },
-        );
+        // A cable is only asked under a PD 3.0 contract (the PD task drops
+        // the query otherwise); once asked, say why nothing could start.
+        let refused = match spr.peer_revision {
+            _ if !asked => None,
+            // No PD contract on this port: a USB-A port never has one.
+            None => Some(&b"NO PD ON THIS PORT"[..]),
+            Some(revision) if revision < PD3 => Some(&b"PD 2.0 ON THIS PORT"[..]),
+            Some(_) => None,
+        };
+        if observation.phase == Phase::Failed {
+            put(&mut rows[1], b"PD HALTED SEE PD PAGE");
+        } else if spr.cable_active {
+            put(&mut rows[1], b"DISCOVERY IN PROGRESS");
+        } else if let Some(refused) = refused {
+            put(&mut rows[1], refused);
+            put(&mut rows[2], b"E-MARKER NOT READ");
+            put(&mut rows[3], b"NEEDS A PD 3.0 PORT");
+        } else {
+            put(&mut rows[1], b"HOLD OK TO ASK AT 5V");
+        }
         return rows;
     };
     let fields = pd_cable_details::field_count(&report);

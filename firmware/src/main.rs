@@ -38,7 +38,7 @@ mod ui;
 mod upper;
 
 use core::ptr::addr_of_mut;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use embassy_executor::{InterruptExecutor, Spawner};
 use embassy_hc32::gpio::{self, AlternateMode, AlternatePin, InputPin, Port};
@@ -168,6 +168,8 @@ static SETTINGS_SAVE: Watch<CriticalSectionRawMutex, settings_store::Status, 1> 
 /// PD requests from `button_task` (profile previews, confirmations, the cable
 /// query), applied by the PD session in order.
 static PD_COMMANDS: Channel<CriticalSectionRawMutex, button_logic::PdCommand, 8> = Channel::new();
+/// OK was held on the Cable page since boot, so a refused query can say why.
+static CABLE_ASKED: AtomicBool = AtomicBool::new(false);
 /// How the renderer laid out the shown detail list: `button_task` limits
 /// scrolling to it and the PD trial reads the cable section in view.
 static DETAIL_VIEW: Watch<CriticalSectionRawMutex, (Detail, ui::ListView), 1> = Watch::new();
@@ -755,6 +757,9 @@ async fn button_task(
         // The PD session drains these between transactions; a full queue
         // drops the press, as a missed tap would.
         if let Some(command) = command {
+            if command == firmware_core::buttons::PdCommand::QueryCable {
+                CABLE_ASKED.store(true, Ordering::Relaxed);
+            }
             PD_COMMANDS.try_send(command).ok();
         }
         input_sender.send_if_modified(|current| {
@@ -1328,7 +1333,13 @@ async fn meter_task(
                                     pd::cable_svid_index(observation, section).and_then(|index| {
                                         firmware_core::pd_svids::Store::at(&CABLE_SVID_STORE, index)
                                     });
-                                pd::cable_lines(observation, section, svid, &CABLE_SVID_STORE)
+                                pd::cable_lines(
+                                    observation,
+                                    section,
+                                    svid,
+                                    &CABLE_SVID_STORE,
+                                    CABLE_ASKED.load(Ordering::Relaxed),
+                                )
                             }),
                             top,
                             scrolling,
