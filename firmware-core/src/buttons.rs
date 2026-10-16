@@ -445,11 +445,13 @@ pub enum PpsFocus {
     Current,
 }
 
-/// A Quick Charge tab, as the probe that opens it remembers it.
+/// Where a Quick Charge probe returns when it finishes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QcPage {
     Qc2,
     Qc3,
+    /// A test started from Charger info returns there, not to QC controls.
+    Charger,
 }
 
 impl QcPage {
@@ -457,6 +459,7 @@ impl QcPage {
         match self {
             Self::Qc2 => Tab::Qc2,
             Self::Qc3 => Tab::Qc3,
+            Self::Charger => Tab::detail(Detail::Charger),
         }
     }
 
@@ -466,6 +469,7 @@ impl QcPage {
     /// closed on a charger without steps.
     fn open(self, input: &mut Input) -> Page {
         match (self, input.trigger) {
+            (Self::Charger, _) => Page::Tabs(Tab::detail(Detail::Charger)),
             _ if input.qc.report().is_none() => Page::Open(Open::Probe(self)),
             (Self::Qc2, Some(QcTarget::Volts(voltage))) => {
                 Page::Open(Open::Qc2(Qc2Choice::Volts(voltage)))
@@ -944,6 +948,7 @@ impl Navigation {
         self.input.qc = QcOffer(Some(report));
         if let Page::Open(Open::Probe(page)) = self.input.page
             && !self.scanning()
+            && page != QcPage::Charger
         {
             self.input.page = page.open(&mut self.input);
         }
@@ -970,9 +975,14 @@ impl Navigation {
             )
     }
 
-    /// The scan's Quick Charge part ended with `findings`: keep them for its
-    /// PD part and restart into that.
+    /// Finish a Charger-page test: return directly without PD, or keep the
+    /// full scan's findings and restart into its PD part.
     pub fn finish_scan(&mut self, findings: QcFindings) -> Option<PdCommand> {
+        if self.input.page == Page::Open(Open::Probe(QcPage::Charger)) {
+            self.input.trigger = None;
+            self.input.page = Page::Tabs(Tab::detail(Detail::Charger));
+            return None;
+        }
         if !self.scanning() {
             return None;
         }
@@ -1159,9 +1169,9 @@ impl Navigation {
                 );
                 Some(Some(PdCommand::Restart))
             }
-            // Without PD, Quick Charge answers directly.
+            // Without PD, test directly and return to Charger info.
             Detail::Charger => {
-                self.input.page = Page::Open(Open::Probe(QcPage::Qc2));
+                self.input.page = Page::Open(Open::Probe(QcPage::Charger));
                 Some(None)
             }
             _ => None,
@@ -1175,6 +1185,10 @@ impl Navigation {
             Page::Groups(_) | Page::Settings(SettingsFocus::Row(_)) => Page::default(),
             Page::Settings(focus) => Page::Settings(SettingsFocus::Row(focus.row())),
             Page::Tabs(tab) => Page::Groups(tab),
+            Page::Open(Open::Probe(QcPage::Charger)) => {
+                self.input.trigger = None;
+                Page::Tabs(Tab::detail(Detail::Charger))
+            }
             Page::Open(open) => Page::Tabs(open.tab()),
         };
     }
