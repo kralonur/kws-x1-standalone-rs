@@ -125,7 +125,15 @@ pub fn query_info(device: &impl Transport) -> Result<u8> {
     Ok(report[HEADER.len() + 1])
 }
 
-pub fn flash(plan: &Plan, device: &impl Transport) -> Result<()> {
+/// The bootloader's verdict on the written image.
+pub enum Finish {
+    /// The image verified and the reboot command was sent.
+    Accepted,
+    /// The bootloader reported code 4 and stays in bootloader mode.
+    VerifyFailed,
+}
+
+pub fn flash(plan: &Plan, device: &impl Transport) -> Result<Finish> {
     ensure!(
         query_info(device)? == BOOTLOADER,
         "Device is not in Bootloader mode"
@@ -161,11 +169,10 @@ pub fn flash(plan: &Plan, device: &impl Transport) -> Result<()> {
     thread::sleep(FINISH_DELAY);
     device.write(&packet(FINISH, &[])?)?;
     let report = response(device, FINISH_TIMEOUT, &[SUCCESS, VERIFY_FAILED], "finish")?;
-    ensure!(
-        report[HEADER.len()] != VERIFY_FAILED,
-        "Bootloader verification failed (code 4). Stop without reboot, retry or restoration; recovery requires separate exact-image authorization"
-    );
+    if report[HEADER.len()] == VERIFY_FAILED {
+        return Ok(Finish::VerifyFailed);
+    }
     device.write(&packet(REBOOT, &[])?)?;
     tracing::info!("Bootloader accepted the image; reboot command sent");
-    Ok(())
+    Ok(Finish::Accepted)
 }

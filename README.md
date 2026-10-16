@@ -1407,7 +1407,10 @@ reserved descriptor and refuse oversized builds.
 
 The generated container passed all 26 batch checks and final bootloader
 verification on Linux. The flasher waits for flash programming to settle before
-verification and checks response packet checksums. An offline audit is not runtime
+verification and checks response packet checksums. Final verification has
+failed intermittently (code 4) after every batch was accepted, so the flasher
+then erases and writes the image once more; if that also fails, reconnect in
+bootloader mode and run the same command again. An offline audit is not runtime
 or safety qualification; neither an audit nor a matching hash authorizes flashing.
 
 ### Firmware builds and release downloads
