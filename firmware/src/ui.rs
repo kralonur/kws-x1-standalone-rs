@@ -1510,7 +1510,7 @@ pub fn draw_ripple<D: DrawTarget<Color = Rgb565>>(
                 .ok();
         }
         // The spectrum behind the trace: frequency left to right, heights
-        // relative to the strongest bin, peaks labelled at the top.
+        // relative to the strongest bin, peak frequencies listed at the top.
         let spectrum = &reading.spectrum;
         let bar = |height: u8| i32::from(height) * (BOTTOM - TOP) / i32::from(FULL_HEIGHT);
         for (column, &height) in spectrum.bars.iter().enumerate() {
@@ -1569,18 +1569,25 @@ pub fn draw_ripple<D: DrawTarget<Color = Rgb565>>(
             }
             previous = Some(centre);
         }
-        // Peak numbers above their bars, over the trace so they stay legible.
+        // Peak numbers at the foot of their bars, beside rather than over
+        // the bar (a "1" would vanish into it), and over the trace so they
+        // stay legible. Right of the bar, or left where the plot ends.
         for (index, position) in spectrum.peaks.iter().enumerate() {
             let Some(position) = *position else { break };
-            let column = spectrum::column(position);
-            let top = BOTTOM - bar(spectrum.bars[column]);
             let digit = [b'1' + index as u8];
+            let digit = core::str::from_utf8(&digit).unwrap_or("");
+            let x = LEFT + spectrum::column(position) as i32;
+            let (x, alignment) = if x + 2 + width(&SMALL, digit) < RIGHT {
+                (x + 2, HorizontalAlignment::Left)
+            } else {
+                (x - 1, HorizontalAlignment::Right)
+            };
             text(
                 target,
                 &SMALL,
-                core::str::from_utf8(&digit).unwrap_or(""),
-                Point::new(LEFT + column as i32, (top - 1).max(TOP + 2 * SMALL_INK + 3)),
-                HorizontalAlignment::Center,
+                digit,
+                Point::new(x, BOTTOM - 2),
+                alignment,
                 SPECTRUM_LABEL,
             );
         }

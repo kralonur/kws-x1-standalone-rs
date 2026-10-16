@@ -474,11 +474,12 @@ most 640, so peaks can lie outside the visible trace.
   analog input's bandwidth is not characterized.
 - **Spectrum** (purple, behind the trace): the whole capture's frequency
   content, from 0 at the left to half the sample rate at the right, heights
-  relative to the strongest frequency (not a voltage scale). `1 2 3` mark the
-  three strongest peaks, listed as `1:27.7k 2:55.4k 3:83.1k` at the top of
-  the plot. Frequencies come from the nominal sample rate, interpolated
-  between FFT bins; at slow timebases higher ripple folds back (aliases) to a
-  lower frequency, so use 20 or 50 us/div to read switching frequencies.
+  relative to the strongest frequency (not a voltage scale). `1 2 3`, at the
+  foot of their bars, mark the three strongest peaks; the top of the plot
+  lists each one's frequency in kHz, strongest first. Frequencies come from
+  the nominal sample rate, interpolated between FFT bins; at slow timebases
+  higher ripple folds back (aliases) to a lower frequency, so use 20 or
+  50 us/div to read switching frequencies.
 - **Status**: `T` means a rising trigger was found, with hysteresis against
   noise. `CLIPPED` means an ADC rail was reached: amplitude is a lower bound.
   `OFF SCALE` means the scale cuts off peaks: a fixed one too small, or
