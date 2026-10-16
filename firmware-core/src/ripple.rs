@@ -168,7 +168,7 @@ pub struct PlotScale {
     pub max: i32,
     /// Missing reference means a raw-count autoscale, never a voltage scale.
     pub mv_per_div: Option<u16>,
-    /// A fixed scale cuts off peaks.
+    /// The scale cuts off peaks.
     pub limited: bool,
 }
 

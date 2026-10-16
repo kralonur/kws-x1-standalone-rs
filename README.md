@@ -488,7 +488,7 @@ most 640, so peaks can lie outside the visible trace.
 
 **OK** first focuses the time per division without freezing. Each further
 **OK** moves to the next setting: time per division, vertical scale, then
-`RUN`/`HOLD`. The one **Left/Right** change is yellow, between `< >`.
+`RUN`/`HOLD`. The setting **Left/Right** change is yellow, between `< >`.
 Holding **OK** restores 50 us/div, auto scale and run; **Back** returns to
 tab navigation.
 `HOLD` freezes the trace, spectrum, statistics and voltage reference, but not
@@ -1436,7 +1436,9 @@ git tag firmware-v0.1.0
 git push origin firmware-v0.1.0
 ```
 
-Use an independent version matching `firmware/Cargo.toml`. Downloads contain
+Use an independent version matching `firmware/Cargo.toml`. A version with a
+suffix, such as `firmware-v0.1.1-test.1`, is published as a pre-release, so it
+never becomes the latest release. Downloads contain
 `firmware.X1C`, `SHA256SUMS` and the project licenses. Packaging/audit JSON reports
 stay in CI artifacts; they are not release downloads and are not needed to flash.
 Verify `SHA256SUMS` (Linux:
