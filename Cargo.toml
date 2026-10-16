@@ -7,6 +7,7 @@ default-members = ["firmware-core", "fusb302-pd"]
 anyhow = "1.0.104"
 clap = "4.6.7"
 hidapi = "2.6.7"
+image-webp = "0.2.4"
 libm = "0.2.16"
 # The firmware links no allocator: members enable `with-alloc` where needed.
 miniz_oxide = { version = "0.9.1", default-features = false }

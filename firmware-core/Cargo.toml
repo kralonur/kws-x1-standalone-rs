@@ -17,3 +17,9 @@ microfft = { workspace = true, features = ["size-1024"] }
 pd-protocol.workspace = true
 qc-protocol.workspace = true
 usbpd.workspace = true
+
+[dev-dependencies]
+anyhow.workspace = true
+embedded-graphics.workspace = true
+image-webp.workspace = true
+u8g2-fonts.workspace = true

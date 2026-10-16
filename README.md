@@ -304,10 +304,11 @@ validation before treating an energy-memory build as qualified.
 
 ## Screens
 
-Every screen, group by group in Left/Right order. Each one gives a photo,
-what the screen is for, each field it can show, then its hint row (the
-bottom line). `-` or `--.--` in a field means "not known yet". Hexadecimal
-values are raw register or message contents, shown for diagnosis.
+Every screen, group by group in Left/Right order. Each one gives a
+screenshot, what the screen is for, each field it can show, then its hint
+row (the bottom line). `-` or `--.--` in a field means "not known yet".
+Hexadecimal values are raw register or message contents, shown for
+diagnosis.
 
 While Left/Right move between groups, every hint row reads
 `< > groups  OK tabs`. The scrolling screens (PD Session, Charger, Cable,
@@ -321,11 +322,20 @@ Every hint row lists its buttons in the same order: Left/Right first, then
 OK, then a hold or Back, then any note, so on a tab it always starts with
 `< > tabs`.
 
+The screenshots are drawn on a computer by the firmware's own page code,
+so they match what the current firmware draws. Each is fed the values a
+photo of the meter showed in real use, except Calibration, which shows
+example values. To draw them again:
+
+```sh
+cargo run -p firmware-core --example screens --locked -- pictures
+```
+
 ### Sink mode
 
 #### 1. Overview
 
-<img src="pictures/overview_screen.webp" width="360" alt="Overview screen">
+<img src="pictures/overview_screen.webp" width="480" alt="Overview screen">
 
 This is the **Overview** screen (tab `OVERVIEW` in Monitor): the live bus
 readings in outlined cards, each named on its top edge, and the protocol in
@@ -377,7 +387,7 @@ use in the `PROTOCOL` strip along the bottom. The meter starts on it.
 
 #### 2. Lines
 
-<img src="pictures/lines_screen.webp" width="360" alt="Lines screen">
+<img src="pictures/lines_screen.webp" width="480" alt="Lines screen">
 
 This is the **Lines** screen (tab `LINES` in Monitor): the voltages on the
 USB data and configuration lines, read by the MCU's own ADC against its
@@ -398,7 +408,7 @@ screen shows, or while Quick Charge runs.
 
 #### 3. Energy
 
-<img src="pictures/energy_screen.webp" width="360" alt="Energy screen">
+<img src="pictures/energy_screen.webp" width="480" alt="Energy screen">
 
 The **Energy** screen (tab `ENERGY` in Monitor, after Lines) shows, in three
 outlined cards, **CHARGE** in Ah and **ENERGY** in Wh, with three decimals, and
@@ -415,7 +425,7 @@ from left to right and reset once full.
 
 #### 4. Graph
 
-<img src="pictures/graph_screen.webp" width="360" alt="Graph screen">
+<img src="pictures/graph_screen.webp" width="480" alt="Graph screen">
 
 The **Graph** screen (tab `GRAPH` in Monitor, after Energy) plots power
 (at first, green), voltage (yellow) or current (cyan) over the last
@@ -446,11 +456,7 @@ flash writes, and a restart clears it and comes back on the overview.
 
 #### 5. Ripple
 
-<img src="pictures/ripple_scope_comparison.webp" width="600" alt="Ripple screen next to a DSO Shell oscilloscope, showing similar downward steps in bus ripple">
-
-*Ripple screen (an earlier version, before the timebase and spectrum) next to a DSO Shell (DSO150) oscilloscope, both at 10 mV/div, under no load (trigger mode).
-The screen reads 24 mV p-p / 5.0 mV RMS, the scope 27 mV / 5 mV. Both were frozen by hand at nearly the
-same moment, so the captures are not synchronized and the waveforms can differ slightly.*
+<img src="pictures/ripple_screen.webp" width="480" alt="Ripple screen">
 
 The **Ripple** screen (tab `RIPPLE` in Monitor, after Graph) captures fast
 bus-voltage variations. Statistics cover 1024 samples; the plot shows at
@@ -461,7 +467,8 @@ most 640, so peaks can lie outside the visible trace.
   recovered from the stock firmware. It restarts when the timebase changes
   or the capture resumes.
 - **`RMS`**: ripple RMS with the capture's mean removed, not total bus RMS.
-  The scope's RMS can include a nonzero mean and is not always directly comparable.
+  An oscilloscope's RMS can include a nonzero mean and is not always directly
+  comparable.
 - **`V` / `A`**: live bus voltage and signed current, including during hold.
 - **`AUTO` / `LOCK …mV/div`**: automatic (default) or fixed vertical scale,
   2–500 mV/div.
@@ -498,13 +505,12 @@ bus V/A. A different vertical scale redraws the held capture; a different
 time per division starts a live capture, since the held one was taken at the
 old rate. A hold lasts until another tab is shown; coming back starts live.
 
-The photo is a single-point cross-check, not a calibration: accuracy under
-load, at other ripple frequencies and the actual sampling cadence are not
-characterized.
+Ripple readings are not calibrated: accuracy under load, at other ripple
+frequencies and the actual sampling cadence are not characterized.
 
 #### 6. PD Profiles
 
-<img src="pictures/pd_profiles_screen.webp" width="360" alt="PD Profiles screen">
+<img src="pictures/pd_profiles_screen.webp" width="480" alt="PD Profiles screen">
 
 This is the **PD Profiles** screen (tab `PD PROFILES` in Trigger): the
 charger's fixed profiles, to request one.
@@ -532,7 +538,7 @@ charger's fixed profiles, to request one.
 
 #### 7. PPS
 
-<img src="pictures/pps_screen.webp" width="360" alt="PPS screen">
+<img src="pictures/pps_screen.webp" width="480" alt="PPS screen">
 
 This is the **PPS** screen (tab `PPS` in Trigger): the charger's
 programmable ranges, to request a voltage and current limit.
@@ -555,7 +561,7 @@ programmable ranges, to request a voltage and current limit.
 
 #### 8. AVS
 
-<img src="pictures/avs_screen.webp" width="360" alt="AVS screen">
+<img src="pictures/avs_screen.webp" width="480" alt="AVS screen">
 
 This is the **AVS** screen (tab `AVS` in Trigger): the charger's
 adjustable voltage ranges (USB PD 3.2), to request a voltage. Unlike PPS, the
@@ -579,7 +585,7 @@ allows at the set voltage. SPR AVS runs from 9 V, at most 100 W; EPR AVS from
 
 #### 9. QC 2.0
 
-<img src="pictures/qc2_screen.webp" width="360" alt="QC 2.0 screen">
+<img src="pictures/qc2_screen.webp" width="480" alt="QC 2.0 screen">
 
 This is the **QC 2.0** screen (tab `QC 2.0` in Trigger): Quick Charge 2.0
 fixed voltages, to request one. It is laid out as the PD Profiles screen;
@@ -611,7 +617,7 @@ the requests.
 
 #### 10. QC 3.0
 
-<img src="pictures/qc3_screen.webp" width="360" alt="QC 3.0 screen">
+<img src="pictures/qc3_screen.webp" width="480" alt="QC 3.0 screen">
 
 This is the **QC 3.0** screen (tab `QC 3.0` in Trigger): Quick Charge 3.0
 continuous mode, to set the output in 0.2 V steps. It is laid out as the PPS
@@ -635,7 +641,7 @@ screen; see [Quick Charge](#quick-charge).
 
 #### 11. PD Session
 
-<img src="pictures/pd_session_screen.webp" width="360" alt="PD Session screen">
+<img src="pictures/pd_session_screen.webp" width="480" alt="PD Session screen">
 
 This is the **PD Session** screen (tab `PD SESSION` in Info): the meter's
 own PD negotiation. It scrolls (OK) through three sections.
@@ -742,7 +748,7 @@ own PD negotiation. It scrolls (OK) through three sections.
 
 #### 12. Charger
 
-<img src="pictures/charger_screen.webp" width="360" alt="Charger screen">
+<img src="pictures/charger_screen.webp" width="480" alt="Charger screen">
 
 This is the **Charger** screen (tab `CHARGER` in Info): what the charger says
 about itself, then what Quick Charge detection found. The PD parts are the
@@ -842,7 +848,7 @@ first battery, as the charger describes it.
 
 #### 13. Cable
 
-<img src="pictures/cable_screen.webp" width="360" alt="Cable screen">
+<img src="pictures/cable_screen.webp" width="480" alt="Cable screen">
 
 This is the **Cable** screen (tab `CABLE` in Info): the cable's e-marker.
 Hold OK to read it; from any other contract the meter requests fixed 5 V
@@ -895,6 +901,8 @@ left out when the cable's layout does not have it):
 `?` marks a reserved code. An undecodable layout shows only `TYPE`,
 `VID/PID` and `CERT ID`.
 
+<img src="pictures/cable_details_screen.webp" width="480" alt="Cable screen scrolled to the e-marker details">
+
 **`E-MARKER DETAILS`**, one field per row, value in hexadecimal:
 
 - Raw words: `VDM RAW`, `ID RAW`, `XID RAW`, `PRODUCT RAW`, `CABLE1 RAW`,
@@ -927,7 +935,7 @@ GET_STATUS`, `SECOND PLUG NO DATA`).
 
 #### 14. System
 
-<img src="pictures/system_screen.webp" width="360" alt="System screen">
+<img src="pictures/system_screen.webp" width="480" alt="System screen">
 
 This is the **System** screen (tab `SYSTEM` in Info): the meter's own health.
 It scrolls (OK) through three sections.
@@ -970,7 +978,7 @@ It scrolls (OK) through three sections.
 
 #### Settings
 
-<img src="pictures/settings_screen.webp" width="360" alt="Settings screen">
+<img src="pictures/settings_screen.webp" width="480" alt="Settings screen">
 
 This is the **Settings** screen (Back on the overview): display preferences,
 energy persistence and calibration.
@@ -994,6 +1002,8 @@ energy persistence and calibration.
   `OK calibrate  hold OK factory reset`.
 
 ##### Calibration
+
+<img src="pictures/calibration_screen.webp" width="480" alt="Calibration screen">
 
 Calibration corrects this meter's readings against a meter you trust. It
 is only as good as that reference: a cheap multimeter can make readings
@@ -1028,14 +1038,14 @@ Overview, Lines, Energy, Graph, Ripple and System screens read as in sink mode.
 
 #### 1. Overview in passthrough
 
-<img src="pictures/passthrough_overview_screen.webp" width="360" alt="Overview screen in passthrough">
+<img src="pictures/passthrough_overview_screen.webp" width="480" alt="Overview screen in passthrough">
 
 This is the **Overview** screen (tab `OVERVIEW` in Monitor) with a charger
 and a device on either side of the meter. The protocol and status come from
-the messages the meter overheard: in the photo the charger has sent its
-offer and no contract has followed yet (`PD`, `CC1 offer, 5V`); once the
-device requests one it reads like `PD 3.0`, `CC2 9V 3.00A`. The chevrons
-show which way power flows.
+the messages the meter overheard: in the screenshot the charger has sent
+its offer and no contract has followed yet (`PD`, `CC1 offer, 5V`); once
+the device requests one it reads like `PD 3.0`, `CC2 9V 3.00A`. The
+chevrons show which way power flows.
 
 #### 2. Ripple in passthrough
 
@@ -1050,7 +1060,7 @@ restores the defaults. Bus voltage/current stay live while held.
 
 #### 3. PD Sniff
 
-<img src="pictures/pd_sniff_screen.webp" width="360" alt="PD Sniff screen">
+<img src="pictures/pd_sniff_screen.webp" width="480" alt="PD Sniff screen">
 
 This is the **PD Sniff** screen (tab `PD SNIFF` in Info): the PD messages
 between the charger and the device, oldest first. The meter only listens. It
