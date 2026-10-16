@@ -1010,6 +1010,17 @@ scrolls (OK) through two sections.
 - Before any message: `PASSTHROUGH RX ONLY`, `NO TX NO GOODCRC`, and
   `STARTING` or `WAITING FOR PD TRAFFIC`.
 
+#### Known limitation: a laptop that draws no power
+
+One laptop charges directly from a charger, and through a plain inline
+power meter, but not through this meter in passthrough. The PD
+session completes normally (20 V request, `ACCEPT`, `PS_RDY`, then a data
+role swap and Discover Identity, with no resets), yet the laptop draws no
+current (`0.00A`). While it is connected, D+ and D− rest near 0 V with a
+brief rise to about 0.85 V every second. The stock firmware behaves the
+same, and this firmware only listens in passthrough, so the cause lies
+outside the firmware. It is not yet known.
+
 ## Quick Charge
 
 Quick Charge asks the charger for a higher voltage over D+ and D− instead of
