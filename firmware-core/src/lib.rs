@@ -4,6 +4,7 @@
 #![no_std]
 
 pub mod buttons;
+pub mod cable_summary;
 pub mod dcp;
 pub mod energy;
 pub mod energy_store;

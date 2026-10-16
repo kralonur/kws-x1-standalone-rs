@@ -1328,7 +1328,7 @@ async fn meter_task(
                                     pd::cable_svid_index(observation, section).and_then(|index| {
                                         firmware_core::pd_svids::Store::at(&CABLE_SVID_STORE, index)
                                     });
-                                pd::cable_lines(observation, section, svid)
+                                pd::cable_lines(observation, section, svid, &CABLE_SVID_STORE)
                             }),
                             top,
                             scrolling,

@@ -1174,14 +1174,14 @@ fn decimal2(row: &mut [u8; 24], start: usize, milli: u16) {
     row[start + 4] = b'0' + ((milli / 10) % 10) as u8;
 }
 
-fn put(row: &mut [u8; 24], text: &[u8]) {
+fn put<const N: usize>(row: &mut [u8; N], text: &[u8]) {
     row[..text.len()].copy_from_slice(text);
 }
 fn hex8(row: &mut [u8; 24], offset: usize, value: u8) {
     row[offset] = b"0123456789ABCDEF"[(value >> 4) as usize];
     row[offset + 1] = b"0123456789ABCDEF"[(value & 15) as usize];
 }
-fn hex(row: &mut [u8; 24], offset: usize, value: u16) {
+fn hex<const N: usize>(row: &mut [u8; N], offset: usize, value: u16) {
     for i in 0..4 {
         row[offset + i] = b"0123456789ABCDEF"[((value >> (12 - 4 * i)) & 15) as usize];
     }

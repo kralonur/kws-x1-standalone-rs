@@ -1,13 +1,34 @@
 //! Cable page: the cable identity, SVIDs and modes, and the SVID selection.
 
+use firmware_core::cable_summary;
+
 use super::{CableStatus, Observation, Phase, hex, put};
+use crate::ui::WIDE_COLUMNS;
+
+/// One Cable page section, in wide rows so summary values fit on one line.
+type Lines = [[u8; WIDE_COLUMNS]; 8];
 
 /// USB PD vSafe5V nominal, in mV: cable reads run only on a fixed 5V contract.
 const VSAFE5V_MV: u16 = 5000;
+/// Rows below a section's heading.
+const SECTION_ROWS: usize = 7;
+/// Sections for the readable summary ahead of the raw identity, enough for
+/// every item, the alt modes and the maker name.
+const SUMMARY_SECTIONS: usize = (cable_summary::MAX_ITEMS + 1 + MAKER_ROWS).div_ceil(SECTION_ROWS);
+/// Summary values start one space after the longest label.
+const SUMMARY_VALUE: usize = 9;
+/// USB PD R3.2's Manufacturer Info Data Block: VID and PID, then a
+/// manufacturer string of at most 22 bytes, `Not Supported` when the cable
+/// has none to give.
+const MAKER_START: usize = 4;
+const MAKER_UNSUPPORTED: &[u8] = b"Not Supported";
+/// Rows a 22-byte maker name takes beside its label.
+const MAKER_ROWS: usize = 1;
 
-/// Sections of the cable list: identity fields six per section, the latest
-/// SVID reply in two, two per SVID for its modes, then manufacturer info and
-/// both cable statuses; one section while there is no identity.
+/// Sections of the cable list: the readable summary, identity fields six
+/// per section, the latest SVID reply in two, two per SVID for its modes,
+/// then manufacturer info and both cable statuses; one section while there
+/// is no identity.
 pub fn cable_sections(observation: Observation) -> u32 {
     let Some(spr) = observation.spr.filter(|_| observation.sniff.is_none()) else {
         return 1;
@@ -17,7 +38,10 @@ pub fn cable_sections(observation: Observation) -> u32 {
     };
     match firmware_core::pd_cable_details::field_count(&report) {
         0 => 1,
-        fields => (fields.div_ceil(6) + 2 + spr.cable_modes.count as usize * 2 + 3) as u32,
+        fields => {
+            (SUMMARY_SECTIONS + fields.div_ceil(6) + 2 + spr.cable_modes.count as usize * 2 + 3)
+                as u32
+        }
     }
 }
 
@@ -66,7 +90,7 @@ pub fn cable_svid_index(observation: Observation, page: u32) -> Option<u16> {
     if fields == 0 {
         return None;
     }
-    let start = fields.div_ceil(6) + 2;
+    let start = SUMMARY_SECTIONS + fields.div_ceil(6) + 2;
     let end = start + spr.cable_modes.count as usize * 2;
     let page = page as usize;
     (start..end)
@@ -74,13 +98,18 @@ pub fn cable_svid_index(observation: Observation, page: u32) -> Option<u16> {
         .then(|| ((page - start) / 2) as u16)
 }
 
-/// Section `page` of [`cable_sections`]: raw identity, latest SVID reply and
-/// selected mode, plus decoded identity fields. Encoded values use
-/// hexadecimal; they are claims, not electrical measurements. A section that
-/// continues the previous one has no heading.
-pub fn cable_lines(observation: Observation, page: u32, svid: Option<u16>) -> [[u8; 24]; 8] {
+/// Section `page` of [`cable_sections`]: readable summary, raw identity,
+/// latest SVID reply and selected mode, plus decoded identity fields.
+/// Encoded values use hexadecimal; they are claims, not electrical
+/// measurements. A section that continues the previous one has no heading.
+pub fn cable_lines(
+    observation: Observation,
+    page: u32,
+    svid: Option<u16>,
+    svids: &dyn firmware_core::pd_svids::Store,
+) -> Lines {
     use firmware_core::{pd_cable_details, pd_cable_modes::Status};
-    let mut rows = [[b' '; 24]; 8];
+    let mut rows = [[b' '; WIDE_COLUMNS]; 8];
     put(&mut rows[0], b"E-MARKER DETAILS");
     if observation.listen.is_some() {
         // The meter's plug is the cable: in the 5 A cable test it answers as
@@ -139,6 +168,10 @@ pub fn cable_lines(observation: Observation, page: u32, svid: Option<u16>) -> [[
     let svid_pages = 2; // latest raw reply, not a transcript of every list packet
     let extended_start = identity_pages + svid_pages + discovery.count as usize * 2;
     let page = page as usize;
+    if page < SUMMARY_SECTIONS {
+        return summary_lines(&report, &discovery, svids, page);
+    }
+    let page = page - SUMMARY_SECTIONS;
     if page < identity_pages {
         if page > 0 {
             rows[0].fill(b' ');
@@ -303,6 +336,108 @@ pub fn cable_lines(observation: Observation, page: u32, svid: Option<u16>) -> [[
         }
     }
     rows
+}
+
+/// Section `page` of the readable summary: one labelled item per row, the
+/// alt modes once the cable's SVID list is complete, then the maker's own
+/// name when the cable gave one.
+fn summary_lines(
+    report: &firmware_core::pd_cable::CableReport,
+    discovery: &firmware_core::pd_cable_modes::Discovery,
+    svids: &dyn firmware_core::pd_svids::Store,
+    page: usize,
+) -> Lines {
+    const { assert!(SUMMARY_VALUE + cable_summary::VALUE_WIDTH <= WIDE_COLUMNS) };
+    let summary = cable_summary::summary(report);
+    let items = summary
+        .iter()
+        .flat_map(|summary| summary.items())
+        .map(|(label, value)| (label.as_bytes(), value.as_slice()));
+    let modes = modes(discovery, svids);
+    let modes = (discovery.status == firmware_core::pd_cable_modes::Status::Ack)
+        .then_some((&b"MODES"[..], &modes[..]));
+    let maker = maker(&discovery.manufacturer)
+        .chunks(WIDE_COLUMNS - SUMMARY_VALUE)
+        .enumerate()
+        .map(|(index, chunk)| (if index == 0 { &b"MAKER"[..] } else { &[] }, chunk));
+    let mut rows = [[b' '; WIDE_COLUMNS]; 8];
+    if page == 0 {
+        put(&mut rows[0], b"CABLE SUMMARY");
+    }
+    for (row, (label, value)) in rows[1..]
+        .iter_mut()
+        .zip(items.chain(modes).chain(maker).skip(page * SECTION_ROWS))
+    {
+        put(row, label);
+        row[SUMMARY_VALUE..][..value.len()].copy_from_slice(value);
+    }
+    rows
+}
+
+/// The cable's alt modes in ascending SVID order: `TBT` and `DP` by name,
+/// others in hexadecimal, then `+n` for the ones past the value's width;
+/// `NONE` for an empty list.
+fn modes(
+    discovery: &firmware_core::pd_cable_modes::Discovery,
+    svids: &dyn firmware_core::pd_svids::Store,
+) -> [u8; cable_summary::VALUE_WIDTH] {
+    /// Room kept for " +nn" while more names follow.
+    const MORE: usize = 4;
+    fn write(value: &mut [u8; cable_summary::VALUE_WIDTH], used: &mut usize, text: &[u8]) {
+        value[*used..][..text.len()].copy_from_slice(text);
+        *used += text.len();
+    }
+    let mut value = [b' '; cable_summary::VALUE_WIDTH];
+    let mut used = 0;
+    let count = discovery.count;
+    if count == 0 {
+        write(&mut value, &mut used, b"NONE");
+    }
+    for index in 0..count {
+        let Some(svid) = svids.at(index) else { break };
+        let hex: [u8; 4] = core::array::from_fn(|digit| {
+            b"0123456789ABCDEF"[usize::from((svid >> (12 - 4 * digit)) & 15)]
+        });
+        let name = cable_summary::mode_name(svid).map_or(&hex[..], str::as_bytes);
+        let separator: &[u8] = if index > 0 { b" " } else { b"" };
+        let after = if index + 1 < count { MORE } else { 0 };
+        if used + separator.len() + name.len() + after > value.len() {
+            let left = (count - index).min(99);
+            write(&mut value, &mut used, b" +");
+            if left >= 10 {
+                write(&mut value, &mut used, &[b'0' + (left / 10) as u8]);
+            }
+            write(&mut value, &mut used, &[b'0' + (left % 10) as u8]);
+            break;
+        }
+        write(&mut value, &mut used, separator);
+        write(&mut value, &mut used, name);
+    }
+    value
+}
+
+/// The maker's name from the cable's manufacturer info: printable text up to
+/// its terminator, empty when the cable gave none.
+fn maker(manufacturer: &firmware_core::pd_cable_modes::Extended) -> &[u8] {
+    if manufacturer.status != firmware_core::pd_cable_modes::Status::Ack {
+        return &[];
+    }
+    let data = manufacturer
+        .data
+        .get(MAKER_START..usize::from(manufacturer.count))
+        .unwrap_or(&[]);
+    let text = &data[..data
+        .iter()
+        .position(|&byte| byte == 0)
+        .unwrap_or(data.len())];
+    if text == MAKER_UNSUPPORTED
+        || !text
+            .iter()
+            .all(|byte| byte.is_ascii_graphic() || *byte == b' ')
+    {
+        return &[];
+    }
+    text
 }
 
 /// Why an inspection returned no identity, and an optional hint row. The

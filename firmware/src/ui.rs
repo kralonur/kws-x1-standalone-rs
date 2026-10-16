@@ -2739,6 +2739,11 @@ fn brightness_bars<D: DrawTarget<Color = Rgb565>>(
 /// is the section heading, and blank rows are left out.
 pub type Lines = [[u8; 24]; 8];
 
+/// The most characters a detail row can show: rows start 6 px right of
+/// `LEFT`, and the list font advances 6 px per character (measured), so 36
+/// end at x = 230, clear of the scrollbar at `RIGHT + 1`.
+pub const WIDE_COLUMNS: usize = 36;
+
 /// How a detail list was laid out, for the input and PD tasks.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ListView {
@@ -2786,22 +2791,24 @@ fn scrollbar<D: DrawTarget<Color = Rgb565>>(
 }
 
 /// A detail page in `page`'s colour: the non-blank rows of `sections` from
-/// row `top`, with a scrollbar lit while `scrolling`.
-pub fn draw_detail<D: DrawTarget<Color = Rgb565>>(
+/// row `top`, with a scrollbar lit while `scrolling`. Rows are [`Lines`]
+/// wide, or up to [`WIDE_COLUMNS`].
+pub fn draw_detail<D: DrawTarget<Color = Rgb565>, const WIDTH: usize>(
     target: &mut D,
     header: &Header<'_>,
     page: Detail,
-    sections: impl IntoIterator<Item = Lines>,
+    sections: impl IntoIterator<Item = [[u8; WIDTH]; 8]>,
     top: u16,
     scrolling: bool,
 ) -> ListView {
+    const { assert!(WIDTH <= WIDE_COLUMNS, "detail rows wider than the screen") };
     let (_, accent) = tab_style(Tab::detail(page), false);
     draw_header(target, header);
     let mut rows = 0u16;
     let mut view = ListView::default();
     for (section, lines) in sections.into_iter().enumerate() {
         for (index, line) in lines.iter().enumerate() {
-            let mut printable = [b' '; 24];
+            let mut printable = [b' '; WIDTH];
             for (cell, &byte) in printable.iter_mut().zip(line) {
                 if byte.is_ascii_graphic() {
                     *cell = byte;

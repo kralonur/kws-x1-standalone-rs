@@ -234,7 +234,7 @@ point the way it flows (they follow the screen rotation).
 | **QC 3.0** | the step range, the set voltage, VBUS, D+ and D−; under a PD contract only `PD MODE` | OK tests the charger, then starts continuous mode at 5 V (under a PD contract it first switches the charger out of PD); Left/Right move it by 0.2 V (repeats held); OK or Back closes it; the steps stay in force on other screens until `OFF` on QC 2.0 |
 | **PD Session** | sink: session state, CC levels and the charger's offer as received. Passthrough: CC pin, Rp level and the latest PD messages | OK to scroll |
 | **Charger** | the offer (`*` = needs a 5 A cable), the charger's identity, maker and peak ratings, power status and source info, a power bank's battery, the Quick Charge detection result | OK to scroll; hold OK: full scan (Quick Charge, PD, EPR, and the 5 A cable test with the plug in the charger) |
-| **Cable** | the cable's e-marker: identity, ratings, status and modes | OK to scroll; hold OK to read the e-marker (drops to fixed 5 V first) |
+| **Cable** | the cable's e-marker: a readable summary (type, speed, rating, length, alt modes, maker), identity, ratings, status and modes | OK to scroll; hold OK to read the e-marker (drops to fixed 5 V first) |
 | **System** | I2C bus state and counters, frame and button timing, stack use, `LAST RESET:` cause | OK to scroll |
 | **Settings** | `BRIGHTNESS` (5 levels, 60% at first), `ROTATION` (`AUTO` follows the tilt sensor, `NORMAL`, `FLIPPED`), `ENERGY MEMORY`, `VERSION` (shown only) | Left/Right row, OK change it, Left/Right value, OK or Back done |
 
@@ -855,6 +855,39 @@ first, then asks the cable. It scrolls (OK) through several sections.
 - Failures: `CABLE ID NAK`, `CABLE ID BUSY NO RETRY`, `CABLE: CHARGER BUSY`,
   `CABLE ON CC2: NOT ASKED` / `TURN CABLE OVER`, `CABLE NO GOODCRC` /
   `NO E-MARKER OR NO VCONN`, `CABLE RESET NO ACCEPT`, `CABLE NO ID RESPONSE`.
+
+**`CABLE SUMMARY`**, the cable's claims in words, one per row (a row is
+left out when the cable's layout does not have it):
+
+- `TYPE`: `PASSIVE` or `ACTIVE`, then `CAPTIVE` when one end is fixed to a
+  device instead of a plug.
+- `USB`: the highest speed generation the cable publishes: `USB 2.0`,
+  `USB3 GEN1`, `USB3 GEN2` (PD 2 cables), `USB3/4 GEN2`, `USB4 GEN3` or
+  `USB4 GEN4`. A rate follows only where the generation alone fixes it:
+  `USB 2.0 / 480Mbps`, `USB4 GEN3 / 40Gbps`, `USB4 GEN4 / 80Gbps` (USB4
+  over both lanes; an active cable must say it carries two). Gen1 and Gen2
+  get none, because their code does not say whether one lane or two are
+  used (5 or 10 Gbps, 10 or 20 Gbps).
+- `RATING`: maximum voltage and current, such as `50V 5A`, then `EPR` when
+  the cable sets its EPR bit (a charger checks that bit, not the voltage).
+  `ASSUMED` means the cable left the current out, so 3 A applies; PD 2
+  cables state no voltage; `NO VBUS` is an active cable that does not carry
+  it.
+- `LENGTH`: from the cable's signal delay, `0-1m` to `6-7m`, `>7m`, or
+  `~100m` to `~300m` for long active cables.
+- `VID/PID`, and `CERT ID` (the USB-IF certification ID) when set.
+- Active cables also: `SBU` (`NO`, `YES, PASSIVE`, `YES, ACTIVE`), `BUILD`
+  (`COPPER`/`OPTICAL`, `REDRIVER`/`RETIMER`), `LANES` and `MAX TEMP`.
+- `MODES`: the alt modes the cable advertises, once its SVID list is
+  complete: `TBT` (Thunderbolt alt mode, SVID `8087`; the ID alone does not
+  tell Thunderbolt 3 from 4), `DP` (DisplayPort, SVID `FF01`), any other
+  SVID in hexadecimal, `+n` for more than fit, or `NONE`. A cable does not
+  have to advertise `DP` to carry DisplayPort.
+- `MAKER`: the maker's name, when the cable answers the manufacturer info
+  request with one.
+
+`?` marks a reserved code. An undecodable layout shows only `TYPE`,
+`VID/PID` and `CERT ID`.
 
 **`E-MARKER DETAILS`**, one field per row, value in hexadecimal:
 
