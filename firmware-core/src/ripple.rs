@@ -24,8 +24,10 @@ pub const VERTICAL_DIVISIONS: u32 = 4;
 /// reaching the mean, the signal must rise an eighth of its range above it.
 /// A chosen value, so noise around the mean cannot retrigger the trace.
 const TRIGGER_BAND_DIVISOR: u16 = 8;
-/// A 4 V plot spans even a one-sided excursion at 3.6 V supply / 2x gain.
-const MAX_MV_PER_DIV: u16 = 1000;
+/// Largest step: ±1 V around the mean covers most of the input range (at
+/// most 1.8 V, 3.6 V supply / 2x gain); only a larger one-sided excursion
+/// is cut off.
+const MAX_MV_PER_DIV: u16 = 500;
 
 /// Volts-per-division choices, in millivolts; transient, never persisted.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -40,11 +42,10 @@ pub enum Scale {
     Mv100,
     Mv200,
     Mv500,
-    Mv1000,
 }
 
 impl Scale {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 9] = [
         Self::Auto,
         Self::Mv2,
         Self::Mv5,
@@ -54,7 +55,6 @@ impl Scale {
         Self::Mv100,
         Self::Mv200,
         Self::Mv500,
-        Self::Mv1000,
     ];
 
     pub const fn millivolts(self) -> Option<u16> {
@@ -67,8 +67,7 @@ impl Scale {
             Self::Mv50 => Some(50),
             Self::Mv100 => Some(100),
             Self::Mv200 => Some(200),
-            Self::Mv500 => Some(500),
-            Self::Mv1000 => Some(MAX_MV_PER_DIV),
+            Self::Mv500 => Some(MAX_MV_PER_DIV),
         }
     }
 }
@@ -477,7 +476,7 @@ mod tests {
     }
 
     #[test]
-    fn plot_scales_preserve_spikes_and_flag_locked_range_limits() {
+    fn plot_scales_preserve_spikes_and_flag_range_limits() {
         let mut samples = [1000; SAMPLE_COUNT];
         samples[SAMPLE_COUNT - 1] = 1100;
         let reading = analyze(&samples, Timebase::Us50, WINDOW);
@@ -504,9 +503,8 @@ mod tests {
         samples[0] = FULL_SCALE;
         let reading = analyze(&samples, Timebase::Us50, WINDOW);
         let auto = reading.plot_scale(Scale::Auto, Some(1344), 1083);
-        assert_eq!(auto.mv_per_div, Some(1000));
-        assert!(auto.min < 0);
-        assert!(!auto.limited);
+        assert_eq!(auto.mv_per_div, Some(500));
+        assert!(auto.limited);
     }
 
     #[test]

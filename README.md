@@ -462,7 +462,7 @@ most 640, so peaks can lie outside the visible trace.
   The scope's RMS can include a nonzero mean and is not always directly comparable.
 - **`V` / `A`**: live bus voltage and signed current, including during hold.
 - **`AUTO` / `LOCK …mV/div`**: automatic (default) or fixed vertical scale,
-  2–1000 mV/div.
+  2–500 mV/div.
 - **`~50us/div`**: nominal microseconds per division in scope steps of 20,
   50, 100, 200 and 500, clock-derived rather than measured or calibrated
   (the sampling lands within 1% of each step). 20 and 50 us/div show fewer
@@ -481,7 +481,8 @@ most 640, so peaks can lie outside the visible trace.
   lower frequency, so use 20 or 50 us/div to read switching frequencies.
 - **Status**: `T` means a rising trigger was found, with hysteresis against
   noise. `CLIPPED` means an ADC rail was reached: amplitude is a lower bound.
-  `OFF SCALE` means only a fixed scale cuts off peaks. `NO REF` means ADC
+  `OFF SCALE` means the scale cuts off peaks: a fixed one too small, or
+  more than 1 V from the mean even at 500 mV/div. `NO REF` means ADC
   counts replace voltage scaling.
 
 **OK** first focuses the time per division without freezing. Each further

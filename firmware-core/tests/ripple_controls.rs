@@ -67,12 +67,12 @@ fn ok_moves_focus_and_arrows_change_only_the_focused_setting() {
     assert_eq!(locked.ripple_scale, Scale::Mv2);
     assert_eq!(locked.ripple_timebase, Timebase::Us500);
     assert_eq!(tap(&mut nav, LEFT).ripple_scale, Scale::Auto);
-    assert_eq!(tap(&mut nav, LEFT).ripple_scale, Scale::Mv1000);
+    assert_eq!(tap(&mut nav, LEFT).ripple_scale, Scale::Mv500);
 
     assert_eq!(tap(&mut nav, OK).page, CAPTURE);
     let held = tap(&mut nav, LEFT);
     assert!(held.ripple_hold);
-    assert_eq!(held.ripple_scale, Scale::Mv1000);
+    assert_eq!(held.ripple_scale, Scale::Mv500);
     assert!(!tap(&mut nav, RIGHT).ripple_hold);
     assert!(tap(&mut nav, RIGHT).ripple_hold);
     assert_eq!(tap(&mut nav, OK).page, TIME);
