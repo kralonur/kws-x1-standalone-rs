@@ -26,7 +26,8 @@ const MODE_CONTINUOUS: u16 = 0b111;
 /// Mask/Enable CNVR, bit 10: Alert follows Conversion Ready (INA Table 7-12).
 const CNVR: u16 = 1 << 10;
 /// CAL = 0.00512 / (Current_LSB x R_shunt) (INA Equation 1): 2048 gives a
-/// 0.5 mA Current_LSB with a 5 mOhm shunt.
+/// 0.5 mA Current_LSB with a 5 mOhm shunt
+/// (`firmware_core::calibration::CURRENT_LSB_UA`).
 const CALIBRATION_VALUE: u16 = 2048;
 
 /// Start-up writes, in order: configuration, alert source, then calibration.
@@ -39,11 +40,8 @@ pub const INIT: [(u8, u16); 3] = [
     (CALIBRATION, CALIBRATION_VALUE),
 ];
 
-/// Current register counts per milliamp, from the 0.5 mA Current_LSB set by
-/// [`CALIBRATION_VALUE`].
-pub const COUNTS_PER_MA: u32 = 2;
-
-/// Bus Voltage register to millivolts: fixed 1.25 mV LSB (INA Table 7-8).
-pub const fn bus_millivolts(raw: u16) -> u32 {
-    raw as u32 * 5 / 4
+/// Bus Voltage register to millivolts, uncalibrated: fixed 1.25 mV LSB
+/// (INA Table 7-8). Shown readings go through the calibration instead.
+pub fn bus_millivolts(raw: u16) -> u32 {
+    firmware_core::calibration::Calibration::default().millivolts(raw)
 }

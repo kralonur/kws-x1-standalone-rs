@@ -12,6 +12,7 @@ use firmware_core::buttons::{
     Detail, GraphFocus, Level, PpsFocus, Qc2Choice, QcOffer, RESET_STEPS, RippleFocus,
     SettingsFocus, Tab,
 };
+use firmware_core::calibration::{Calibration, Quantity, Step, Wizard};
 use firmware_core::dcp::Dcp;
 use firmware_core::energy::Totals;
 use firmware_core::power_history::{GraphTrace, GraphWindow, History, Sample};
@@ -2587,11 +2588,24 @@ pub fn draw_settings<D: DrawTarget<Color = Rgb565>>(
     settings: Settings,
     focus: SettingsFocus,
     save_status: crate::settings_store::Status,
+    // The reset hold's progress over the calibration row, out of
+    // [`RESET_STEPS`].
+    reset_hold: u8,
 ) {
     draw_header(target, header);
     for (index, item) in Item::ALL.into_iter().enumerate() {
         let baseline = SETTINGS_BASELINE + index as i32 * SETTINGS_PITCH;
         let selected = item == focus.row();
+        if selected && item == Item::Calibration {
+            sweep(
+                target,
+                Rectangle::new(
+                    Point::new(4, baseline - 13),
+                    Size::new(232, SETTINGS_ROW_HEIGHT),
+                ),
+                reset_hold,
+            );
+        }
         if selected {
             // Dim while its value is being changed, which then takes the
             // highlight.
@@ -2621,6 +2635,7 @@ pub fn draw_settings<D: DrawTarget<Color = Rgb565>>(
             Item::Brightness => "BRIGHTNESS",
             Item::Rotation => "ROTATION",
             Item::EnergyMemory => "ENERGY MEMORY",
+            Item::Calibration => "CALIBRATION",
         };
         text(
             target,
@@ -2669,6 +2684,20 @@ pub fn draw_settings<D: DrawTarget<Color = Rgb565>>(
                     if selected { YELLOW } else { MUTED },
                 );
             }
+            Item::Calibration => {
+                text(
+                    target,
+                    &ROW,
+                    if settings.calibration == Calibration::default() {
+                        "FACTORY"
+                    } else {
+                        "CUSTOM"
+                    },
+                    Point::new(193, baseline),
+                    HorizontalAlignment::Center,
+                    if selected { YELLOW } else { MUTED },
+                );
+            }
         }
     }
     // A failed save stays visible instead of silently promising persistence.
@@ -2700,9 +2729,127 @@ pub fn draw_settings<D: DrawTarget<Color = Rgb565>>(
             SettingsFocus::Brightness => "< > dimmer/brighter  OK done",
             SettingsFocus::Rotation => "< > auto/normal/flipped  OK done",
             SettingsFocus::EnergyMemory => "< > interval  OK done (shorter wears)",
+            SettingsFocus::Row(Item::Calibration) => "OK calibrate  hold OK factory reset",
             _ => "< > choose  OK change  BACK exit",
         },
     );
+}
+
+/// Calibration page: the step's title and what to do, then the steps.
+const CALIBRATION_TITLE: i32 = 40;
+const CALIBRATION_DETAIL: i32 = 56;
+/// The entry box, under the instruction, and the live reading under it.
+const CALIBRATION_BOX: Rectangle =
+    Rectangle::new(Point::new(4, 64), Size::new(150, OVERVIEW_HEIGHT));
+const CALIBRATION_LIVE: i32 = 104;
+
+/// The calibration steps: the zero step shows the live current; the
+/// current and voltage steps an entry box starting at this meter's
+/// average, with the live reading under it. A refusal shows in orange.
+pub fn draw_calibration<D: DrawTarget<Color = Rgb565>>(
+    target: &mut D,
+    header: &Header<'_>,
+    wizard: &Wizard,
+    live: Option<Reading>,
+) {
+    draw_header(target, header);
+    let (title, detail, unit, hint_text) = match wizard.step {
+        Step::Zero => (
+            "1/3  ZERO CURRENT",
+            "Unplug the load, keep the power on",
+            "A",
+            "hold OK zero  OK skip  BACK cancel",
+        ),
+        Step::Entry {
+            quantity: Quantity::Current,
+            ..
+        } => (
+            "2/3  CURRENT",
+            "Steady load: enter your meter's amps",
+            "A",
+            "< > adjust  OK next  BACK cancel",
+        ),
+        Step::Entry {
+            quantity: Quantity::Voltage,
+            ..
+        } => (
+            "3/3  VOLTAGE",
+            "Enter your meter's volts",
+            "V",
+            "< > adjust  OK save  BACK cancel",
+        ),
+    };
+    text(
+        target,
+        &BOLD,
+        title,
+        Point::new(LEFT, CALIBRATION_TITLE),
+        HorizontalAlignment::Left,
+        YELLOW,
+    );
+    text(
+        target,
+        &PLAIN,
+        detail,
+        Point::new(LEFT, CALIBRATION_DETAIL),
+        HorizontalAlignment::Left,
+        WHITE,
+    );
+    let live_value = |reading: Reading| match wizard.step {
+        Step::Entry {
+            quantity: Quantity::Voltage,
+            ..
+        } => reading.mv,
+        _ => reading.ma.unsigned_abs(),
+    };
+    let entered = match wizard.step.entered() {
+        Some(value) => Label::new().fixed(value, 3),
+        None if wizard.step == Step::Zero => match live {
+            Some(reading) => Label::new().fixed(live_value(reading), 3),
+            None => Label::new().push(b"-.---"),
+        },
+        None => Label::new().push(b"-.---"),
+    };
+    let editing = wizard.step != Step::Zero;
+    value_box(
+        target,
+        CALIBRATION_BOX,
+        if editing { "YOUR METER" } else { "THIS METER" },
+        entered,
+        unit,
+        CYAN,
+        editing,
+    );
+    if editing {
+        let now = match live {
+            Some(reading) => Label::new()
+                .push(b"This meter now ")
+                .fixed(live_value(reading), 3)
+                .push(unit.as_bytes()),
+            None => Label::new()
+                .push(b"This meter now -.---")
+                .push(unit.as_bytes()),
+        };
+        text(
+            target,
+            &PLAIN,
+            now.as_str(),
+            Point::new(LEFT, CALIBRATION_LIVE),
+            HorizontalAlignment::Left,
+            MUTED,
+        );
+    }
+    if let Some(refusal) = wizard.refusal {
+        text(
+            target,
+            &PLAIN,
+            refusal.message(),
+            Point::new(LEFT, VERSION_BASELINE),
+            HorizontalAlignment::Left,
+            ORANGE,
+        );
+    }
+    hint(target, header, hint_text);
 }
 
 /// One bar per brightness level, rising left to right, lit up to `level`;

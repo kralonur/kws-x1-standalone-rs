@@ -5,6 +5,7 @@
 //! They are the Left, Right, OK and Back buttons, as identified on
 //! the device.
 
+use crate::calibration::{Calibration, Mean, Wizard};
 use crate::power_history::{GraphTrace, GraphWindow};
 use crate::ripple::{Scale as RippleScale, Timebase as RippleTimebase};
 use crate::settings::{Item, NextBoot, QcFindings, Screen, Settings};
@@ -582,6 +583,8 @@ pub enum SettingsFocus {
     Brightness,
     Rotation,
     EnergyMemory,
+    /// The calibration steps run; Back cancels them.
+    Calibrate(Wizard),
 }
 
 impl Default for SettingsFocus {
@@ -598,6 +601,7 @@ impl SettingsFocus {
             Self::Brightness => Item::Brightness,
             Self::Rotation => Item::Rotation,
             Self::EnergyMemory => Item::EnergyMemory,
+            Self::Calibrate(_) => Item::Calibration,
         }
     }
 }
@@ -750,7 +754,10 @@ impl Page {
                     | Open::Graph(_)
                     | Open::Ripple(_)
             ) | Self::Settings(
-                SettingsFocus::Brightness | SettingsFocus::Rotation | SettingsFocus::EnergyMemory
+                SettingsFocus::Brightness
+                    | SettingsFocus::Rotation
+                    | SettingsFocus::EnergyMemory
+                    | SettingsFocus::Calibrate(_)
             )
         )
     }
@@ -866,6 +873,8 @@ pub struct Navigation {
     /// The tab each group last showed, by `Group::ALL` index, so moving
     /// between groups returns to it.
     last: [Tab; Group::ALL.len()],
+    /// The meter's averaged raw reading, for the calibration steps.
+    mean: Option<Mean>,
 }
 
 impl Navigation {
@@ -992,6 +1001,11 @@ impl Navigation {
         }
     }
 
+    /// The meter's averaged raw reading; `None` while it is not read.
+    pub fn set_mean(&mut self, mean: Option<Mean>) {
+        self.mean = mean;
+    }
+
     /// Feed one sample; returns the input state and any PD session request.
     pub fn update(&mut self, raw_pressed: u8) -> (Input, Option<PdCommand>) {
         let page_before = self.input.page;
@@ -1018,6 +1032,7 @@ impl Navigation {
                 && matches!(
                     self.input.page,
                     Page::Open(Open::Pps(_) | Open::Avs | Open::Qc3 | Open::Detail { .. })
+                        | Page::Settings(SettingsFocus::Calibrate(_))
                 )
             {
                 self.repeated = true;
@@ -1038,11 +1053,9 @@ impl Navigation {
                 command = query;
             }
             let swept = self.ok_held.saturating_sub(RESET_DELAY_SAMPLES);
-            if !self.ok_long
-                && let Some(counter) = self.input.reset_counter()
-            {
+            if !self.ok_long && self.sweeps() {
                 if swept >= RESET_SWEEP_SAMPLES {
-                    *counter = counter.wrapping_add(1);
+                    self.reset();
                     self.ok_long = true;
                 } else {
                     // Below `RESET_STEPS`, as `swept` is below the sweep.
@@ -1098,6 +1111,21 @@ impl Navigation {
         (self.input, command)
     }
 
+    /// A completed OK hold resets something on the shown page.
+    fn sweeps(&mut self) -> bool {
+        self.input.page == Page::Settings(SettingsFocus::Row(Item::Calibration))
+            || self.input.reset_counter().is_some()
+    }
+
+    /// What a completed OK hold resets: the calibration on its row, else
+    /// the shown tab's readings.
+    fn reset(&mut self) {
+        match self.input.reset_counter() {
+            Some(counter) => *counter = counter.wrapping_add(1),
+            None => self.input.settings.calibration = Calibration::default(),
+        }
+    }
+
     /// What a long OK does here: `None` when the page has no long OK, else
     /// the PD command it sends, if any.
     fn long_ok(&mut self) -> Option<Option<PdCommand>> {
@@ -1107,6 +1135,10 @@ impl Navigation {
             input.ripple_timebase = RippleTimebase::default();
             input.ripple_scale = RippleScale::default();
             input.ripple_hold = false;
+            return Some(None);
+        }
+        if let Page::Settings(SettingsFocus::Calibrate(wizard)) = &mut self.input.page {
+            wizard.hold_ok(self.mean);
             return Some(None);
         }
         let Some(Tab::Detail { page, .. }) = self.input.page.tab() else {
@@ -1170,6 +1202,7 @@ impl Navigation {
             Page::Settings(SettingsFocus::EnergyMemory) => {
                 input.settings.step_energy_memory(forward)
             }
+            Page::Settings(SettingsFocus::Calibrate(wizard)) => wizard.step(forward, repeat),
             Page::Open(Open::Fixed) => return Some(PdCommand::StepFixed(sign as i8)),
             Page::Open(Open::Qc2(preview)) => {
                 let all = Qc2Choice::ALL;
@@ -1303,9 +1336,23 @@ impl Navigation {
                     Item::Brightness => SettingsFocus::Brightness,
                     Item::Rotation => SettingsFocus::Rotation,
                     Item::EnergyMemory => SettingsFocus::EnergyMemory,
+                    Item::Calibration => {
+                        SettingsFocus::Calibrate(Wizard::new(input.settings.calibration))
+                    }
                 }),
                 None,
             ),
+            // The last step's OK applies the calibration.
+            Page::Settings(SettingsFocus::Calibrate(mut wizard)) => {
+                let focus = match wizard.ok(self.mean) {
+                    Some(calibration) => {
+                        input.settings.calibration = calibration;
+                        SettingsFocus::Row(Item::Calibration)
+                    }
+                    None => SettingsFocus::Calibrate(wizard),
+                };
+                (Page::Settings(focus), None)
+            }
             Page::Settings(focus) => (Page::Settings(SettingsFocus::Row(focus.row())), None),
         };
         input.page = page;

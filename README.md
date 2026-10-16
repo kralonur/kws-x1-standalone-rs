@@ -236,7 +236,7 @@ point the way it flows (they follow the screen rotation).
 | **Charger** | the offer (`*` = needs a 5 A cable), the charger's identity, maker and peak ratings, power status and source info, a power bank's battery, the Quick Charge detection result | OK to scroll; hold OK: full scan (Quick Charge, PD, EPR, and the 5 A cable test with the plug in the charger) |
 | **Cable** | the cable's e-marker: a readable summary (type, speed, rating, length, alt modes, maker), identity, ratings, status and modes | OK to scroll; hold OK to read the e-marker (drops to fixed 5 V first) |
 | **System** | I2C bus state and counters, frame and button timing, stack use, `LAST RESET:` cause | OK to scroll |
-| **Settings** | `BRIGHTNESS` (5 levels, 60% at first), `ROTATION` (`AUTO` follows the tilt sensor, `NORMAL`, `FLIPPED`), `ENERGY MEMORY`, `VERSION` (shown only) | Left/Right row, OK change it, Left/Right value, OK or Back done |
+| **Settings** | `BRIGHTNESS` (5 levels, 60% at first), `ROTATION` (`AUTO` follows the tilt sensor, `NORMAL`, `FLIPPED`), `ENERGY MEMORY`, `CALIBRATION`, `VERSION` (shown only) | Left/Right row, OK change it, Left/Right value, OK or Back done |
 
 The selector pages only show the offer until a sink session has one. A
 profile is requested only after the final OK; Left/Right alone just preview.
@@ -248,7 +248,7 @@ unknown state. A port without PD does not close it.
 
 ### What is saved
 
-Brightness, rotation and the energy-memory interval are saved to flash once you finish changing them, and
+Brightness, rotation, the energy-memory interval and the calibration are saved to flash once you finish changing them, and
 come back at the next power-up, as does the mode the meter restarts the
 charger into (full scan, cable test, Quick Charge). The chosen profile is not:
 every boot starts at 5 V. `MAX` values live until reset or power-off.
@@ -256,7 +256,9 @@ every boot starts at 5 V. `MAX` values live until reset or power-off.
 Saving appends an 8-byte record to the meter's original settings area and
 never erases settings sectors. Each 8 KiB sector holds 1023 records; up to four
 are available for new settings/log allocations (about 4000 settings saves without
-diagnostic logs). Existing records from older builds are still read. After this
+diagnostic logs). A calibration takes three records of its own, and a sector
+newly taken into use starts with them. Older builds skip these records, so
+going back to one keeps the other settings. Existing records from older builds are still read. After this
 area fills, settings keep working until power-off but are no longer saved.
 
 **Energy memory** defaults to **Off**: Ah/Wh and the time reset at every restart and no totals
@@ -970,8 +972,8 @@ It scrolls (OK) through three sections.
 
 <img src="pictures/settings_screen.webp" width="360" alt="Settings screen">
 
-This is the **Settings** screen (Back on the overview): display preferences
-and energy persistence.
+This is the **Settings** screen (Back on the overview): display preferences,
+energy persistence and calibration.
 
 - **`BRIGHTNESS`**: five bars, 20%, 40%, 60%, 80% and 95%. Saved; the backlight
   starts at the restored level, not always the default 60%.
@@ -981,11 +983,42 @@ and energy persistence.
   over, the two arrow buttons swap.
 - **`ENERGY MEMORY`**: `OFF` (default), `5s`, `10s`, `30s` or `60s`. Saved.
   Shorter intervals lose less usage on power loss but cause more flash wear.
+- **`CALIBRATION`**: `FACTORY` or `CUSTOM`. OK starts the calibration steps
+  below; holding OK sweeps the row and, once full, restores the factory
+  values. Saved.
 - **`VERSION`**: the firmware version, shown only; the cursor skips it. A failed
   settings save replaces its label with a storage-full or write-failure warning.
 - **Hint row**: `< > choose  OK change  BACK exit`, then
   `< > dimmer/brighter  OK done`, `< > auto/normal/flipped  OK done` or
-  `< > interval  OK done (shorter wears)`.
+  `< > interval  OK done (shorter wears)`; on `CALIBRATION`,
+  `OK calibrate  hold OK factory reset`.
+
+##### Calibration
+
+Calibration corrects this meter's readings against a meter you trust. It
+is only as good as that reference: a cheap multimeter can make readings
+worse. There are three steps, and each can be skipped, keeping its previous
+value:
+
+1. **`ZERO CURRENT`**: unplug the load but keep the power on, then hold OK.
+   The meter takes the current it averages as its zero. More than 20 mA is
+   refused as a load rather than an offset. A short OK skips the step.
+2. **`CURRENT`**: run a steady load of at least 0.5 A. The `YOUR METER` box
+   starts at this meter's averaged reading; Left/Right change it by 1 mA
+   (held, 10 mA) to what your meter shows, and OK goes on. OK without a
+   change skips the step.
+3. **`VOLTAGE`**: the same for the bus voltage, which needs at least 4 V but
+   no load. OK saves the calibration.
+
+The meter averages its last 1.6 s of readings when OK is pressed, so wait for
+the reading under the box to settle. A correction over 5% is refused: that
+points to the reference, not the meter. Back cancels the steps at any point
+and changes nothing.
+
+The calibration applies to every voltage, current and power the meter shows,
+the graph, the peaks and the energy totals, and the live VBUS on the PD page.
+It does not change the Quick Charge trigger's own voltage checks or the
+ripple measurement, which uses a different input.
 
 ### Passthrough mode
 

@@ -2,6 +2,7 @@
 //! starts in, and their flash record encoding. The firmware stores the
 //! record; this module only packs it.
 
+use crate::calibration::Calibration;
 use qc_protocol::detect::Report;
 use qc_protocol::qc2::Failure;
 
@@ -259,6 +260,9 @@ pub struct Settings {
     /// The screen the next boot opens on; it lasts as long as `next_boot`
     /// (see [`Self::finish_boot`]).
     pub resume: Option<Screen>,
+    /// Kept in records of its own beside the settings word
+    /// ([`Calibration::records`]); [`Self::encode`] leaves it out.
+    pub calibration: Calibration,
 }
 
 impl Default for Settings {
@@ -270,6 +274,7 @@ impl Default for Settings {
             next_boot: NextBoot::Normal,
             qc_findings: None,
             resume: None,
+            calibration: Calibration::default(),
         }
     }
 }
@@ -359,7 +364,8 @@ impl Settings {
             | u32::from(self.brightness)
     }
 
-    /// Unpack a word from [`Self::encode`]; anything else is `None`.
+    /// Unpack a word from [`Self::encode`], with the default calibration;
+    /// anything else is `None`.
     pub fn decode(word: u32) -> Option<Self> {
         if word >> 24 != RECORD_TAG || word & RESERVED_MASK != 0 {
             return None;
@@ -378,6 +384,7 @@ impl Settings {
             next_boot,
             qc_findings,
             resume,
+            calibration: Calibration::default(),
         })
     }
 }
@@ -389,10 +396,16 @@ pub enum Item {
     Brightness,
     Rotation,
     EnergyMemory,
+    Calibration,
 }
 
 impl Item {
-    pub const ALL: [Self; 3] = [Self::Brightness, Self::Rotation, Self::EnergyMemory];
+    pub const ALL: [Self; 4] = [
+        Self::Brightness,
+        Self::Rotation,
+        Self::EnergyMemory,
+        Self::Calibration,
+    ];
 }
 
 #[cfg(test)]
@@ -413,6 +426,7 @@ mod tests {
                     },
                     resume: Some(Screen::Energy),
                     qc_findings: Some(QcFindings::Failed(Failure::NoEntry)),
+                    calibration: Calibration::default(),
                 };
                 assert_eq!(Settings::decode(settings.encode()), Some(settings));
             }

@@ -52,11 +52,21 @@ mod flash {
 #[path = "../../firmware/src/settings_store.rs"]
 mod settings_store;
 
+/// The fake flash is one global: tests take turns with it.
+static FLASH_TURN: Mutex<()> = Mutex::new(());
+
+fn flash_turn() -> std::sync::MutexGuard<'static, ()> {
+    FLASH_TURN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[test]
 fn failed_claim_failed_record_and_full_storage_never_report_saved() {
     use firmware_core::settings::{EnergyMemory, Settings};
     use settings_store::{Status, Store};
 
+    let _turn = flash_turn();
     let changed = Settings {
         brightness: 3,
         energy_memory: EnergyMemory::Seconds5,
@@ -88,4 +98,43 @@ fn failed_claim_failed_record_and_full_storage_never_report_saved() {
     assert!(writable.save(changed));
     assert_eq!(flash::WRITES.load(Ordering::Relaxed), attempts);
     assert_eq!(Store::open().1, Some(changed));
+}
+
+#[test]
+fn calibration_survives_reopening_and_moving_to_a_new_sector() {
+    use firmware_core::calibration::Calibration;
+    use firmware_core::settings::Settings;
+    use settings_store::Store;
+
+    let _turn = flash_turn();
+    flash::reset(flash::BLANK, usize::MAX);
+    let (mut store, _) = Store::open();
+    let mut settings = Settings {
+        calibration: Calibration {
+            zero_ua: -1_500,
+            current_ppm: 12_000,
+            voltage_ppm: -800,
+        },
+        ..Settings::default()
+    };
+    assert!(store.save(settings));
+    assert_eq!(Store::open().1, Some(settings));
+    // Only the settings word changes from here: enough saves to fill the
+    // first sector, after which the newest sector holds no calibration
+    // change of its own.
+    for change in 0..flash::SECTOR / 8 {
+        settings.brightness = (change % 2) as u8;
+        assert!(store.save(settings));
+    }
+    assert_eq!(Store::open().1, Some(settings));
+    // A calibration's records go together; where a sector has too little
+    // room left for them, the next boot must still find the newest. Four
+    // records a round cross one more sector, leaving it two records short.
+    for change in 0..flash::SECTOR / 8 / 3 {
+        settings.brightness = (change % 2) as u8;
+        assert!(store.save(settings));
+        settings.calibration.current_ppm = change as i32;
+        assert!(store.save(settings));
+        assert_eq!(Store::open().1, Some(settings));
+    }
 }

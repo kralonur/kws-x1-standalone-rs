@@ -55,6 +55,7 @@ use button_logic::{Detail, MAX_TABS, Page, QcTarget, Tab, View};
 use embassy_time::{Instant, Timer};
 use embedded_graphics::pixelcolor::{Rgb565, RgbColor};
 use firmware_core::buttons as button_logic;
+use firmware_core::calibration::{Average, Calibration, Mean};
 use firmware_core::energy::{Totals, Tracker};
 use firmware_core::power_history::{self, History};
 use firmware_core::settings::{NextBoot, QcFindings, Rotation, Screen};
@@ -328,6 +329,9 @@ static LINE_VOLTAGES: Watch<CriticalSectionRawMutex, Option<line_adc::LineVoltag
 static ADC_REFERENCE: Watch<CriticalSectionRawMutex, Option<u16>, 1> = Watch::new();
 /// Quick Charge trigger state: `line_task` sends it, `meter_task` draws it.
 static QC_STATUS: Watch<CriticalSectionRawMutex, qc_drive::Status, 1> = Watch::new();
+/// The meter's averaged raw reading: `meter_task` sends it, the button task
+/// hands it to the calibration steps.
+static METER_MEAN: Watch<CriticalSectionRawMutex, Option<Mean>, 1> = Watch::new();
 /// Ripple captures: acquisition task publishes, display task consumes.
 static RIPPLE: Watch<CriticalSectionRawMutex, Option<firmware_core::ripple::Reading>, 1> =
     Watch::new();
@@ -728,6 +732,7 @@ async fn button_task(
         if let Some((_, view)) = DETAIL_VIEW.try_get() {
             navigation.set_list_end(view.end);
         }
+        navigation.set_mean(METER_MEAN.try_get().flatten());
         // The scan's Quick Charge part ends with the probe's result.
         let scan_end = match qc_updates.try_get() {
             Some(qc_drive::Status::Detected(report)) => {
@@ -807,7 +812,7 @@ fn header(page: Page, passthrough: bool, tabs: &mut [Tab; MAX_TABS]) -> ui::Head
 
 /// The latest observation as the detail pages show it, with the live bus
 /// voltage and, in the logging builds, the previous boot's record.
-fn detail_observation(raw_vbus: Option<u16>) -> pd::Observation {
+fn detail_observation(raw_vbus: Option<u16>, calibration: Calibration) -> pd::Observation {
     let mut observation = latest_observation();
     #[cfg(feature = "pd-boot-diagnostic")]
     {
@@ -827,22 +832,25 @@ fn detail_observation(raw_vbus: Option<u16>) -> pd::Observation {
     if let Some(spr) = observation.spr.as_mut() {
         spr.vbus_live_mv = raw_vbus
             .filter(|_| !bus_failed())
-            .map(|raw| ina226::bus_millivolts(raw).min(u16::MAX as u32) as u16);
+            .map(|raw| calibration.millivolts(raw).min(u16::MAX as u32) as u16);
     }
     observation
 }
 
-/// Meter page values from the latest raw INA226 registers; `None` until both
-/// have been read and while the bus is latched.
-fn reading(raw_v: Option<u16>, raw_i: Option<u16>) -> Option<ui::Reading> {
+/// Meter page values from the latest raw INA226 registers, calibrated;
+/// `None` until both have been read and while the bus is latched.
+fn reading(
+    raw_v: Option<u16>,
+    raw_i: Option<u16>,
+    calibration: Calibration,
+) -> Option<ui::Reading> {
     let (raw_v, raw_i) = (raw_v?, raw_i?);
     if bus_failed() {
         return None;
     }
-    // The current register is two's complement (INA Table 7-1).
     Some(ui::Reading {
-        mv: ina226::bus_millivolts(raw_v),
-        ma: i32::from(raw_i as i16) / ina226::COUNTS_PER_MA as i32,
+        mv: calibration.millivolts(raw_v),
+        ma: calibration.milliamps(raw_i),
     })
 }
 
@@ -917,6 +925,7 @@ async fn meter_task(
     // reset hold on the graph clears it.
     let mut power_history = History::default();
     let mut graph_reset = input.graph_reset;
+    let mut average = Average::default();
     let mut brightness = input.settings.brightness;
     // Reads are paced by an absolute deadline, never by subtracting from an
     // `Instant` (embassy-time panics on underflow, e.g. `Instant::now() - 200ms`
@@ -1025,16 +1034,26 @@ async fn meter_task(
                 ..
             }
         );
+        let calibrating = matches!(
+            view,
+            View::Settings(button_logic::SettingsFocus::Calibrate(_))
+        );
         if now >= next_read {
             next_read = now + METER_READ_PERIOD;
             let raw_v = read_meter(ina226::BUS_VOLTAGE).await;
             let raw_i = read_meter(ina226::CURRENT).await;
-            changed |= (reads_current || pd_details || view == View::Ripple)
+            changed |= (reads_current || pd_details || calibrating || view == View::Ripple)
                 && (raw_v != last_raw_v || raw_i != last_raw_i);
             changed |= pd_details;
             last_raw_v = raw_v;
             last_raw_i = raw_i;
-            let sample = reading(raw_v, raw_i);
+            let sample = reading(raw_v, raw_i, input.settings.calibration);
+            // The calibration steps take the raw readings' average.
+            match (raw_v, raw_i) {
+                (Some(raw_v), Some(raw_i)) if !bus_failed() => average.add(raw_v, raw_i),
+                _ => average.clear(),
+            }
+            METER_MEAN.sender().send(average.mean());
             let read_ms = Instant::now().as_millis();
             energy.sample(read_ms, sample.map(|reading| (reading.mv, reading.ma)));
             power_history.sample(
@@ -1138,7 +1157,7 @@ async fn meter_task(
                 View::Overview => {
                     render::clear(frame);
                     let observation = latest_observation();
-                    let reading = reading(last_raw_v, last_raw_i);
+                    let reading = reading(last_raw_v, last_raw_i, input.settings.calibration);
                     ui::draw_meter(
                         &mut Canvas(frame),
                         &header,
@@ -1195,7 +1214,7 @@ async fn meter_task(
                         &ui::Ripple {
                             reading: ripple_reading.as_ref(),
                             reference: ripple_reference,
-                            bus: reading(last_raw_v, last_raw_i),
+                            bus: reading(last_raw_v, last_raw_i, input.settings.calibration),
                             hold: input.ripple_hold,
                             timebase: input.ripple_timebase,
                             clock_hz: ripple_clock_hz,
@@ -1239,7 +1258,7 @@ async fn meter_task(
                             status: qc_status,
                             qc: input.qc,
                             lines,
-                            reading: reading(last_raw_v, last_raw_i),
+                            reading: reading(last_raw_v, last_raw_i, input.settings.calibration),
                         },
                     );
                 }
@@ -1259,7 +1278,7 @@ async fn meter_task(
                         &header,
                         &pd::offer(&latest_observation()),
                         focus,
-                        reading(last_raw_v, last_raw_i),
+                        reading(last_raw_v, last_raw_i, input.settings.calibration),
                     );
                 }
                 View::Avs { adjusting } => {
@@ -1269,7 +1288,16 @@ async fn meter_task(
                         &header,
                         &pd::offer(&latest_observation()),
                         adjusting,
-                        reading(last_raw_v, last_raw_i),
+                        reading(last_raw_v, last_raw_i, input.settings.calibration),
+                    );
+                }
+                View::Settings(button_logic::SettingsFocus::Calibrate(wizard)) => {
+                    render::clear(frame);
+                    ui::draw_calibration(
+                        &mut Canvas(frame),
+                        &header,
+                        &wizard,
+                        reading(last_raw_v, last_raw_i, wizard.pending),
                     );
                 }
                 View::Settings(focus) => {
@@ -1280,6 +1308,7 @@ async fn meter_task(
                         input.settings,
                         focus,
                         SETTINGS_SAVE.try_get().unwrap_or_default(),
+                        input.reset_hold,
                     );
                 }
                 View::Detail {
@@ -1288,7 +1317,7 @@ async fn meter_task(
                     scrolling,
                 } => {
                     render::clear(frame);
-                    let observation = detail_observation(last_raw_v);
+                    let observation = detail_observation(last_raw_v, input.settings.calibration);
                     let canvas = &mut Canvas(frame);
                     let view = match detail {
                         Detail::Pd => ui::draw_detail(
