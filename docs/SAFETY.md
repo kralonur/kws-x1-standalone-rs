@@ -195,9 +195,10 @@ erase range `[0x10000, 0x44000)`. Bootloader and settings regions remain outside
 that range. The generated layout passed batch checks and final bootloader
 verification on Linux.
 
-The PD stack runs from upper flash, `[0x44000, 0x6c000)`, outside the update
-erase range. A release's application is the unpacker followed by two deflate
-streams: the upper region's and the main firmware's. On its first boot the
+The PD stack, protocol crates and FFT tables run from upper flash,
+`[0x44000, 0x6c000)`, outside the update erase range. A release's application
+is the unpacker followed by two Thumb-filtered LZMA2 streams: the upper
+region's and the main firmware's. On its first boot the
 unpacker runs entirely from RAM with interrupts disabled. It inflates both
 streams and checks their lengths and hashes before writing anything, then
 programs the upper region, then the main firmware over itself, and resets.

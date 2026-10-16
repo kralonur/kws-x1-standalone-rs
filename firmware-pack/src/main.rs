@@ -4,8 +4,8 @@ use firmware_image::{
     self as image, APP_BASE, APP_LIMIT, CONTAINER_PREFIX, ERASE_CEILING, EXTENDED_PAYLOAD_LEN,
     SECTOR_BYTES, UPPER_BASE, UPPER_END, UPPER_ID_MAGIC, UPPER_ID_UNSET,
     packed::{
-        PACKED_MAGIC, PACKED_UNSET, Packed, Stream, WINDOW_BYTES, inflate_sectors,
-        main_erase_margin,
+        DICT_BYTES, PACKED_MAGIC, PACKED_UNSET, Packed, Stream, WINDOW_BYTES, filter_thumb_bl,
+        inflate_sectors, main_erase_margin,
     },
     region_hash,
 };
@@ -36,8 +36,13 @@ const STACK_RAM_START: u32 = 0x20000000;
 const STACK_RAM_END: u32 = 0x20010000;
 // The unpacker's stack lies strictly inside its RAM (`firmware/unpacker.x`).
 const UNPACKER_RAM_END: u32 = 0x20020000;
-// Deflate level for the release streams: miniz's highest (`UBER`).
-const DEFLATE_LEVEL: u8 = 10;
+// LZMA2 preset level and Thumb-aligned literal/position context bits:
+// lp = 1 aligns literals to 16-bit Thumb halfwords, lc = 2 keeps lc + lp = 3
+// (12 KiB literal probability model), and pb = 2 aligns matches to 32-bit words.
+const LZMA_PRESET: u32 = 9;
+const LZMA_LC: u32 = 2;
+const LZMA_LP: u32 = 1;
+const LZMA_PB: u32 = 2;
 
 #[derive(Parser)]
 #[command(about = "Generate and audit firmware containers offline; never accesses USB")]
@@ -242,9 +247,22 @@ fn split(elf_bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
     Ok((app, upper))
 }
 
-/// Raw deflate at [`DEFLATE_LEVEL`].
-fn deflate(bytes: &[u8]) -> Vec<u8> {
-    miniz_oxide::deflate::compress_to_vec(bytes, DEFLATE_LEVEL)
+/// Filter Thumb-2 `BL` displacements and compress as a raw LZMA2 stream.
+fn deflate(bytes: &[u8]) -> Result<Vec<u8>> {
+    let mut filtered = bytes.to_vec();
+    filter_thumb_bl(&mut filtered, 0, true);
+    let mut options = lzma_rust2::Lzma2Options::with_preset(LZMA_PRESET);
+    options.lzma_options.dict_size = DICT_BYTES;
+    options.lzma_options.lc = LZMA_LC;
+    options.lzma_options.lp = LZMA_LP;
+    options.lzma_options.pb = LZMA_PB;
+    let mut compressed = Vec::new();
+    let mut writer = lzma_rust2::Lzma2Writer::new(&mut compressed, options);
+    writer
+        .write_all(&filtered)
+        .context("Compressing release stream")?;
+    writer.finish().context("Finishing release stream")?;
+    Ok(compressed)
 }
 
 /// Inflate `packed` as the unpacker will, requiring exactly `expected`, and
@@ -309,7 +327,7 @@ fn release(firmware: &[u8], unpacker: &[u8]) -> Result<(Vec<u8>, Application, Re
     );
     let unpacker_bytes = content.len();
     check_unpacker(&content)?;
-    let (upper_packed, main_packed) = (deflate(&upper), deflate(&main));
+    let (upper_packed, main_packed) = (deflate(&upper)?, deflate(&main)?);
     let record = Packed {
         magic: PACKED_MAGIC,
         data: APP_BASE + u32::try_from(unpacker_bytes.next_multiple_of(size_of::<u32>()))?,

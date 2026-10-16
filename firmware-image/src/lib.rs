@@ -101,7 +101,7 @@ pub enum ImageError {
         found: u8,
     },
     NonZeroTrailer,
-    /// A deflate stream is corrupt or truncated.
+    /// A compressed stream is corrupt or truncated.
     BadStream,
     /// The consumer of inflated output stopped it.
     Stopped,

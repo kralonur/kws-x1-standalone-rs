@@ -2961,7 +2961,9 @@ pub fn draw_detail<D: DrawTarget<Color = Rgb565>, const WIDTH: usize>(
                     *cell = byte;
                 }
             }
-            let content = core::str::from_utf8(&printable).unwrap_or("").trim_end();
+            let content = core::str::from_utf8(&printable)
+                .unwrap_or("")
+                .trim_ascii_end();
             if content.is_empty() {
                 continue;
             }

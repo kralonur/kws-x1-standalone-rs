@@ -1458,8 +1458,8 @@ so diagnostic images are not interchangeable with the normal build.
 
 Uses current stable Rust. `cargo fw` builds two programs: the `firmware` and
 the `unpacker`. `firmware-pack` packs them into one release image: the unpacker,
-followed by the PD code (upper flash) and the main firmware, both compressed
-with deflate. No baseline image, template file or download is required. `pack`
+followed by the upper-flash code and the main firmware, both compressed
+with LZMA2. No baseline image, template file or download is required. `pack`
 refuses existing outputs rather than overwriting them; `audit` checks an exact
 hash-confirmed image against the same two builds. Both emit JSON reports to
 stdout and never access USB hardware.

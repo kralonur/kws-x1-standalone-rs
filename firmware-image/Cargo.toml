@@ -11,4 +11,4 @@ test = false
 bench = false
 
 [dependencies]
-miniz_oxide = { workspace = true }
+lzma-rust2 = { workspace = true, default-features = false }

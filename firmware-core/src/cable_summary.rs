@@ -289,7 +289,7 @@ mod tests {
         let items = summary.items();
         assert!(items.len() >= expected.len(), "{items:?}");
         for ((label, value), (expected_label, expected_value)) in items.iter().zip(expected) {
-            let value = core::str::from_utf8(value).unwrap_or("").trim_end();
+            let value = core::str::from_utf8(value).unwrap_or("").trim_ascii_end();
             assert_eq!((*label, value), (*expected_label, *expected_value));
         }
     }

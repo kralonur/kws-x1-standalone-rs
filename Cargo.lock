@@ -584,7 +584,7 @@ dependencies = [
 name = "firmware-image"
 version = "0.1.0"
 dependencies = [
- "miniz_oxide",
+ "lzma-rust2",
 ]
 
 [[package]]
@@ -594,7 +594,7 @@ dependencies = [
  "anyhow",
  "clap",
  "firmware-image",
- "miniz_oxide",
+ "lzma-rust2",
  "object",
  "serde",
  "serde_json",
@@ -826,6 +826,12 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
 ]
+
+[[package]]
+name = "lzma-rust2"
+version = "0.22.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7277c9742229dc25243236d578b6471a798c554512c6f6a04365ec2e87c2a3bb"
 
 [[package]]
 name = "matchers"

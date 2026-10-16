@@ -232,3 +232,43 @@ fn audit_rejects_unused_content_change_with_valid_checksum_and_hash() -> Result<
     assert!(!fixture.audit(&digest(&modified))?.status.success());
     Ok(())
 }
+
+#[test]
+fn thumb_bl_filtered_stream_inflates_exact_sectors_across_sliding_window() -> Result<()> {
+    use firmware_image::packed::{DICT_BYTES, WINDOW_BYTES, filter_thumb_bl, inflate_sectors};
+    use std::io::Write;
+    // Protect against corrupting the 64 KiB LZMA2 dictionary while unfiltering
+    // sectors: repeat Thumb BL patterns beyond one dictionary window.
+    let mut expected = Vec::with_capacity(DICT_BYTES as usize + 12_288);
+    for index in 0..(DICT_BYTES as usize + 12_288) / 4 {
+        let s = (index & 1) as u16;
+        let j1 = ((index >> 1) & 1) as u16;
+        let j2 = ((index >> 2) & 1) as u16;
+        let hw1 = 0xf000 | (s << 10) | ((index as u16) & 0x03ff);
+        let hw2 = 0xd000 | (j1 << 13) | (j2 << 11) | (((index >> 3) as u16) & 0x07ff);
+        expected.extend_from_slice(&hw1.to_le_bytes());
+        expected.extend_from_slice(&hw2.to_le_bytes());
+    }
+    let mut filtered = expected.clone();
+    filter_thumb_bl(&mut filtered, 0, true);
+    assert_ne!(filtered, expected);
+    let mut options = lzma_rust2::Lzma2Options::with_preset(6);
+    options.lzma_options.dict_size = DICT_BYTES;
+    options.lzma_options.lc = 2;
+    options.lzma_options.lp = 1;
+    options.lzma_options.pb = 2;
+    let mut packed = Vec::new();
+    let mut writer = lzma_rust2::Lzma2Writer::new(&mut packed, options);
+    writer.write_all(&filtered)?;
+    writer.finish()?;
+    let mut window = [0u8; WINDOW_BYTES];
+    let mut inflated = Vec::with_capacity(expected.len());
+    let total = inflate_sectors(&packed, &mut window, |chunk| {
+        inflated.extend_from_slice(chunk.bytes);
+        true
+    })
+    .map_err(|error| anyhow::anyhow!("Inflate failed: {error:?}"))?;
+    assert_eq!(total, expected.len());
+    assert_eq!(inflated, expected);
+    Ok(())
+}

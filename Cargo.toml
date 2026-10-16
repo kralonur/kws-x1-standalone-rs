@@ -4,13 +4,12 @@ members = ["firmware", "firmware-core", "firmware-image", "firmware-pack", "flas
 default-members = ["firmware-core", "fusb302-pd"]
 
 [workspace.dependencies]
+lzma-rust2 = "0.22.0"
 anyhow = "1.0.104"
 clap = "4.6.7"
 hidapi = "2.6.7"
 image-webp = "0.2.4"
 libm = "0.2.16"
-# The firmware links no allocator: members enable `with-alloc` where needed.
-miniz_oxide = { version = "0.9.1", default-features = false }
 # Only the 1024-point FFT tables: members enable `size-1024`.
 microfft = { version = "0.6.0", default-features = false }
 object = "0.40.0"

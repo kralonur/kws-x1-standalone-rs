@@ -26,6 +26,14 @@ const MIN_PEAK: f32 = (SAMPLE_COUNT / 4) as f32;
 /// window's first sidelobe is at -31 dB, so a strong tone's sidelobes never
 /// pass as peaks of their own.
 const PEAK_RATIO: f32 = 16.0;
+/// Hann window phase step per sample, in radians.
+const WINDOW_STEP: f32 = TAU / SAMPLE_COUNT as f32;
+/// `cos` and `sin` of [`WINDOW_STEP`] from their Taylor series, exact to f32
+/// at this small angle, so the window rotates a phasor instead of calling
+/// libm's `cosf` (which links software f64 helpers).
+const STEP_COS: f32 = 1.0 - WINDOW_STEP * WINDOW_STEP / 2.0
+    + WINDOW_STEP * WINDOW_STEP * WINDOW_STEP * WINDOW_STEP / 24.0;
+const STEP_SIN: f32 = WINDOW_STEP - WINDOW_STEP * WINDOW_STEP * WINDOW_STEP / 6.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Spectrum {
@@ -47,9 +55,14 @@ impl Spectrum {
     pub fn new(samples: &[u16; SAMPLE_COUNT], scratch: &mut [f32; SAMPLE_COUNT]) -> Self {
         let sum: u32 = samples.iter().map(|&sample| u32::from(sample)).sum();
         let mean = sum as f32 / SAMPLE_COUNT as f32;
-        for (n, (value, &sample)) in scratch.iter_mut().zip(samples).enumerate() {
-            let window = 0.5 - 0.5 * libm::cosf(TAU * n as f32 / SAMPLE_COUNT as f32);
-            *value = (f32::from(sample) - mean) * window;
+        // `(cos, sin)` of sample n's window phase.
+        let (mut cos, mut sin) = (1.0_f32, 0.0_f32);
+        for (value, &sample) in scratch.iter_mut().zip(samples) {
+            *value = (f32::from(sample) - mean) * (0.5 - 0.5 * cos);
+            (cos, sin) = (
+                cos * STEP_COS - sin * STEP_SIN,
+                sin * STEP_COS + cos * STEP_SIN,
+            );
         }
         let bins = microfft::real::rfft_1024(scratch);
         // Magnitudes in place of the real parts. Bin 0 packs DC (removed

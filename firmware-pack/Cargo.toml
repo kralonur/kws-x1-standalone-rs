@@ -16,7 +16,7 @@ bench = false
 anyhow = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 firmware-image = { workspace = true }
-miniz_oxide = { workspace = true, features = ["with-alloc"] }
+lzma-rust2 = { workspace = true, default-features = false, features = ["std", "encoder"] }
 object = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

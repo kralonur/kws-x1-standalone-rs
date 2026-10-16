@@ -41,19 +41,18 @@ SECTIONS
 _stack_end = __euninit;
 __sheap = __euninit;
 
-/* The PD stack's code and constants (crates usbpd, usbpd-traits,
- * pd-protocol and fusb302-pd, selected by their v0 crate roots in the
- * per-symbol section names) run from the upper region. Inserted before
- * .text so these patterns claim the sections first. Nothing may call into
- * it until startup has checked the installed region (`upper.rs`).
+/* The PD stack, protocol crates and FFT tables (selected by their v0
+ * crate/module roots in per-symbol section names) run from the upper region.
+ * Inserted before .text so these patterns claim the sections first. Nothing
+ * may call into it until startup has checked the installed region (`upper.rs`).
  */
 SECTIONS
 {
   .upper : ALIGN(4)
   {
     __supper = .;
-    *(.text.*_5usbpd* .text.*_12usbpd_traits* .text.*_11pd_protocol* .text.*_10fusb302_pd*);
-    *(.rodata.*_5usbpd* .rodata.*_12usbpd_traits* .rodata.*_11pd_protocol* .rodata.*_10fusb302_pd*);
+    *(.text.*_5usbpd* .text.*_12usbpd_traits* .text.*_11pd_protocol* .text.*_10fusb302_pd* .text.*_8firmware7pd_task* .text.*_8microfft* .text.*_11qc_protocol*);
+    *(.rodata.*_5usbpd* .rodata.*_12usbpd_traits* .rodata.*_11pd_protocol* .rodata.*_10fusb302_pd* .rodata.*_8firmware7pd_task* .rodata.*_8microfft* .rodata.*_11qc_protocol*);
     . = ALIGN(4);
     __eupper = .;
   } > UPPER
