@@ -75,6 +75,132 @@ fn a_source_restart_resumes_scp_without_discarding_qc_evidence() {
     assert_eq!(input.settings.qc_findings, saved.qc_findings);
 }
 
+fn output_adapter() -> scp_protocol::Adapter {
+    scp_protocol::Adapter {
+        modes: scp_protocol::Modes::HighVoltage,
+        type0: Some(0x1c),
+        type1: None,
+        capabilities: Some(scp_protocol::Capabilities {
+            min_mv: 5_500,
+            max_mv: 11_000,
+            min_ma: 300,
+            max_ma: 3_200,
+            vstep_mv: Some(20),
+            istep_ma: Some(50),
+            max_power_dw: Some(350),
+        }),
+    }
+}
+
+// Protect against accidental output enabling from detection, stale results,
+// preview taps, scan completion, passthrough or PD ownership changes.
+#[test]
+fn scp_output_requires_confirmation_and_stops_on_back_pd_or_passthrough() {
+    use firmware_core::buttons::{PpsFocus, RIGHT};
+    let mut nav = Navigation::new(Page::Tabs(Tab::Scp), Settings::default());
+    let scanning = tap(&mut nav, OK);
+    nav.set_scp_adapter(scanning.scp_attempt.wrapping_sub(1), output_adapter());
+    assert!(nav.update(0).0.scp_selection.is_none());
+    nav.set_scp_adapter(scanning.scp_attempt, output_adapter());
+    nav.finish_scp(scanning.scp_attempt, true);
+    assert_eq!(nav.update(0).0.qc_request(), None);
+    let preview = tap(&mut nav, OK);
+    assert_eq!(preview.page, Page::Open(Open::ScpSet(PpsFocus::Voltage)));
+    assert_eq!(preview.qc_request(), None);
+    let preview = tap(&mut nav, RIGHT);
+    assert_eq!(preview.scp_selection.unwrap().output().millivolts(), 5_520);
+    assert_eq!(tap(&mut nav, OK).qc_request(), None);
+    let active = tap(&mut nav, OK);
+    assert_eq!(
+        active.qc_request(),
+        Some(QcTarget::ScpOutput {
+            attempt: scanning.scp_attempt,
+            mv: 5_520,
+            ma: 1_000
+        })
+    );
+    assert_eq!(tap(&mut nav, BACK).qc_request(), None);
+    // A failure must end the request, never retry the write on its own.
+    tap(&mut nav, OK);
+    tap(&mut nav, OK);
+    assert!(matches!(
+        tap(&mut nav, OK).qc_request(),
+        Some(QcTarget::ScpOutput { .. })
+    ));
+    nav.fail_scp_output(scanning.scp_attempt);
+    assert_eq!(nav.update(0).0.qc_request(), None);
+    // Reopen and apply; live PD must revoke the legacy owner even while editing.
+    tap(&mut nav, OK);
+    tap(&mut nav, OK);
+    assert!(matches!(
+        tap(&mut nav, OK).qc_request(),
+        Some(QcTarget::ScpOutput { .. })
+    ));
+    tap(&mut nav, OK);
+    nav.set_selectable(true);
+    let input = nav.update(0).0;
+    assert_eq!(input.page, Page::Tabs(Tab::Scp));
+    assert_eq!(input.qc_request(), None);
+    nav.set_selectable(false);
+    tap(&mut nav, OK);
+    tap(&mut nav, OK);
+    tap(&mut nav, OK);
+    nav.set_passthrough(true);
+    assert_eq!(nav.update(0).0.qc_request(), None);
+}
+
+#[test]
+fn full_scan_scp_completion_cannot_enable_output() {
+    let mut nav = Navigation::new(
+        Page::Open(Open::Probe(firmware_core::buttons::QcPage::Charger)),
+        Settings::default(),
+    );
+    nav.finish_scan(QcFindings::Failed(Failure::NoEntry));
+    let input = nav.update(0).0;
+    nav.set_scp_adapter(input.scp_attempt, output_adapter());
+    nav.finish_scp(input.scp_attempt, true);
+    assert_eq!(nav.update(0).0.qc_request(), None);
+}
+
+// Advertised maxima are not necessarily available together. Exercise the
+// selector through the power corner and ensure no preview bypasses limits.
+#[test]
+fn scp_selection_honors_steps_power_and_platform_envelope() {
+    use firmware_core::scp::{MAX_MA, MAX_MV, Selection, followed, request};
+    let adapter = output_adapter();
+    let mut selection = Selection::new(adapter).unwrap();
+    for _ in 0..100 {
+        selection.step(true, true, true);
+    }
+    assert_eq!(selection.output().millivolts(), 11_000);
+    for _ in 0..100 {
+        selection.step(false, true, false);
+    }
+    assert_eq!(selection.output().milliamps(), 3_150);
+    assert!(followed(selection.output(), 11_200));
+    assert!(!followed(selection.output(), 9_000));
+    assert!(request(adapter, 12_000, 1_000).is_err());
+    let mut wide = adapter;
+    let cap = wide.capabilities.as_mut().unwrap();
+    cap.min_mv = 3_000;
+    cap.max_mv = 63_000;
+    cap.max_ma = 10_000;
+    cap.max_power_dw = Some(1_270);
+    let mut selection = Selection::new(wide).unwrap();
+    for _ in 0..300 {
+        selection.step(true, true, true);
+        selection.step(false, true, true);
+        let output = selection.output();
+        assert!(output.millivolts() <= MAX_MV);
+        assert!(output.milliamps() <= MAX_MA);
+        assert!(u32::from(output.millivolts()) * u32::from(output.milliamps()) <= 127_000_000);
+    }
+    assert!(request(wide, 30_020, 1_000).is_err());
+    assert!(request(wide, 9_000, 5_050).is_err());
+    wide.capabilities.as_mut().unwrap().vstep_mv = None;
+    assert!(Selection::new(wide).is_none());
+}
+
 #[test]
 fn scp_evidence_roundtrips_without_relocating_legacy_fields() {
     for evidence in [
@@ -97,6 +223,8 @@ fn scp_evidence_roundtrips_without_relocating_legacy_fields() {
     assert!(Settings::decode(0x5e00_3802).is_none());
 }
 
+// These synthetic traces protect classifier state transitions, not physical
+// capture reliability: the firmware's 100 ms cadence cannot resolve symbols.
 #[test]
 fn passive_static_scp_candidate_is_not_traffic() {
     use firmware_core::dcp::{Driven, Passive};

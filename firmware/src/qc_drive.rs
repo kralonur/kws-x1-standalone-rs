@@ -49,6 +49,11 @@ fn encode(level: Level) -> [GpioLevel; 2] {
     }
 }
 
+/// D+ pair for the SCP detection source, the 0.6 V pair reversed. Its level
+/// through the undocumented network is unknown, so the SCP probe measures
+/// it against `VDP_SRC_SCP` (2.6–3.0 V) before transmitting anything.
+const SCP_DP: [GpioLevel; 2] = [GpioLevel::Low, GpioLevel::High];
+
 /// Owns PB3, PB4, PB8 and PB9.
 pub(crate) struct DataDrive {
     pins: OutputGroup<4>,
@@ -73,15 +78,13 @@ impl DataDrive {
         self.pins.drive([dp1, dp2, dm1, dm2]);
     }
 
-    /// SCP uses the opposite D+ resistor-pair encoding from the 0.6 V
-    /// entry level. The adapter MUST verify 2.6–3.0 V with ADC before sending
-    /// anything: the resistor topology itself is not established. D− uses
-    /// 0/3.3 V digital signaling, released for source replies.
+    /// Hold D+ at the SCP detection level and drive D− as the digital data
+    /// line: low or high, or released (`None`) for the charger's replies.
     pub(crate) fn scp(&mut self, high: Option<bool>) {
         let dm = high.map(|high| if high { Level::High } else { Level::Low });
         let [dm1, dm2] = dm.map_or([None; 2], |level| encode(level).map(Some));
-        self.pins
-            .drive([Some(GpioLevel::Low), Some(GpioLevel::High), dm1, dm2]);
+        let [dp1, dp2] = SCP_DP.map(Some);
+        self.pins.drive([dp1, dp2, dm1, dm2]);
     }
 
     /// Drive `(D+, D−)` levels.
@@ -163,6 +166,16 @@ impl Trigger {
         }
     }
 
+    /// SCP shutdown keeps measuring VBUS even after its request is cleared.
+    pub fn scp_active(&self) -> bool {
+        matches!(self.state, State::Scp(..))
+    }
+
+    /// SCP has work a faster step rate finishes sooner.
+    pub fn scp_busy(&self) -> bool {
+        matches!(&self.state, State::Scp(_, scp) if scp.busy())
+    }
+
     /// Move toward `target`; `None` releases D+/D−. `dm_mv` is the latest D−
     /// measurement and `vbus_mv` the output's, `None` after a failed read.
     pub fn update(
@@ -173,7 +186,22 @@ impl Trigger {
         vbus_mv: Option<u16>,
         adc: &mut crate::line_adc::LineAdc,
     ) -> Status {
-        if let Some(QcTarget::Scp(attempt)) = target {
+        let scp_target = match target {
+            Some(QcTarget::Scp(attempt)) => Some((attempt, None)),
+            Some(QcTarget::ScpOutput { attempt, mv, ma }) => Some((attempt, Some((mv, ma)))),
+            _ => None,
+        };
+        // A stopping run finishes before the same attempt can start again.
+        if let State::Scp(attempt, scp) = &mut self.state
+            && (scp.stopping() || scp_target.is_none_or(|(current, _)| current != *attempt))
+        {
+            let status = scp.stop(now_ms, &mut self.drive, adc, vbus_mv);
+            if status != crate::scp_drive::Status::Stopped {
+                return Status::Scp(*attempt, status);
+            }
+            self.state = State::Releasing(now_ms);
+        }
+        if let Some((attempt, request)) = scp_target {
             if !matches!(self.state, State::Scp(current, _) if current == attempt) {
                 self.state = State::Scp(
                     attempt,
@@ -183,13 +211,9 @@ impl Trigger {
             if let State::Scp(_, scp) = &mut self.state {
                 return Status::Scp(
                     attempt,
-                    scp.update(&mut self.drive, adc, now_ms, lines, vbus_mv),
+                    scp.update(&mut self.drive, adc, now_ms, lines, vbus_mv, request),
                 );
             }
-        }
-        if matches!(self.state, State::Scp(..)) {
-            self.drive.set(None, None);
-            self.state = State::Releasing(now_ms);
         }
         let dm_mv = lines.map(|lines| lines.dm_mv);
         let state = core::mem::replace(&mut self.state, State::Off);
@@ -349,7 +373,7 @@ impl Trigger {
             (QcTarget::Detect, None) => Voltage::V5,
             (QcTarget::Volts(voltage), _) => voltage,
             // SCP is dispatched before the QC state machine is entered.
-            (QcTarget::Scp(_), _) => return State::Off,
+            (QcTarget::Scp(_) | QcTarget::ScpOutput { .. }, _) => return State::Off,
         };
         self.drive.levels(session.request(voltage));
         let follow = vbus_mv.map(|mv| Follow::start(now_ms, mv, voltage.millivolts()));

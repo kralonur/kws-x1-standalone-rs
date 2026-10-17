@@ -536,6 +536,11 @@ const PULSE_MS: u64 = 500;
 const METER_TICK_MS: u64 = 10;
 /// INA226 read pace; a deadline, so a slow frame never queues extra reads.
 const METER_READ_PERIOD: embassy_time::Duration = embassy_time::Duration::from_millis(100);
+/// Line task pace while SCP enters, writes, refreshes or stops. Chosen:
+/// each step may block for one ~30 ms SCP transaction, and this gap lets
+/// the display and buttons run between them. VBUS still updates only every
+/// INA226 conversion (64 averages of 1.1 ms bus + shunt, about 141 ms).
+const SCP_STEP_PERIOD: embassy_time::Duration = embassy_time::Duration::from_millis(20);
 /// I2C3 clock in Hz: Fast-mode 400 kHz, the LIS3DH maximum (LIS Table 8);
 /// the FUSB302B (DS Table 14) and INA226 accept faster clocks.
 const I2C3_HZ: u32 = 400_000;
@@ -654,12 +659,12 @@ async fn line_task(mut adc: line_adc::LineAdc, mut trigger: qc_drive::Trigger) {
         reference_sender.send(scan.map(|(_, reference)| reference));
         // The trigger judges requests by the output, read here rather than
         // at the meter page's frame pace.
-        let vbus_mv = match request {
-            Some(_) => read_meter(ina226::BUS_VOLTAGE)
+        let vbus_mv = match request.is_some() || trigger.scp_active() {
+            true => read_meter(ina226::BUS_VOLTAGE)
                 .await
                 .filter(|_| !bus_failed())
                 .map(|raw| u16::try_from(ina226::bus_millivolts(raw)).unwrap_or(u16::MAX)),
-            None => None,
+            false => None,
         };
         let now_ms = Instant::now().as_millis();
         let status = trigger.update(now_ms, request, lines, vbus_mv, &mut adc);
@@ -671,7 +676,12 @@ async fn line_task(mut adc: line_adc::LineAdc, mut trigger: qc_drive::Trigger) {
             SCP_RESULT.sender().send((attempt, terminal));
         }
         status_sender.send(status);
-        Timer::after(METER_READ_PERIOD).await;
+        Timer::after(if trigger.scp_busy() {
+            SCP_STEP_PERIOD
+        } else {
+            METER_READ_PERIOD
+        })
+        .await;
     }
 }
 
@@ -717,6 +727,8 @@ async fn button_task(
     let mut orientation_updates = ORIENTATION.anon_receiver();
     let mut sensed_rotation = Orientation::Normal;
     let mut rotation = saved.rotation;
+    // A PD restart must not race an SCP control transaction or shutdown.
+    let mut restart_pending = false;
     let mut previous = Instant::now();
     let mut gap = WindowPeak::new(&BUTTON_GAP_MS);
     loop {
@@ -754,15 +766,17 @@ async fn button_task(
                 navigation.fail_probe();
                 navigation.finish_scan(QcFindings::Failed(failure))
             }
-            Some(qc_drive::Status::Scp(attempt, scp_drive::Status::Detected(_))) => {
+            Some(qc_drive::Status::Scp(attempt, scp_drive::Status::Detected(adapter))) => {
+                navigation.set_scp_adapter(attempt, adapter);
                 navigation.finish_scp(attempt, true)
             }
             Some(qc_drive::Status::Scp(attempt, scp_drive::Status::Failed(_))) => {
+                navigation.fail_scp_output(attempt);
                 navigation.finish_scp(attempt, false)
             }
             _ => None,
         };
-        let (input, command) = navigation.update(raw);
+        let (input, command) = navigation.update(if restart_pending { 0 } else { raw });
         let command = scan_end.or(command);
         rotation = input.settings.rotation;
         // Save once a value is no longer being changed, and before a restart
@@ -776,6 +790,19 @@ async fn button_task(
                 changed
             });
         }
+        if command == Some(firmware_core::buttons::PdCommand::Restart) {
+            restart_pending = true;
+        }
+        let command = if restart_pending {
+            if matches!(qc_updates.try_get(), Some(qc_drive::Status::Scp(..))) {
+                None
+            } else {
+                restart_pending = false;
+                Some(firmware_core::buttons::PdCommand::Restart)
+            }
+        } else {
+            command
+        };
         // The PD session drains these between transactions; a full queue
         // drops the press, as a missed tap would.
         if let Some(command) = command {
@@ -1280,10 +1307,26 @@ async fn meter_task(
                     ui::draw_scp(
                         &mut Canvas(frame),
                         &header,
-                        probing,
-                        qc_mode(latest_observation()),
-                        input.settings.scp_findings.or(carried_scp),
-                        result,
+                        &ui::Scp {
+                            probing,
+                            mode: qc_mode(latest_observation()),
+                            findings: input.settings.scp_findings.or(carried_scp),
+                            status: match qc_status {
+                                qc_drive::Status::Scp(attempt, status)
+                                    if attempt == input.scp_attempt =>
+                                {
+                                    Some(status)
+                                }
+                                _ => result,
+                            },
+                            selection: input.scp_selection,
+                            focus: match input.page {
+                                Page::Open(button_logic::Open::ScpSet(focus)) => Some(focus),
+                                _ => None,
+                            },
+                            active: matches!(input.trigger, Some(QcTarget::ScpOutput { .. })),
+                            reading: reading(last_raw_v, last_raw_i, input.settings.calibration),
+                        },
                     );
                 }
                 View::Qc2(preview) => {

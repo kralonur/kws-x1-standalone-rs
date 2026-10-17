@@ -216,7 +216,7 @@ pub enum Tab {
     Qc2,
     /// Quick Charge 3.0 continuous mode.
     Qc3,
-    /// Read-only SCP adapter identification.
+    /// SCP adapter identification and explicit output control.
     Scp,
     /// A detail list shown from row `top`.
     Detail { page: Detail, top: u16 },
@@ -342,6 +342,8 @@ pub enum Open {
     Qc3,
     /// The read-only SCP probe runs until a result or Back.
     Scp,
+    /// Preview SCP voltage, then current; a final OK applies the request.
+    ScpSet(PpsFocus),
     /// Left/Right scroll the list, shown from row `top`.
     Detail { page: Detail, top: u16 },
     /// Left/Right change what the graph plots, or its window.
@@ -360,7 +362,7 @@ impl Open {
             Self::Probe(page) => page.tab(),
             Self::Qc2(_) => Tab::Qc2,
             Self::Qc3 => Tab::Qc3,
-            Self::Scp => Tab::Scp,
+            Self::Scp | Self::ScpSet(_) => Tab::Scp,
             Self::Detail { page, top } => Tab::Detail { page, top },
             Self::Graph(_) => Tab::Graph,
             Self::Ripple(_) => Tab::Ripple,
@@ -572,6 +574,12 @@ pub enum QcTarget {
     Volts(Voltage),
     /// Read-only SCP uses the same exclusive line owner as QC.
     Scp(u8),
+    /// Explicit standalone output request; never used by automatic scans.
+    ScpOutput {
+        attempt: u8,
+        mv: u16,
+        ma: u16,
+    },
     /// Quick Charge 3.0 continuous mode, stepping toward this output in mV.
     Steps(u16),
     /// Try each request in turn and report which the charger followed.
@@ -736,6 +744,7 @@ impl Page {
                 Open::Qc2(preview) => View::Qc2(Some(preview)),
                 Open::Qc3 => View::Qc3 { adjusting: true },
                 Open::Scp => View::Scp { probing: true },
+                Open::ScpSet(_) => View::Scp { probing: false },
                 Open::Detail { page, top } => View::Detail {
                     page,
                     top,
@@ -837,6 +846,8 @@ pub struct Input {
     pub trigger: Option<QcTarget>,
     /// Probe generation: stale completion from the preceding attempt is ignored.
     pub scp_attempt: u8,
+    /// This attachment's volatile output preview; never restored from settings.
+    pub scp_selection: Option<crate::scp::Selection>,
     /// What the graph plots and how far back it reaches; this boot only.
     pub graph_trace: GraphTrace,
     pub graph_window: GraphWindow,
@@ -928,7 +939,7 @@ impl Navigation {
     pub fn set_selectable(&mut self, selectable: bool) {
         self.selectable = selectable;
         self.input.pd_active = selectable;
-        if selectable && self.input.page == Page::Open(Open::Scp) {
+        if selectable && matches!(self.input.page, Page::Open(Open::Scp | Open::ScpSet(_))) {
             self.input.page = Page::Tabs(Tab::Scp);
         }
         if selectable {
@@ -1025,11 +1036,28 @@ impl Navigation {
         }
         self.input.settings.qc_findings = Some(findings);
         self.input.settings.scp_findings = None;
+        self.input.scp_selection = None;
         self.input.settings.resume = Some(Screen::Scp);
         self.input.scp_attempt = self.input.scp_attempt.wrapping_add(1);
         self.input.trigger = None;
         self.input.page = Page::Open(Open::Scp);
         None
+    }
+
+    /// Accept ratings only from the current explicit detection attempt.
+    pub fn set_scp_adapter(&mut self, attempt: u8, adapter: scp_protocol::Adapter) {
+        if attempt == self.input.scp_attempt && self.input.page == Page::Open(Open::Scp) {
+            self.input.scp_selection = crate::scp::Selection::new(adapter);
+        }
+    }
+
+    /// A failed output ends its request, releasing the lines: OK starts a
+    /// new one, never an automatic retry.
+    pub fn fail_scp_output(&mut self, attempt: u8) {
+        if matches!(self.input.trigger, Some(QcTarget::ScpOutput { attempt: current, .. }) if current == attempt)
+        {
+            self.input.trigger = None;
+        }
     }
 
     /// Keep SCP evidence, never treating a failed read as proof of absence.
@@ -1217,6 +1245,13 @@ impl Navigation {
             wizard.hold_ok(self.mean);
             return Some(None);
         }
+        if self.input.page == Page::Tabs(Tab::Scp) && !self.selectable && !self.input.passthrough {
+            self.input.trigger = None;
+            self.input.scp_selection = None;
+            self.input.scp_attempt = self.input.scp_attempt.wrapping_add(1);
+            self.input.page = Page::Open(Open::Scp);
+            return Some(None);
+        }
         let Some(Tab::Detail { page, .. }) = self.input.page.tab() else {
             return None;
         };
@@ -1250,8 +1285,14 @@ impl Navigation {
             Page::Groups(Tab::Overview) => Page::Settings(SettingsFocus::default()),
             Page::Groups(_) | Page::Settings(SettingsFocus::Row(_)) => Page::default(),
             Page::Settings(focus) => Page::Settings(SettingsFocus::Row(focus.row())),
+            Page::Tabs(Tab::Scp)
+                if matches!(self.input.trigger, Some(QcTarget::ScpOutput { .. })) =>
+            {
+                self.input.trigger = None;
+                Page::Tabs(Tab::Scp)
+            }
             Page::Tabs(tab) => Page::Groups(tab),
-            Page::Open(Open::Scp) => {
+            Page::Open(Open::Scp | Open::ScpSet(_)) => {
                 self.input.trigger = None;
                 Page::Tabs(Tab::Scp)
             }
@@ -1306,6 +1347,11 @@ impl Navigation {
                     } else {
                         mv.saturating_sub(STEP_MV).max(MIN_MV)
                     };
+                }
+            }
+            Page::Open(Open::ScpSet(focus)) => {
+                if let Some(selection) = &mut input.scp_selection {
+                    selection.step(*focus == PpsFocus::Voltage, forward, repeat);
                 }
             }
             // Probes run until a result or Back.
@@ -1391,8 +1437,12 @@ impl Navigation {
             Page::Tabs(Tab::Qc2) if !self.selectable => (QcPage::Qc2.open(input), None),
             Page::Tabs(Tab::Qc3) if !self.selectable => (QcPage::Qc3.open(input), None),
             Page::Tabs(Tab::Scp) if !self.selectable => {
-                input.scp_attempt = input.scp_attempt.wrapping_add(1);
-                (Page::Open(Open::Scp), None)
+                if input.scp_selection.is_some() {
+                    (Page::Open(Open::ScpSet(PpsFocus::Voltage)), None)
+                } else {
+                    input.scp_attempt = input.scp_attempt.wrapping_add(1);
+                    (Page::Open(Open::Scp), None)
+                }
             }
             // A PD contract hides Quick Charge: restart into a silent boot,
             // back on this tab.
@@ -1414,6 +1464,20 @@ impl Navigation {
             Page::Open(Open::Qc2(preview)) => {
                 input.trigger = preview.target();
                 (Page::Tabs(Tab::Qc2), None)
+            }
+            Page::Open(Open::ScpSet(PpsFocus::Voltage)) => {
+                (Page::Open(Open::ScpSet(PpsFocus::Current)), None)
+            }
+            Page::Open(Open::ScpSet(PpsFocus::Current)) => {
+                if let Some(selection) = input.scp_selection {
+                    let output = selection.output();
+                    input.trigger = Some(QcTarget::ScpOutput {
+                        attempt: input.scp_attempt,
+                        mv: output.millivolts(),
+                        ma: output.milliamps(),
+                    });
+                }
+                (Page::Tabs(Tab::Scp), None)
             }
             page @ Page::Open(Open::Probe(_) | Open::Scp) => (page, None),
             Page::Open(open @ (Open::Qc3 | Open::Detail { .. } | Open::Graph(_))) => {

@@ -76,8 +76,16 @@ keeps that phase and QC evidence through source restarts. Without PD, both
 probes finish directly on Charger info. The final PD/cable part also asks
 for the EPR offer and shows the carried results once.
 
-SCP has no register-write API: only type 0x7E and legacy 0x80/0x81 reads are
-allowed. A ping alone is not identification. The adapter verifies 5 V before
+Detection is read-only: only the type registers (0x7E, legacy 0x80/0x81)
+and the rating registers (0x90–0x97, 0x9C) are read. Register writes exist
+only in the explicit output session, started by a confirmed request on the
+SCP page and never by a scan. It writes only the control, watchdog,
+boundary and setpoint registers, keeps D+ and temperature protection on,
+reads every write back, never retries a write, and ends on any mismatch,
+fault or missed setpoint by releasing the lines to the charger's D+
+protection and 2 s watchdog. A stop restores ordinary output mode and holds
+the lines from Quick Charge until VBUS is back at 5 V, for at most 4 s.
+A ping alone is not identification. The adapter verifies 5 V before
 entry, checks its D+ drive at 2.6–3.0 V and D− idle low before transmitting,
 and verifies 5 V after releasing the lines. The opposite D+ resistor-pair
 encoding is not assumed correct: the ADC gate must validate it each attempt.
@@ -93,13 +101,16 @@ are interrupt-guarded. No other pin is reconfigured.
 
 The portable PHY uses a DWT-derived microsecond clock, not the millisecond
 Embassy tick. Transmit overruns, slow samples, invalid sync, ping, parity,
-CRC or ACK fail without an automatic retry and release the data line.
+CRC or ACK get up to three attempts per register, each after a 100 UI idle
+gap or a completed closing ping, then fail; every attempt releases the data
+line. A NACK is an answer and is not retried.
 Only valid programmable-adapter type responses produce an SCP finding.
 The compact finding uses the two formerly reserved settings bits with a
 new record tag (0x5f). The QC-only 0x5e records retain their field positions
 and remain readable; old records with foreign evidence bits or a foreign
 resume screen are rejected, not mislabelled as SCP confirmation. `SCP detected, 5V`
-on the overview means verified capability, not an SCP output contract.
+on the overview means verified capability; an applied output shows its
+setpoint instead.
 
 The Quick Charge 3.0 steps on its page go up to 12 V, or 20 V after a
 probe found Class B, and enter and leave continuous mode through a 5 V

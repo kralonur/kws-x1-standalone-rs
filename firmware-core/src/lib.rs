@@ -15,6 +15,7 @@ pub mod latch;
 pub mod panel;
 pub mod power_history;
 pub mod ripple;
+pub mod scp;
 pub mod settings;
 pub mod spectrum;
 pub mod stack;

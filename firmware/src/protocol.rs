@@ -8,6 +8,7 @@
 use crate::line_adc::LineVoltages;
 use crate::pd::{self, Observation};
 use crate::qc_drive::Status;
+use crate::scp_drive::DEFAULT_VBUS_MV;
 use crate::ui::Protocol;
 use firmware_core::dcp::{self, Driven};
 use firmware_core::settings::{QcFindings, ScpFindings};
@@ -50,15 +51,13 @@ pub fn identify(sources: &Sources<'_>) -> Protocol {
                 })
         })
         .or_else(|| {
-            // Application display window around default 5 V. Never label a
-            // raised, unnegotiated output as an SCP contract from old evidence.
-            const DEFAULT_MIN_MV: u32 = 4_500;
-            const DEFAULT_MAX_MV: u32 = 5_500;
-            (sources.scp == Some(ScpFindings::Confirmed)
-                && sources
-                    .vbus_mv
-                    .is_some_and(|mv| (DEFAULT_MIN_MV..=DEFAULT_MAX_MV).contains(&mv)))
-            .then_some(Protocol::ScpDetected)
+            // Never label a raised, unnegotiated output as an SCP contract.
+            let at_default = sources
+                .vbus_mv
+                .and_then(|mv| u16::try_from(mv).ok())
+                .is_some_and(|mv| DEFAULT_VBUS_MV.contains(&mv));
+            (sources.scp == Some(ScpFindings::Confirmed) && at_default)
+                .then_some(Protocol::ScpDetected)
         })
         .or(type_c.filter(|protocol| *protocol != Protocol::TypeC { ma: 0 }))
         .or_else(|| {
@@ -81,6 +80,16 @@ pub fn identify(sources: &Sources<'_>) -> Protocol {
 /// is not.
 fn own_quick_charge(qc: Status) -> Option<Protocol> {
     match qc {
+        Status::Scp(
+            _,
+            crate::scp_drive::Status::Output {
+                output,
+                applied: true,
+            },
+        ) => Some(Protocol::Scp {
+            mv: output.millivolts(),
+            ma: output.milliamps(),
+        }),
         Status::Active(_, Some(Outcome::Ignored)) => None,
         Status::Active(voltage, _) => Some(Protocol::Qc2 {
             mv: voltage.millivolts(),

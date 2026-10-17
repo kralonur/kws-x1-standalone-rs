@@ -683,10 +683,16 @@ fn scp(canvas: &mut Canvas) -> Result<()> {
     ui::draw_scp(
         canvas,
         &tabs(Tab::Scp, Level::Tabs, false, &mut strip),
-        false,
-        QcMode::Plain,
-        Some(firmware_core::settings::ScpFindings::Confirmed),
-        Some(scp_drive::Status::Detected(scp_fixture_adapter())),
+        &ui::Scp {
+            probing: false,
+            mode: QcMode::Plain,
+            findings: Some(firmware_core::settings::ScpFindings::Confirmed),
+            status: Some(scp_drive::Status::Detected(scp_fixture_adapter())),
+            selection: firmware_core::scp::Selection::new(scp_fixture_adapter()),
+            focus: None,
+            active: false,
+            reading: None,
+        },
     );
     Ok(())
 }

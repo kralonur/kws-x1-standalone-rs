@@ -96,8 +96,9 @@ This is **kws-x1-standalone-rs**.
   Quick Charge 3.0 0.2 V steps from 3.6 V, checked against VBUS, and a probe
   that reports Quick Charge 2.0 or 3.0 and Class A or B. On USB-C the meter
   switches the charger out of PD for it by itself.
-- Experimental, read-only SCP detection: checked adapter-type register reads,
-  retained Charger-info results and a dedicated SCP page. No output control.
+- Experimental SCP: checked adapter-type and rating register reads, retained
+  Charger-info results, and an explicit SCP page that can set the output
+  voltage and current limit within the charger's reported ratings.
 - A full charger scan (hold OK on the charger page): Quick Charge, SCP, the PD
   offer, the EPR offer and, with the plug in the charger, the 5 A offer, on
   one page.
@@ -117,8 +118,8 @@ This is **kws-x1-standalone-rs**.
 
 What this firmware does **not** do, for now:
 
-- **SCP identification only, experimental and hardware-untested.** No SCP
-  voltage/current selection or authentication; only whitelisted type reads.
+- **SCP is experimental and hardware-untested.** No authentication; output
+  control is only an explicit request on the SCP page, never automatic.
   AFC, FCP and other protocols are not triggered. Beyond PD, QC and verified
   SCP detection, the overview names the Type-C current
   advertisement, the fixed D+/D- voltages some ports use to tell their
@@ -225,7 +226,7 @@ point the way it flows (they follow the screen rotation).
 
 | Page | Shows | Buttons |
 | ---- | ----- | ------- |
-| **Overview** | voltage, current, power; the highest of each since boot while a live page shows (`MAX`); protocol (`USB`, `TYPE-C`, `PD 2.0`, `PD 3.0`, `PPS`, `AVS`, `QC 2.0`, `QC 3.0`, `DIVIDER`, `1.2V DCP`, `BC1.2`) with the CC pin and contract; flow chevrons; a heartbeat dot | hold OK: reset `MAX`; Back: settings |
+| **Overview** | voltage, current, power; the highest of each since boot while a live page shows (`MAX`); protocol (`USB`, `TYPE-C`, `PD 2.0`, `PD 3.0`, `PPS`, `AVS`, `QC 2.0`, `QC 3.0`, `FCP/SCP`, `SCP`, `DIVIDER`, `1.2V DCP`, `BC1.2`) with the CC pin and contract; flow chevrons; a heartbeat dot | hold OK: reset `MAX`; Back: settings |
 | **Lines** | D+, D-, CC1 and CC2 voltages | |
 | **Energy** | charge (Ah), energy (Wh) and the time since the last reset; how the totals are kept | hold OK: reset the totals |
 | **Graph** | power, voltage or current over the last 1, 2, 5 or 10 minutes; the latest second's and the window's highest voltage, current and power | OK, Left/Right choose power, voltage or current, OK, Left/Right change the window, OK done; Back closes; hold OK: clear the graph |
@@ -235,7 +236,7 @@ point the way it flows (they follow the screen rotation).
 | **AVS** | the charger's SPR AVS ranges, the set voltage and the current the meter asks for at it, the live output; `ACTIVE` or `NOT APPLIED`; with PD off for QC/SCP only `LEGACY MODE` | OK, Left/Right voltage (100 mV, 500 mV held), OK requests; in `LEGACY MODE` OK switches back to PD |
 | **QC 2.0** | 5, 9, 12 and 20 V and `OFF`, the voltages the charger ignored greyed out, the status on its row; under a PD contract only `PD MODE` | OK tests the charger, then opens at 5 V with the choice open (under a PD contract it first switches the charger out of PD); Left/Right choose, OK requests and closes the choice, Back closes it; the request stays in force on other screens until `OFF` |
 | **QC 3.0** | the step range, the set voltage, VBUS, D+ and D−; under a PD contract only `PD MODE` | OK tests the charger, then starts continuous mode at 5 V (under a PD contract it first switches the charger out of PD); Left/Right move it by 0.2 V (repeats held); OK or Back closes it; the steps stay in force on other screens until `OFF` on QC 2.0 |
-| **SCP** | experimental read-only identification; no voltage/current request | OK tests adapter-type registers; Back cancels; PD must stop first |
+| **SCP** | experimental identification, then the set voltage and current limit, the live output; `ACTIVE`, `SETTING`, `STOPPING` or `FAILED` | OK tests adapter-type registers; after a detection with ratings, OK, Left/Right voltage, OK, current limit, OK applies; Back stops the output; hold OK: rescan; PD must stop first |
 | **PD Session** | sink: session state, CC levels and the charger's offer as received. Passthrough: CC pin, Rp level and the latest PD messages | OK to scroll |
 | **Charger** | the offer (`*` = needs a 5 A cable), the charger's identity, maker and peak ratings, power status and source info, a power bank's battery, QC and experimental SCP results | OK to scroll; hold OK: full scan (Quick Charge, SCP identification, PD, EPR, and the 5 A cable test with the plug in the charger) |
 | **Cable** | the cable's e-marker: a readable summary (type, speed, rating, length, alt modes, maker), identity, ratings, status and modes | OK to scroll; hold OK to read the e-marker (drops to fixed 5 V first) |
@@ -366,6 +367,14 @@ use in the `PROTOCOL` strip along the bottom. The meter starts on it.
   - `QC 2.0` / `QC 3.0` again: Quick Charge another device drives, read from
     D+/D-. A raised request counts once the output moved past halfway to
     it; continuous mode shows `continuous`.
+  - `FCP/SCP`: single-wire data another device sends on D- (`D- data`).
+    FCP and SCP share one physical layer, so line voltages cannot tell
+    them apart, and nothing is register-verified.
+  - `SCP`: this meter's read-only SCP check verified the charger's type
+    registers and VBUS is at the default 5 V (`detected, 5V`). It is
+    evidence of support, not an SCP output contract. Once this meter's SCP
+    output is applied and followed, `SCP` shows its setpoint and current
+    limit instead (e.g. `9.00V 2.00A`).
   - `TYPE-C`: Type-C current advertisement without PD (1.5 A or 3 A).
   - `DIVIDER`: a port telling its current by fixed D+/D- voltages (TI
     TPS2514 datasheet, section 8.3.3): D+ 2 V and D- 2.7 V for a 5 W adapter
@@ -1118,11 +1127,36 @@ outside the firmware. It is not yet known.
 
 ## SCP identification (experimental)
 
+<img src="pictures/scp_screen.webp" width="480" alt="SCP screen">
+
 Open **Trigger → SCP** and press OK. Under PD, the first OK switches to a
 PD-silent boot; press OK on SCP again to test. The probe performs BC1.2 entry,
 checks its D+ drive against 2.6–3.0 V, then reads adapter type 0x7E, with
-0x80/0x81 fallback when appropriate. No voltage/current or authentication
-registers can be written by this implementation. Back stops the probe.
+0x80/0x81 fallback when appropriate, and the read-only rating registers
+(voltage and current ranges, steps and rated power). Each read gets up to
+three attempts. Rated power is shown only when the charger reports it. Back
+stops the probe.
+
+### Output control
+
+When the charger reports complete ratings (voltage and current ranges, both
+steps and rated power), OK on the SCP page opens the setpoint: Left/Right
+change the voltage by the reported step (five steps held), OK moves to the
+current limit, and a final OK applies it. Nothing is written before that
+OK. The meter then re-enters SCP, re-reads the ratings, checks the request
+against them, the rated power and its own 4–30 V / 5 A envelope, and enables
+protocol output mode with D+ and temperature protection left on and a 2 s
+watchdog. Current is lowered before a voltage change and raised only after
+it. Every write is read back and never retried. The session is refreshed
+every 500 ms.
+
+The output counts as `ACTIVE` once VBUS is within 5% of the setpoint; it
+must get there within 2 s and stay there. A missed setpoint, protection or
+mode loss, readback mismatch or failed transaction ends the request and
+releases the lines, so the charger's D+ protection and watchdog return it to
+5 V; OK starts a new request. Back restores ordinary output mode and releases
+the lines, which pass to Quick Charge only once VBUS is back at 5 V or 4 s
+have passed. No authentication registers are written.
 
 Charger info retains the result; the overview says `SCP` / `detected, 5V`
 only with confirmed evidence at default VBUS, not as an active SCP power
