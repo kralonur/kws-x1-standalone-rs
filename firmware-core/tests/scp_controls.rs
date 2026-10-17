@@ -170,11 +170,11 @@ fn scp_selection_honors_steps_power_and_platform_envelope() {
     let adapter = output_adapter();
     let mut selection = Selection::new(adapter).unwrap();
     for _ in 0..100 {
-        selection.step(true, true, true);
+        selection.step(true, true, 100);
     }
     assert_eq!(selection.output().millivolts(), 11_000);
     for _ in 0..100 {
-        selection.step(false, true, false);
+        selection.step(false, true, 50);
     }
     assert_eq!(selection.output().milliamps(), 3_150);
     assert!(followed(selection.output(), 11_200));
@@ -188,8 +188,8 @@ fn scp_selection_honors_steps_power_and_platform_envelope() {
     cap.max_power_dw = Some(1_270);
     let mut selection = Selection::new(wide).unwrap();
     for _ in 0..300 {
-        selection.step(true, true, true);
-        selection.step(false, true, true);
+        selection.step(true, true, 100);
+        selection.step(false, true, 250);
         let output = selection.output();
         assert!(output.millivolts() <= MAX_MV);
         assert!(output.milliamps() <= MAX_MA);
@@ -309,4 +309,22 @@ fn passive_single_wire_pulses_do_not_flicker_qc3_and_steady_qc_still_settles() {
         tracker.update(3_400, 600, 3_200, Some(7_000)),
         Some(Driven::Qc3)
     );
+}
+
+// A held arrow must repeat on the SCP editor as it does on PPS; it once
+// moved only on release, one step per press.
+#[test]
+fn held_arrow_repeats_on_scp_voltage() {
+    use firmware_core::buttons::{POLL_MS, RIGHT};
+    let mut nav = Navigation::new(Page::Tabs(Tab::Scp), Settings::default());
+    let scanning = tap(&mut nav, OK);
+    nav.set_scp_adapter(scanning.scp_attempt, output_adapter());
+    nav.finish_scp(scanning.scp_attempt, true);
+    tap(&mut nav, OK);
+    for _ in 0..1_000 / POLL_MS {
+        nav.update(RIGHT);
+    }
+    let held = tap(&mut nav, 0);
+    // Six 100 mV repeats from 0.5 s, none on release.
+    assert!(held.scp_selection.unwrap().output().millivolts() >= 6_000);
 }

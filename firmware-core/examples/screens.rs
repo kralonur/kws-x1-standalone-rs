@@ -1008,6 +1008,22 @@ mod tests {
     use firmware_core::settings::ScpFindings;
 
     #[test]
+    fn charger_keeps_pd_query_tabs_and_asks_for_pd_without_an_offer() {
+        let mut observation = Observation::new();
+        observation.spr = Some(SprObservation::pending());
+        observation.phase = Phase::NoCapabilities;
+        assert_eq!(pd::partner_sections(observation), 5);
+        for section in pd::CAPABILITY_SECTIONS..pd::CAPABILITY_SECTIONS + 3 {
+            let rows = pd::partner_lines(observation, section);
+            let text = String::from_utf8(rows.into_iter().flatten().collect()).unwrap();
+            assert!(text.contains("CHARGER MUST SUPPORT PD"));
+            assert!(!text.contains("WAITING"));
+        }
+        // A real PD offer must still expose its identity/status sections.
+        assert_eq!(pd::partner_sections(five_volt_session()), 5);
+    }
+
+    #[test]
     fn scp_display_distinguishes_evidence_from_an_output_contract() {
         for (findings, expected) in [
             (None, "NOT TESTED YET"),

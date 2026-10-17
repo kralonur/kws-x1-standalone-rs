@@ -10,8 +10,6 @@ pub const MAX_MV: u16 = 30_000;
 pub const MAX_MA: u16 = 5_000;
 /// Initial current-limit preview, in mA. This is a default, not a ceiling.
 const INITIAL_MA: u16 = 1_000;
-/// Held arrows advance five advertised steps, matching the PPS selector.
-const REPEAT_STEPS: u16 = 5;
 /// Application VBUS acceptance tolerance, ±5% of the requested voltage.
 /// Unlike QC's halfway heuristic, an SCP output must reach its setpoint.
 const VBUS_TOLERANCE_PERCENT: u32 = 5;
@@ -43,7 +41,9 @@ impl Selection {
         self.adapter
     }
 
-    pub fn step(&mut self, voltage: bool, forward: bool, repeat: bool) {
+    /// Move the voltage (mV) or current limit (mA) by at least `amount`,
+    /// in whole advertised steps and never less than one.
+    pub fn step(&mut self, voltage: bool, forward: bool, amount: u16) {
         let Some(cap) = self.adapter.capabilities else {
             return;
         };
@@ -51,7 +51,7 @@ impl Selection {
         else {
             return;
         };
-        let times = if repeat { REPEAT_STEPS } else { 1 };
+        let times = amount.div_ceil(step).max(1);
         let current = if voltage {
             self.output.millivolts()
         } else {

@@ -171,7 +171,7 @@ What this firmware does **not** do, for now:
 
 | Button | Short press | Hold |
 | ------ | ----------- | ---- |
-| Left / Right | previous / next group, or tab once in a group's tabs; on a framed value, change it; while scrolling, scroll | repeats on PPS, AVS and QC 3.0 values and while scrolling |
+| Left / Right | previous / next group, or tab once in a group's tabs; on a framed value, change it; while scrolling, scroll | held, repeats wherever it changes a value or scrolls; moving between groups and tabs stays one step per press |
 | OK | go into the group's tabs; on a tab, select, confirm, scroll or start (see each page) | 0.5 s: page action (cable query, full charger scan); on Overview, Energy and Graph, a fill sweeps left to right and resets the page once full (about 1 s); let go earlier to cancel |
 | Back | up one level: cancel the edit or scroll, leave the tabs; from a group, back to the overview; on the overview, open the settings | – |
 
@@ -236,7 +236,7 @@ point the way it flows (they follow the screen rotation).
 | **AVS** | the charger's SPR AVS ranges, the set voltage and the current the meter asks for at it, the live output; `ACTIVE` or `NOT APPLIED`; with PD off for QC/SCP only `LEGACY MODE` | OK, Left/Right voltage (100 mV, 500 mV held), OK requests; in `LEGACY MODE` OK switches back to PD |
 | **QC 2.0** | 5, 9, 12 and 20 V and `OFF`, the voltages the charger ignored greyed out, the status on its row; under a PD contract only `PD MODE` | OK tests the charger, then opens at 5 V with the choice open (under a PD contract it first switches the charger out of PD); Left/Right choose, OK requests and closes the choice, Back closes it; the request stays in force on other screens until `OFF` |
 | **QC 3.0** | the step range, the set voltage, VBUS, D+ and D−; under a PD contract only `PD MODE` | OK tests the charger, then starts continuous mode at 5 V (under a PD contract it first switches the charger out of PD); Left/Right move it by 0.2 V (repeats held); OK or Back closes it; the steps stay in force on other screens until `OFF` on QC 2.0 |
-| **SCP** | experimental identification, then the set voltage and current limit, the live output; `ACTIVE`, `SETTING`, `STOPPING` or `FAILED` | OK tests adapter-type registers; after a detection with ratings, OK, Left/Right voltage, OK, current limit, OK applies; Back stops the output; hold OK: rescan; PD must stop first |
+| **SCP** | experimental identification, then the set voltage and current limit, the live output; `ACTIVE`, `SETTING`, `STOPPING` or `FAILED` | OK tests adapter-type registers; after a detection with ratings, OK, Left/Right voltage (20 mV, 100 mV held), OK, current limit (50 mA, 250 mA held), OK applies; Back stops the output; hold OK: rescan; PD must stop first |
 | **PD Session** | sink: session state, CC levels and the charger's offer as received. Passthrough: CC pin, Rp level and the latest PD messages | OK to scroll |
 | **Charger** | the offer (`*` = needs a 5 A cable), the charger's identity, maker and peak ratings, power status and source info, a power bank's battery, QC and experimental SCP results | OK to scroll; hold OK: full scan (Quick Charge, SCP identification, PD, EPR, and the 5 A cable test with the plug in the charger) |
 | **Cable** | the cable's e-marker: a readable summary (type, speed, rating, length, alt modes, maker), identity, ratings, status and modes | OK to scroll; hold OK to read the e-marker (drops to fixed 5 V first) |
@@ -824,6 +824,10 @@ but a new normal attachment does not inherit a previous charger's SCP proof.
 
 **`IDENTITY`**
 
+`IDENTITY`, `PEAKS AND MAKER` and `POWER STATUS` are the charger's answers
+to PD queries, so a charger that made no PD offer shows `CHARGER MUST
+SUPPORT PD` in each.
+
 - `REV:3.1 V1.8`: the charger's PD revision and version.
 - `EXT CAPS:` the outcome of asking for its extended capabilities.
 - `VID:---- PID:----`: USB vendor and product ID.
@@ -1141,8 +1145,9 @@ stops the probe.
 
 When the charger reports complete ratings (voltage and current ranges, both
 steps and rated power), OK on the SCP page opens the setpoint: Left/Right
-change the voltage by the reported step (five steps held), OK moves to the
-current limit, and a final OK applies it. Nothing is written before that
+change the voltage like PPS (20 mV, 100 mV held, rounded up to whole
+reported steps), OK moves to the current limit (50 mA, 250 mA held), and a
+final OK applies it. Nothing is written before that
 OK. The meter then re-enters SCP, re-reads the ratings, checks the request
 against them, the rated power and its own 4–30 V / 5 A envelope, and enables
 protocol output mode with D+ and temperature protection left on and a 2 s

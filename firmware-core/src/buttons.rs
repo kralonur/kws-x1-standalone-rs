@@ -131,6 +131,16 @@ impl Page {
             tab => Self::Tabs(tab),
         }
     }
+
+    /// A held Left/Right repeats wherever it changes a value or scrolls.
+    /// Moving between groups or tabs and the capture toggle stay one step
+    /// per press, so a hold never flies past a screen or flickers a toggle.
+    fn repeats(self) -> bool {
+        !matches!(
+            self,
+            Self::Groups(_) | Self::Tabs(_) | Self::Open(Open::Ripple(RippleFocus::Capture))
+        )
+    }
 }
 
 /// The page groups, in Left/Right order.
@@ -1129,11 +1139,7 @@ impl Navigation {
             self.held += 1;
             if self.held >= REPEAT_DELAY_SAMPLES
                 && (self.held - REPEAT_DELAY_SAMPLES).is_multiple_of(REPEAT_SAMPLES)
-                && matches!(
-                    self.input.page,
-                    Page::Open(Open::Pps(_) | Open::Avs | Open::Qc3 | Open::Detail { .. })
-                        | Page::Settings(SettingsFocus::Calibrate(_))
-                )
+                && self.input.page.repeats()
             {
                 self.repeated = true;
                 command = self.step(left_right == RIGHT, true);
@@ -1349,9 +1355,18 @@ impl Navigation {
                     };
                 }
             }
+            // SCP moves by at least the PPS amounts, rounded up to whole
+            // advertised steps, so both editors feel the same.
             Page::Open(Open::ScpSet(focus)) => {
+                let voltage = *focus == PpsFocus::Voltage;
+                let amount = match (voltage, repeat) {
+                    (true, false) => PPS_MV_STEP,
+                    (true, true) => PPS_MV_REPEAT,
+                    (false, false) => PPS_MA_STEP,
+                    (false, true) => PPS_MA_REPEAT,
+                };
                 if let Some(selection) = &mut input.scp_selection {
-                    selection.step(*focus == PpsFocus::Voltage, forward, repeat);
+                    selection.step(voltage, forward, amount.unsigned_abs());
                 }
             }
             // Probes run until a result or Back.

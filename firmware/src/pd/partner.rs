@@ -2,14 +2,30 @@
 
 use super::{Observation, decimal3, decimal4, hex, hex8, put};
 
-/// Sections of the charger list: with a PD session the capabilities (two
+/// Sections of the charger list: with a sink session the capabilities (two
 /// sections, the second often empty), the three answer sections and, for a
 /// Source that reports a Battery, a battery section; else one.
 pub fn partner_sections(observation: Observation) -> u32 {
-    match observation.spr.filter(|_| observation.sniff.is_none()) {
-        Some(spr) => CAPABILITY_SECTIONS + 3 + u32::from(reports_battery(spr.partner)),
-        None => 1,
+    if !in_session(observation) {
+        return 1;
     }
+    CAPABILITY_SECTIONS + 3 + u32::from(partner_info(observation).is_some_and(reports_battery))
+}
+
+/// The meter runs its own sink session rather than listening.
+fn in_session(observation: Observation) -> bool {
+    observation.spr.is_some() && observation.sniff.is_none()
+}
+
+/// Startup creates a session placeholder even for a non-PD charger. Its
+/// pending information queries are not meaningful until a PD offer arrives.
+fn partner_info(observation: Observation) -> Option<firmware_core::pd_partner::PartnerInfo> {
+    observation
+        .spr
+        .filter(|_| {
+            in_session(observation) && observation.capabilities.is_some_and(|caps| caps.count > 0)
+        })
+        .map(|spr| spr.partner)
 }
 
 /// The Source's extended capabilities report a Battery, so the battery
@@ -42,11 +58,15 @@ pub fn partner_lines(observation: Observation, page: u32) -> [[u8; 24]; 8] {
             _ => b"BATTERY",
         },
     );
-    let Some(spr) = observation.spr.filter(|_| observation.sniff.is_none()) else {
+    if !in_session(observation) {
         put(&mut rows[1], b"NO PD SESSION");
         return rows;
+    }
+    // A charger without a PD offer cannot answer these queries.
+    let Some(partner) = partner_info(observation) else {
+        put(&mut rows[1], b"CHARGER MUST SUPPORT PD");
+        return rows;
     };
-    let partner = spr.partner;
     match sub {
         2 => return status_rows(rows, partner),
         3 => return battery_rows(rows, partner),
