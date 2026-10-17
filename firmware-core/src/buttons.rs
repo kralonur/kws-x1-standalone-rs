@@ -8,7 +8,7 @@
 use crate::calibration::{Calibration, Mean, Wizard};
 use crate::power_history::{GraphTrace, GraphWindow};
 use crate::ripple::{Scale as RippleScale, Timebase as RippleTimebase};
-use crate::settings::{Item, NextBoot, QcFindings, Screen, Settings};
+use crate::settings::{Item, NextBoot, QcFindings, ScpFindings, Screen, Settings};
 use qc_protocol::detect::Report;
 use qc_protocol::qc2::Voltage;
 use qc_protocol::qc3::{MIN_MV, STEP_MV};
@@ -145,21 +145,22 @@ pub enum Group {
 }
 
 /// The most tabs a group has.
-pub const MAX_TABS: usize = 5;
+pub const MAX_TABS: usize = 6;
 
 impl Group {
     pub const ALL: [Self; 3] = [Self::Monitor, Self::Trigger, Self::Info];
 
     /// The group's tabs, in Left/Right order.
     const fn tabs(self) -> &'static [Tab] {
-        const MONITOR: [Tab; MAX_TABS] = [
+        const MONITOR: [Tab; 5] = [
             Tab::Overview,
             Tab::Lines,
             Tab::Energy,
             Tab::Graph,
             Tab::Ripple,
         ];
-        const TRIGGER: [Tab; MAX_TABS] = [Tab::Fixed, Tab::Pps, Tab::Avs, Tab::Qc2, Tab::Qc3];
+        const TRIGGER: [Tab; MAX_TABS] =
+            [Tab::Fixed, Tab::Pps, Tab::Avs, Tab::Qc2, Tab::Qc3, Tab::Scp];
         const INFO: [Tab; 4] = [
             Tab::detail(Detail::Pd),
             Tab::detail(Detail::Charger),
@@ -215,6 +216,8 @@ pub enum Tab {
     Qc2,
     /// Quick Charge 3.0 continuous mode.
     Qc3,
+    /// Read-only SCP adapter identification.
+    Scp,
     /// A detail list shown from row `top`.
     Detail { page: Detail, top: u16 },
 }
@@ -234,6 +237,7 @@ impl From<Tab> for Screen {
             Tab::Avs => Self::Avs,
             Tab::Qc2 => Self::Qc2,
             Tab::Qc3 => Self::Qc3,
+            Tab::Scp => Self::Scp,
             Tab::Detail { page, .. } => match page {
                 Detail::Pd => Self::PdDetails,
                 Detail::Charger => Self::Charger,
@@ -256,6 +260,7 @@ impl From<Screen> for Tab {
             Screen::Avs => Self::Avs,
             Screen::Qc2 => Self::Qc2,
             Screen::Qc3 => Self::Qc3,
+            Screen::Scp => Self::Scp,
             Screen::PdDetails => Self::detail(Detail::Pd),
             Screen::Charger => Self::detail(Detail::Charger),
             Screen::Cable => Self::detail(Detail::Cable),
@@ -275,7 +280,9 @@ impl Tab {
             Self::Overview | Self::Graph | Self::Lines | Self::Energy | Self::Ripple => {
                 Group::Monitor
             }
-            Self::Fixed | Self::Pps | Self::Avs | Self::Qc2 | Self::Qc3 => Group::Trigger,
+            Self::Fixed | Self::Pps | Self::Avs | Self::Qc2 | Self::Qc3 | Self::Scp => {
+                Group::Trigger
+            }
             Self::Detail { .. } => Group::Info,
         }
     }
@@ -333,6 +340,8 @@ pub enum Open {
     Qc2(Qc2Choice),
     /// Left/Right move the Quick Charge 3.0 steps' target.
     Qc3,
+    /// The read-only SCP probe runs until a result or Back.
+    Scp,
     /// Left/Right scroll the list, shown from row `top`.
     Detail { page: Detail, top: u16 },
     /// Left/Right change what the graph plots, or its window.
@@ -351,6 +360,7 @@ impl Open {
             Self::Probe(page) => page.tab(),
             Self::Qc2(_) => Tab::Qc2,
             Self::Qc3 => Tab::Qc3,
+            Self::Scp => Tab::Scp,
             Self::Detail { page, top } => Tab::Detail { page, top },
             Self::Graph(_) => Tab::Graph,
             Self::Ripple(_) => Tab::Ripple,
@@ -386,6 +396,9 @@ pub enum View {
     },
     /// The previewed row, while choosing.
     Qc2(Option<Qc2Choice>),
+    Scp {
+        probing: bool,
+    },
     /// The Quick Charge probe runs, on either Quick Charge tab.
     Probe,
     /// Whether Left/Right move the target.
@@ -403,7 +416,10 @@ pub enum View {
 impl View {
     /// A Quick Charge tab, which shows the trigger and D+/D−.
     pub const fn quick_charge(self) -> bool {
-        matches!(self, Self::Qc2(_) | Self::Qc3 { .. } | Self::Probe)
+        matches!(
+            self,
+            Self::Qc2(_) | Self::Qc3 { .. } | Self::Probe | Self::Scp { .. }
+        )
     }
 
     /// The line voltages are read here: shown, or on the overview used to
@@ -554,6 +570,8 @@ impl QcOffer {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QcTarget {
     Volts(Voltage),
+    /// Read-only SCP uses the same exclusive line owner as QC.
+    Scp(u8),
     /// Quick Charge 3.0 continuous mode, stepping toward this output in mV.
     Steps(u16),
     /// Try each request in turn and report which the charger followed.
@@ -703,6 +721,7 @@ impl Page {
                 Tab::Avs => View::Avs { adjusting: false },
                 Tab::Qc2 => View::Qc2(None),
                 Tab::Qc3 => View::Qc3 { adjusting: false },
+                Tab::Scp => View::Scp { probing: false },
                 Tab::Detail { page, top } => View::Detail {
                     page,
                     top,
@@ -716,6 +735,7 @@ impl Page {
                 Open::Probe(_) => View::Probe,
                 Open::Qc2(preview) => View::Qc2(Some(preview)),
                 Open::Qc3 => View::Qc3 { adjusting: true },
+                Open::Scp => View::Scp { probing: true },
                 Open::Detail { page, top } => View::Detail {
                     page,
                     top,
@@ -799,6 +819,8 @@ pub struct Input {
     pub page: Page,
     /// The PD controller only listens (passthrough mode, chosen at boot).
     pub passthrough: bool,
+    /// A live PD session excludes every legacy line request.
+    pub pd_active: bool,
     pub settings: Settings,
     /// Reset request counters: the meter task clears the overview's peaks,
     /// the graph's history or the energy totals when one changes.
@@ -813,6 +835,8 @@ pub struct Input {
     /// tabs show; `None` leaves D+/D− undriven. A PD contract (the charger
     /// then ignores Quick Charge), passthrough or a restart clears it.
     pub trigger: Option<QcTarget>,
+    /// Probe generation: stale completion from the preceding attempt is ignored.
+    pub scp_attempt: u8,
     /// What the graph plots and how far back it reaches; this boot only.
     pub graph_trace: GraphTrace,
     pub graph_window: GraphWindow,
@@ -827,10 +851,19 @@ impl Input {
     /// What the Quick Charge trigger asks of the charger now: the probe
     /// while it is shown, else the request in force.
     pub fn qc_request(self) -> Option<QcTarget> {
+        if self.passthrough || self.pd_active {
+            return None;
+        }
         match self.page {
             Page::Open(Open::Probe(_)) => Some(QcTarget::Detect),
+            Page::Open(Open::Scp) => Some(QcTarget::Scp(self.scp_attempt)),
             _ => self.trigger,
         }
+    }
+
+    pub fn scp_scanning(self) -> bool {
+        matches!(self.settings.next_boot, NextBoot::ScanQuickCharge { .. })
+            && self.settings.resume == Some(Screen::Scp)
     }
 
     /// The reset request counter a completed OK hold on the shown tab
@@ -894,6 +927,10 @@ impl Navigation {
     /// PD and PPS pages only show the offer, and an open selection closes.
     pub fn set_selectable(&mut self, selectable: bool) {
         self.selectable = selectable;
+        self.input.pd_active = selectable;
+        if selectable && self.input.page == Page::Open(Open::Scp) {
+            self.input.page = Page::Tabs(Tab::Scp);
+        }
         if selectable {
             self.input.trigger = None;
         }
@@ -968,38 +1005,63 @@ impl Navigation {
     /// This boot runs the full scan's Quick Charge part, which keeps the
     /// probe on screen until it ends; Back abandons the scan.
     fn scanning(&self) -> bool {
-        self.silent
-            && matches!(
-                self.input.settings.next_boot,
-                NextBoot::ScanQuickCharge { .. }
-            )
+        matches!(
+            self.input.settings.next_boot,
+            NextBoot::ScanQuickCharge { .. }
+        )
     }
 
     /// Finish a Charger-page test: return directly without PD, or keep the
     /// full scan's findings and restart into its PD part.
     pub fn finish_scan(&mut self, findings: QcFindings) -> Option<PdCommand> {
-        if self.input.page == Page::Open(Open::Probe(QcPage::Charger)) {
-            self.input.trigger = None;
-            self.input.page = Page::Tabs(Tab::detail(Detail::Charger));
+        let local = self.input.page == Page::Open(Open::Probe(QcPage::Charger));
+        if self.input.scp_scanning() || (!local && !self.scanning()) {
             return None;
         }
-        if !self.scanning() {
+        if local {
+            self.input.settings.next_boot = NextBoot::ScanQuickCharge {
+                then_cable_test: false,
+            };
+        }
+        self.input.settings.qc_findings = Some(findings);
+        self.input.settings.scp_findings = None;
+        self.input.settings.resume = Some(Screen::Scp);
+        self.input.scp_attempt = self.input.scp_attempt.wrapping_add(1);
+        self.input.trigger = None;
+        self.input.page = Page::Open(Open::Scp);
+        None
+    }
+
+    /// Keep SCP evidence, never treating a failed read as proof of absence.
+    pub fn finish_scp(&mut self, attempt: u8, verified: bool) -> Option<PdCommand> {
+        if self.input.scp_attempt != attempt || self.input.page != Page::Open(Open::Scp) {
             return None;
         }
-        let settings = &mut self.input.settings;
-        let NextBoot::ScanQuickCharge { then_cable_test } = settings.next_boot else {
+        self.input.settings.scp_findings = Some(if verified {
+            ScpFindings::Confirmed
+        } else {
+            ScpFindings::Unverified
+        });
+        self.input.trigger = None;
+        if !self.input.scp_scanning() {
+            self.input.page = Page::Tabs(Tab::Scp);
+            return None;
+        }
+        let NextBoot::ScanQuickCharge { then_cable_test } = self.input.settings.next_boot else {
             return None;
         };
-        settings.qc_findings = Some(findings);
-        let boot = if then_cable_test {
+        let boot = if !self.silent {
+            NextBoot::Normal
+        } else if then_cable_test {
             NextBoot::CableTest
         } else {
             NextBoot::ScanPd
         };
-        // The PD part ends on the charger page, which says why a test did
-        // not run.
-        settings.set_next_boot(boot, Some(Screen::Charger));
-        Some(PdCommand::Restart)
+        self.input
+            .settings
+            .set_next_boot(boot, Some(Screen::Charger));
+        self.input.page = Page::Tabs(Tab::detail(Detail::Charger));
+        self.silent.then_some(PdCommand::Restart)
     }
 
     /// The last row the shown detail list can start at; a list that got
@@ -1085,7 +1147,9 @@ impl Navigation {
                 command = Some(PdCommand::Restart);
             } else if self.scanning() {
                 self.input.settings.set_next_boot(NextBoot::Normal, None);
-                command = Some(PdCommand::Restart);
+                self.input.trigger = None;
+                self.input.page = Page::Tabs(Tab::detail(Detail::Charger));
+                command = self.silent.then_some(PdCommand::Restart);
             } else {
                 self.back();
             }
@@ -1100,7 +1164,9 @@ impl Navigation {
             command = command.filter(|c| matches!(c, PdCommand::QueryEpr | PdCommand::Restart));
         }
         // The scan's Quick Charge part keeps its probe on screen.
-        if self.scanning() {
+        if self.input.scp_scanning() {
+            self.input.page = Page::Open(Open::Scp);
+        } else if self.scanning() {
             self.input.page = Page::Open(Open::Probe(QcPage::Qc2));
         }
         if let Some(tab) = self.input.page.tab() {
@@ -1185,6 +1251,10 @@ impl Navigation {
             Page::Groups(_) | Page::Settings(SettingsFocus::Row(_)) => Page::default(),
             Page::Settings(focus) => Page::Settings(SettingsFocus::Row(focus.row())),
             Page::Tabs(tab) => Page::Groups(tab),
+            Page::Open(Open::Scp) => {
+                self.input.trigger = None;
+                Page::Tabs(Tab::Scp)
+            }
             Page::Open(Open::Probe(QcPage::Charger)) => {
                 self.input.trigger = None;
                 Page::Tabs(Tab::detail(Detail::Charger))
@@ -1238,8 +1308,8 @@ impl Navigation {
                     };
                 }
             }
-            // The probe runs until it ends or Back.
-            Page::Open(Open::Probe(_)) => {}
+            // Probes run until a result or Back.
+            Page::Open(Open::Probe(_) | Open::Scp) => {}
             // A held capture cannot be re-timed: a new timebase runs live.
             Page::Open(Open::Ripple(RippleFocus::Time)) => {
                 let all = RippleTimebase::ALL;
@@ -1320,9 +1390,13 @@ impl Navigation {
             Page::Tabs(Tab::Avs) => (Page::Open(Open::Avs), Some(PdCommand::AvsVoltage(0))),
             Page::Tabs(Tab::Qc2) if !self.selectable => (QcPage::Qc2.open(input), None),
             Page::Tabs(Tab::Qc3) if !self.selectable => (QcPage::Qc3.open(input), None),
+            Page::Tabs(Tab::Scp) if !self.selectable => {
+                input.scp_attempt = input.scp_attempt.wrapping_add(1);
+                (Page::Open(Open::Scp), None)
+            }
             // A PD contract hides Quick Charge: restart into a silent boot,
             // back on this tab.
-            page @ Page::Tabs(tab @ (Tab::Qc2 | Tab::Qc3)) => {
+            page @ Page::Tabs(tab @ (Tab::Qc2 | Tab::Qc3 | Tab::Scp)) => {
                 input
                     .settings
                     .set_next_boot(NextBoot::QuickCharge, Some(tab.into()));
@@ -1341,7 +1415,7 @@ impl Navigation {
                 input.trigger = preview.target();
                 (Page::Tabs(Tab::Qc2), None)
             }
-            page @ Page::Open(Open::Probe(_)) => (page, None),
+            page @ Page::Open(Open::Probe(_) | Open::Scp) => (page, None),
             Page::Open(open @ (Open::Qc3 | Open::Detail { .. } | Open::Graph(_))) => {
                 (Page::Tabs(open.tab()), None)
             }

@@ -70,6 +70,9 @@ mod line_adc {
         pub cc2_mv: u16,
     }
 }
+#[path = "../../firmware/src/scp_drive/status.rs"]
+#[allow(dead_code)]
+mod scp_drive;
 mod qc_drive {
     use qc_protocol::detect::{Outcome, Report, Stage};
     use qc_protocol::qc2::{Failure, Voltage};
@@ -85,6 +88,7 @@ mod qc_drive {
         Stepping(u16),
         Detecting(Stage),
         Detected(Report),
+        Scp(u8, crate::scp_drive::Status),
     }
 }
 mod energy_store {
@@ -424,8 +428,10 @@ fn overview_page(
             protocol: identify(&Sources {
                 observation,
                 lines: None,
+                driven: None,
                 qc: QcStatus::Off,
                 findings: None,
+                scp: None,
                 vbus_mv: Some(reading.mv),
             }),
             cc: pd::attached_cc(observation),
@@ -654,6 +660,51 @@ fn qc2(canvas: &mut Canvas) -> Result<()> {
     Ok(())
 }
 
+/// Experimental SCP layout fixtures, not hardware measurements.
+fn scp_fixture_adapter() -> scp_protocol::Adapter {
+    scp_protocol::Adapter {
+        modes: scp_protocol::Modes::Both,
+        type0: Some(0xb8),
+        type1: None,
+        capabilities: Some(scp_protocol::Capabilities {
+            min_mv: 5_500,
+            max_mv: 11_000,
+            min_ma: 1_000,
+            max_ma: 3_000,
+            vstep_mv: Some(20),
+            istep_ma: Some(50),
+            max_power_dw: Some(330),
+        }),
+    }
+}
+
+fn scp(canvas: &mut Canvas) -> Result<()> {
+    let mut strip = Vec::new();
+    ui::draw_scp(
+        canvas,
+        &tabs(Tab::Scp, Level::Tabs, false, &mut strip),
+        false,
+        QcMode::Plain,
+        Some(firmware_core::settings::ScpFindings::Confirmed),
+        Some(scp_drive::Status::Detected(scp_fixture_adapter())),
+    );
+    Ok(())
+}
+
+fn charger_scp(canvas: &mut Canvas) -> Result<()> {
+    detail(
+        canvas,
+        Detail::Charger,
+        false,
+        [ui::scp_charger_lines(
+            Some(firmware_core::settings::ScpFindings::Confirmed),
+            Some(scp_drive::Status::Detected(scp_fixture_adapter())),
+        )],
+        0,
+    );
+    Ok(())
+}
+
 /// QC 3.0 photo: stepped to 7.00 V, the output reading 7.07 V.
 fn qc3(canvas: &mut Canvas) -> Result<()> {
     let mut strip = Vec::new();
@@ -745,6 +796,7 @@ fn charger(canvas: &mut Canvas) -> Result<()> {
                 (0..ui::qc_charger_sections(None))
                     .map(|section| ui::qc_charger_lines(None, QcMode::Pd, section)),
             )
+            .chain(core::iter::once(ui::scp_charger_lines(None, None)))
             .chain((offer..partner).map(|section| pd::partner_lines(observation, section))),
         0,
     );
@@ -913,7 +965,7 @@ fn main() -> Result<()> {
             .nth(1)
             .context("usage: screens <output directory>")?,
     );
-    let pages: [(&str, Draw); 19] = [
+    let pages: [(&str, Draw); 21] = [
         ("overview_screen", overview),
         ("lines_screen", lines),
         ("energy_screen", energy),
@@ -924,6 +976,8 @@ fn main() -> Result<()> {
         ("avs_screen", avs_page),
         ("qc2_screen", qc2),
         ("qc3_screen", qc3),
+        ("scp_screen", scp),
+        ("charger_scp_screen", charger_scp),
         ("pd_session_screen", pd_session),
         ("charger_screen", charger),
         ("cable_screen", cable),
@@ -940,4 +994,42 @@ fn main() -> Result<()> {
         save(&directory, name, &canvas)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use firmware_core::settings::ScpFindings;
+
+    #[test]
+    fn scp_display_distinguishes_evidence_from_an_output_contract() {
+        for (findings, expected) in [
+            (None, "NOT TESTED YET"),
+            (Some(ScpFindings::Unverified), "SUPPORT NOT DETERMINED"),
+            (Some(ScpFindings::Confirmed), "TYPE REGISTER VERIFIED"),
+        ] {
+            let rows = ui::scp_charger_lines(findings, None);
+            let text = String::from_utf8(rows.into_iter().flatten().collect()).unwrap();
+            assert!(text.contains("EXPERIMENTAL READ-ONLY"));
+            assert!(text.contains(expected));
+            assert!(!text.contains("NOT SUPPORTED"));
+        }
+        let observation = Observation::new();
+        let mut sources = Sources {
+            observation: &observation,
+            lines: None,
+            driven: None,
+            qc: QcStatus::Off,
+            findings: None,
+            scp: Some(ScpFindings::Confirmed),
+            vbus_mv: Some(5_000),
+        };
+        assert_eq!(identify(&sources), ui::Protocol::ScpDetected);
+        sources.vbus_mv = Some(9_000);
+        assert_ne!(identify(&sources), ui::Protocol::ScpDetected);
+        let pd = five_volt_session();
+        sources.observation = &pd;
+        sources.vbus_mv = Some(5_000);
+        assert!(matches!(identify(&sources), ui::Protocol::Pd { .. }));
+    }
 }

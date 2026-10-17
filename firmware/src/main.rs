@@ -27,6 +27,7 @@ mod pd_task;
 mod pd_trial;
 mod protocol;
 mod qc_drive;
+mod scp_drive;
 
 mod pd_service;
 mod pd_sniff;
@@ -58,7 +59,7 @@ use firmware_core::buttons as button_logic;
 use firmware_core::calibration::{Average, Calibration, Mean};
 use firmware_core::energy::{Totals, Tracker};
 use firmware_core::power_history::{self, History};
-use firmware_core::settings::{NextBoot, QcFindings, Rotation, Screen};
+use firmware_core::settings::{NextBoot, QcFindings, Rotation, ScpFindings, Screen};
 use hc32f460_pac::interrupt;
 use panel::Orientation;
 #[cfg(not(any(feature = "pd-boot-diagnostic", feature = "cable-log")))]
@@ -329,6 +330,8 @@ static LINE_VOLTAGES: Watch<CriticalSectionRawMutex, Option<line_adc::LineVoltag
 static ADC_REFERENCE: Watch<CriticalSectionRawMutex, Option<u16>, 1> = Watch::new();
 /// Quick Charge trigger state: `line_task` sends it, `meter_task` draws it.
 static QC_STATUS: Watch<CriticalSectionRawMutex, qc_drive::Status, 1> = Watch::new();
+// Terminal SCP evidence must survive a fast transition back to an idle driver.
+static SCP_RESULT: Watch<CriticalSectionRawMutex, (u8, scp_drive::Status), 1> = Watch::new();
 /// The meter's averaged raw reading: `meter_task` sends it, the button task
 /// hands it to the calibration steps.
 static METER_MEAN: Watch<CriticalSectionRawMutex, Option<Mean>, 1> = Watch::new();
@@ -659,7 +662,15 @@ async fn line_task(mut adc: line_adc::LineAdc, mut trigger: qc_drive::Trigger) {
             None => None,
         };
         let now_ms = Instant::now().as_millis();
-        status_sender.send(trigger.update(now_ms, request, lines.map(|l| l.dm_mv), vbus_mv));
+        let status = trigger.update(now_ms, request, lines, vbus_mv, &mut adc);
+        if let qc_drive::Status::Scp(
+            attempt,
+            terminal @ (scp_drive::Status::Detected(_) | scp_drive::Status::Failed(_)),
+        ) = status
+        {
+            SCP_RESULT.sender().send((attempt, terminal));
+        }
+        status_sender.send(status);
         Timer::after(METER_READ_PERIOD).await;
     }
 }
@@ -742,6 +753,12 @@ async fn button_task(
             Some(qc_drive::Status::Failed(failure)) => {
                 navigation.fail_probe();
                 navigation.finish_scan(QcFindings::Failed(failure))
+            }
+            Some(qc_drive::Status::Scp(attempt, scp_drive::Status::Detected(_))) => {
+                navigation.finish_scp(attempt, true)
+            }
+            Some(qc_drive::Status::Scp(attempt, scp_drive::Status::Failed(_))) => {
+                navigation.finish_scp(attempt, false)
             }
             _ => None,
         };
@@ -876,8 +893,8 @@ const UPPER_MISSING_IDLE_S: u64 = 3600;
 #[embassy_executor::task]
 async fn meter_task(
     mut backlight: embassy_hc32::pwm::TimerA4Pwm,
-    // The full scan's Quick Charge result, carried into its PD part.
-    mut qc_findings: Option<QcFindings>,
+    // Legacy results carried into the full scan's PD/cable part.
+    findings: (Option<QcFindings>, Option<ScpFindings>),
     upper_installed: bool,
     saved: firmware_core::settings::Settings,
     mut energy_store: Option<energy_store::Store>,
@@ -885,6 +902,7 @@ async fn meter_task(
     // ADC1's clock in Hz for the nominal ripple timebase; `None` without a capture.
     ripple_clock_hz: Option<u32>,
 ) {
+    let (mut qc_findings, carried_scp) = findings;
     let fb = framebuffer();
     let mut input_updates = BUTTON_STATE.anon_receiver();
     let mut input = button_logic::Input {
@@ -911,12 +929,16 @@ async fn meter_task(
     let mut last_raw_i: Option<u16> = None;
     let mut line_updates = LINE_VOLTAGES.anon_receiver();
     let mut lines = None;
+    let mut passive_lines = firmware_core::dcp::Passive::default();
+    let mut driven = None;
     let mut ripple_updates = RIPPLE.anon_receiver();
     let mut ripple_reading: Option<firmware_core::ripple::Reading> = None;
     let mut reference_updates = ADC_REFERENCE.anon_receiver();
     let mut ripple_reference = None;
     let mut qc_updates = QC_STATUS.anon_receiver();
     let mut qc_status = qc_drive::Status::Off;
+    let mut scp_updates = SCP_RESULT.anon_receiver();
+    let mut scp_status = None;
     // Peaks follow the meter page's reads; a reset hold on the overview
     // clears them.
     let mut peaks = ui::Peaks::default();
@@ -1095,8 +1117,10 @@ async fn meter_task(
             dirty |= view == View::Energy;
         }
 
+        let mut line_scanned = false;
         if let Some(update) = line_updates.try_changed() {
             lines = update;
+            line_scanned = true;
             changed |= view.shows_lines();
         }
         // Freeze the reference together with the capture, so supply updates
@@ -1114,6 +1138,10 @@ async fn meter_task(
             ripple_reading = update;
             changed |= view == View::Ripple;
         }
+        if let Some(update) = scp_updates.try_changed() {
+            scp_status = Some(update);
+            dirty = true;
+        }
         if let Some(update) = qc_updates.try_changed() {
             qc_status = update;
             qc_findings = match update {
@@ -1122,6 +1150,27 @@ async fn meter_task(
                 _ => qc_findings,
             };
             changed |= view.quick_charge();
+        }
+        if qc_status != qc_drive::Status::Off {
+            passive_lines.reset();
+            if driven.take().is_some() {
+                dirty |= view == View::Overview;
+            }
+        } else if line_scanned {
+            let vbus_mv = reading(last_raw_v, last_raw_i, input.settings.calibration).map(|r| r.mv);
+            let next = match lines {
+                Some(lines) => {
+                    passive_lines.update(now.as_millis(), lines.dp_mv, lines.dm_mv, vbus_mv)
+                }
+                None => {
+                    passive_lines.reset();
+                    None
+                }
+            };
+            if next != driven {
+                driven = next;
+                dirty |= view == View::Overview;
+            }
         }
 
         let secs = now.as_secs() as u32;
@@ -1153,9 +1202,9 @@ async fn meter_task(
             let frame = unsafe { &mut *(fb as *mut Frame) };
             let mut tabs = [Tab::default(); MAX_TABS];
             let header = header(page, input.passthrough, &mut tabs);
+            render::clear(frame);
             match view {
                 View::Overview => {
-                    render::clear(frame);
                     let observation = latest_observation();
                     let reading = reading(last_raw_v, last_raw_i, input.settings.calibration);
                     ui::draw_meter(
@@ -1167,8 +1216,10 @@ async fn meter_task(
                             protocol: protocol::identify(&protocol::Sources {
                                 observation: &observation,
                                 lines,
+                                driven,
                                 qc: qc_status,
                                 findings: qc_findings,
+                                scp: input.settings.scp_findings.or(carried_scp),
                                 vbus_mv: reading.map(|reading| reading.mv),
                             }),
                             cc: pd::attached_cc(&observation),
@@ -1180,7 +1231,6 @@ async fn meter_task(
                     );
                 }
                 View::Graph(focus) => {
-                    render::clear(frame);
                     ui::draw_graph(
                         &mut Canvas(frame),
                         &header,
@@ -1192,7 +1242,6 @@ async fn meter_task(
                     );
                 }
                 View::Energy => {
-                    render::clear(frame);
                     ui::draw_energy(
                         &mut Canvas(frame),
                         &header,
@@ -1203,11 +1252,9 @@ async fn meter_task(
                     );
                 }
                 View::Lines => {
-                    render::clear(frame);
                     ui::draw_lines(&mut Canvas(frame), &header, lines);
                 }
                 View::Ripple => {
-                    render::clear(frame);
                     ui::draw_ripple(
                         &mut Canvas(frame),
                         &header,
@@ -1226,9 +1273,21 @@ async fn meter_task(
                         },
                     );
                 }
+                View::Scp { probing } => {
+                    let result = scp_status
+                        .filter(|(attempt, _)| *attempt == input.scp_attempt)
+                        .map(|(_, status)| status);
+                    ui::draw_scp(
+                        &mut Canvas(frame),
+                        &header,
+                        probing,
+                        qc_mode(latest_observation()),
+                        input.settings.scp_findings.or(carried_scp),
+                        result,
+                    );
+                }
                 View::Qc2(preview) => {
                     let mode = qc_mode(latest_observation());
-                    render::clear(frame);
                     ui::draw_qc2(
                         &mut Canvas(frame),
                         &header,
@@ -1242,12 +1301,10 @@ async fn meter_task(
                     );
                 }
                 View::Probe => {
-                    render::clear(frame);
                     ui::draw_probe(&mut Canvas(frame), &header, qc_status);
                 }
                 View::Qc3 { adjusting } => {
                     let mode = qc_mode(latest_observation());
-                    render::clear(frame);
                     ui::draw_qc3(
                         &mut Canvas(frame),
                         &header,
@@ -1263,7 +1320,6 @@ async fn meter_task(
                     );
                 }
                 View::Fixed { choosing } => {
-                    render::clear(frame);
                     ui::draw_fixed(
                         &mut Canvas(frame),
                         &header,
@@ -1272,7 +1328,6 @@ async fn meter_task(
                     );
                 }
                 View::Pps(focus) => {
-                    render::clear(frame);
                     ui::draw_pps(
                         &mut Canvas(frame),
                         &header,
@@ -1282,7 +1337,6 @@ async fn meter_task(
                     );
                 }
                 View::Avs { adjusting } => {
-                    render::clear(frame);
                     ui::draw_avs(
                         &mut Canvas(frame),
                         &header,
@@ -1292,7 +1346,6 @@ async fn meter_task(
                     );
                 }
                 View::Settings(button_logic::SettingsFocus::Calibrate(wizard)) => {
-                    render::clear(frame);
                     ui::draw_calibration(
                         &mut Canvas(frame),
                         &header,
@@ -1301,7 +1354,6 @@ async fn meter_task(
                     );
                 }
                 View::Settings(focus) => {
-                    render::clear(frame);
                     ui::draw_settings(
                         &mut Canvas(frame),
                         &header,
@@ -1316,7 +1368,6 @@ async fn meter_task(
                     top,
                     scrolling,
                 } => {
-                    render::clear(frame);
                     let observation = detail_observation(last_raw_v, input.settings.calibration);
                     let canvas = &mut Canvas(frame);
                     let view = match detail {
@@ -1336,19 +1387,36 @@ async fn meter_task(
                             let partner = pd::partner_sections(observation);
                             let offer = partner.min(pd::CAPABILITY_SECTIONS);
                             let mode = qc_mode(observation);
+                            let scp = if input.scp_scanning() {
+                                input.settings.scp_findings
+                            } else {
+                                input.settings.scp_findings.or(carried_scp)
+                            };
+                            let qc = input.settings.qc_findings.or(qc_findings);
+                            let qc_sections = ui::qc_charger_sections(qc);
+                            let scp_section = offer + qc_sections;
                             ui::draw_detail(
                                 canvas,
                                 &header,
                                 detail,
-                                (0..offer)
-                                    .map(|section| pd::partner_lines(observation, section))
-                                    .chain((0..ui::qc_charger_sections(qc_findings)).map(
-                                        |section| ui::qc_charger_lines(qc_findings, mode, section),
-                                    ))
-                                    .chain(
-                                        (offer..partner)
-                                            .map(|section| pd::partner_lines(observation, section)),
-                                    ),
+                                (0..partner + qc_sections + 1).map(|section| {
+                                    if section < offer {
+                                        pd::partner_lines(observation, section)
+                                    } else if section < scp_section {
+                                        ui::qc_charger_lines(qc, mode, section - offer)
+                                    } else if section == scp_section {
+                                        ui::scp_charger_lines(
+                                            scp,
+                                            scp_status
+                                                .filter(|(attempt, _)| {
+                                                    *attempt == input.scp_attempt
+                                                })
+                                                .map(|(_, status)| status),
+                                        )
+                                    } else {
+                                        pd::partner_lines(observation, section - qc_sections - 1)
+                                    }
+                                }),
                                 top,
                                 scrolling,
                             )
@@ -1504,7 +1572,21 @@ async fn main(spawner: Spawner) {
     let mut settings = saved.unwrap_or_default();
     let requested = settings.next_boot;
     let resume = settings.resume;
-    let qc_findings = settings.qc_findings.take();
+    let qc_findings = settings.qc_findings;
+    // A normal new attachment must not inherit another charger's SCP proof.
+    // Carry evidence only through the explicitly requested scan continuation.
+    let scp_findings = settings.scp_findings.filter(|_| {
+        matches!(
+            requested,
+            NextBoot::ScanQuickCharge { .. } | NextBoot::ScanPd | NextBoot::CableTest
+        )
+    });
+    // Retain QC across source restarts during the SCP stage. The final
+    // PD/cable boot consumes the results and displays them from RAM.
+    if !matches!(requested, NextBoot::ScanQuickCharge { .. }) {
+        settings.qc_findings = None;
+        settings.scp_findings = None;
+    }
     settings.finish_boot();
     let cleared = store.save(settings);
     SETTINGS_SAVE.sender().send(store.status());
@@ -1677,7 +1759,7 @@ async fn main(spawner: Spawner) {
     spawner.spawn(
         meter_task(
             backlight_pwm,
-            qc_findings,
+            (qc_findings, scp_findings),
             upper_installed,
             settings,
             energy_store,

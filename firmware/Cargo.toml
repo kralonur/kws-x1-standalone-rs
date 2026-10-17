@@ -47,4 +47,5 @@ fusb302-pd.workspace = true
 hc32f460-pac = { workspace = true, features = ["rt"] }
 panic-halt.workspace = true
 qc-protocol.workspace = true
+scp-protocol.workspace = true
 u8g2-fonts.workspace = true

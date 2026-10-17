@@ -4,6 +4,12 @@
 //! DCP", section 8.3.4 and the Electrical Characteristics (section 7.5) at
 //! VIN = 5 V.
 
+use qc_protocol::{
+    detect::{Follow, Outcome},
+    lines::{self, Request},
+    qc2::Voltage,
+};
+
 /// A port's D+/D− signature.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Dcp {
@@ -67,4 +73,124 @@ pub fn read(dp_mv: u16, dm_mv: u16) -> Option<Dcp> {
     .into_iter()
     .find(|(_, dp, dm)| within(dp_mv, *dp) && within(dm_mv, *dm))
     .map(|(dcp, ..)| dcp)
+}
+
+/// CHY100 `VDAT(REF)` bounds in mV: D+ above `DP_ACTIVE_MIN_MV` keeps an
+/// entered handshake open; D− below `DM_LOW_MAX_MV` is pulled low by the
+/// charger's `RDM_DOWN`, and above `DM_PULSE_MIN_MV` is driven above low.
+const DP_ACTIVE_MIN_MV: u16 = 400;
+const DM_LOW_MAX_MV: u16 = 250;
+const DM_PULSE_MIN_MV: u16 = 400;
+/// Hold time in ms before accepting Quick Charge levels or clearing pulse
+/// evidence for a stable divider signature. Application debounce choice:
+/// four nominal 100 ms sampling intervals, not a protocol timing limit.
+const QC_SETTLE_MS: u64 = 400;
+/// Maximum gap in ms from an observed D− low to high, or high to low.
+/// Application heuristic: four nominal 100 ms sampling intervals. This
+/// bounds stale evidence; it does not validate the 160 µs FCP/SCP symbols.
+const SINGLE_WIRE_WINDOW_MS: u64 = 400;
+
+/// Protocol another device drives on D+/D− during passthrough.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Driven {
+    Qc2 {
+        mv: u16,
+    },
+    Qc3,
+    /// Suspected FCP or SCP single-wire traffic from sampled D− transitions.
+    /// Slow voltage sampling neither validates frames nor distinguishes them.
+    SingleWire,
+}
+
+/// Passive D+/D− heuristic separating steady Quick Charge levels from
+/// possible single-wire bursts. Slow sampling can miss bursts entirely.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Passive {
+    dm_low_since_ms: Option<u64>,
+    dm_pulse_since_ms: Option<u64>,
+    dcp_candidate: Option<(Dcp, u64)>,
+    single_wire_latched: bool,
+    qc_candidate: Option<(Driven, u64)>,
+}
+
+impl Passive {
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    pub fn update(
+        &mut self,
+        now_ms: u64,
+        dp_mv: u16,
+        dm_mv: u16,
+        vbus_mv: Option<u32>,
+    ) -> Option<Driven> {
+        if dp_mv <= DP_ACTIVE_MIN_MV {
+            self.reset();
+            return None;
+        }
+        let divider = read(dp_mv, dm_mv);
+        match (self.dcp_candidate, divider) {
+            (Some((previous, since)), Some(current)) if previous == current => {
+                if now_ms.saturating_sub(since) >= QC_SETTLE_MS {
+                    self.reset();
+                    return None;
+                }
+            }
+            (_, Some(current)) => self.dcp_candidate = Some((current, now_ms)),
+            (_, None) => self.dcp_candidate = None,
+        }
+        for since in [&mut self.dm_low_since_ms, &mut self.dm_pulse_since_ms] {
+            if since.is_some_and(|since| now_ms.saturating_sub(since) >= SINGLE_WIRE_WINDOW_MS) {
+                *since = None;
+            }
+        }
+        if dm_mv < DM_LOW_MAX_MV {
+            if self.dm_pulse_since_ms.take().is_some() {
+                self.single_wire_latched = true;
+            }
+            self.dm_low_since_ms = Some(now_ms);
+            self.qc_candidate = None;
+        } else if dm_mv > DM_PULSE_MIN_MV && self.dm_low_since_ms.take().is_some() {
+            self.dm_pulse_since_ms = Some(now_ms);
+        }
+        // A divider-like sample may be a pulse, but is not QC evidence.
+        let instant = if divider.is_none() {
+            instant_quick_charge(dp_mv, dm_mv, vbus_mv)
+        } else {
+            None
+        };
+        match (self.qc_candidate, instant) {
+            (Some((prev, since)), Some(curr)) if prev == curr => {
+                if now_ms.saturating_sub(since) >= QC_SETTLE_MS {
+                    self.single_wire_latched = false;
+                    return Some(curr);
+                }
+            }
+            (Some((Driven::Qc3, since)), None)
+                if divider.is_none()
+                    && dm_mv > DM_PULSE_MIN_MV
+                    && now_ms.saturating_sub(since) >= QC_SETTLE_MS =>
+            {
+                return Some(Driven::Qc3);
+            }
+            (_, Some(curr)) => self.qc_candidate = Some((curr, now_ms)),
+            (_, None) => self.qc_candidate = None,
+        }
+        self.single_wire_latched.then_some(Driven::SingleWire)
+    }
+}
+
+fn instant_quick_charge(dp_mv: u16, dm_mv: u16, vbus_mv: Option<u32>) -> Option<Driven> {
+    match lines::request(dp_mv, dm_mv)? {
+        Request::Continuous => Some(Driven::Qc3),
+        Request::Fixed(Voltage::V5) => None,
+        Request::Fixed(voltage) => {
+            let vbus_mv = u16::try_from(vbus_mv?).unwrap_or(u16::MAX);
+            let from_5v = Follow::start(0, Voltage::V5.millivolts(), voltage.millivolts());
+            (from_5v.poll(0, vbus_mv) == Outcome::Followed).then_some(Driven::Qc2 {
+                mv: voltage.millivolts(),
+            })
+        }
+    }
 }

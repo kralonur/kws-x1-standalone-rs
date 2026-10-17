@@ -94,6 +94,31 @@ impl LineAdc {
         }
     }
 
+    /// Temporarily borrow the idle D− ADC pin as a fast digital receiver.
+    /// The borrow prevents conversions until the saved pin mode is restored.
+    pub fn dm_input(&mut self) -> DmInput<'_> {
+        // SAFETY: this owner already exclusively owns PB0. Only that pin's
+        // control and the shared, interrupt-guarded write lock are accessed.
+        let gpio = unsafe { hc32f460_pac::Gpio::steal() };
+        let saved = gpio.pcrb0().read().bits();
+        // RM 9.4.11: enable the digital input with normal polarity; keep the
+        // output, pull-up and EXTI off. Other pin controls are preserved.
+        with_unlocked(&gpio, |gpio| {
+            gpio.pcrb0().modify(|_, w| {
+                w.ddis().clear_bit();
+                w.inve().clear_bit();
+                w.poute().clear_bit();
+                w.puu().clear_bit();
+                w.inte().clear_bit()
+            });
+        });
+        DmInput {
+            gpio,
+            saved,
+            _adc: core::marker::PhantomData,
+        }
+    }
+
     /// Run one scan, returning line voltages and the reference count for
     /// ripple normalization. `None` on timeout or an unusable reference.
     pub async fn read(&mut self) -> Option<(LineVoltages, u16)> {
@@ -108,6 +133,46 @@ impl LineAdc {
             },
             reference,
         ))
+    }
+}
+
+/// GPIO write-protect key (RM 9.4.10, `PWPR.WP`); `PWPR.WE` set unlocks.
+const GPIO_WRITE_KEY: u8 = 0xa5;
+
+pub struct DmInput<'a> {
+    gpio: hc32f460_pac::Gpio,
+    saved: u16,
+    _adc: core::marker::PhantomData<&'a mut LineAdc>,
+}
+
+impl DmInput<'_> {
+    pub fn high(&self) -> bool {
+        // PB0 is D−.
+        self.gpio.pidrb().read().pin00().bit_is_set()
+    }
+}
+
+/// Run `change` with the GPIO configuration registers unlocked.
+fn with_unlocked(gpio: &hc32f460_pac::Gpio, change: impl FnOnce(&hc32f460_pac::Gpio)) {
+    cortex_m::interrupt::free(|_| {
+        // SAFETY: the key is the documented `WP` value; the critical section
+        // keeps this unlock from interleaving with the HAL's GPIO unlocks.
+        gpio.pwpr()
+            .write(|w| unsafe { w.wp().bits(GPIO_WRITE_KEY) }.we().set_bit());
+        change(gpio);
+        // SAFETY: as above; `WE` clear relocks.
+        gpio.pwpr()
+            .write(|w| unsafe { w.wp().bits(GPIO_WRITE_KEY) });
+    });
+}
+
+impl Drop for DmInput<'_> {
+    fn drop(&mut self) {
+        let saved = self.saved;
+        // SAFETY: restores the exact control word read in `dm_input`.
+        with_unlocked(&self.gpio, |gpio| {
+            gpio.pcrb0().write(|w| unsafe { w.bits(saved) });
+        });
     }
 }
 

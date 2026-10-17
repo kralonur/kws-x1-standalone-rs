@@ -46,6 +46,9 @@ fn non_pd_success_returns_to_charger_without_a_restart_or_voltage_selection() {
     // Match the application's result delivery order.
     nav.finish_probe(REPORT);
     assert_eq!(nav.finish_scan(QcFindings::Detected(REPORT)), None);
+    let input = nav.update(0).0;
+    assert_eq!(input.page, Page::Open(Open::Scp));
+    assert_eq!(nav.finish_scp(input.scp_attempt, true), None);
     let (input, command) = nav.update(0);
     assert_eq!(command, None);
     assert_eq!(input.page, CHARGER);
@@ -59,6 +62,8 @@ fn non_pd_failure_also_returns_to_charger_and_releases_the_probe() {
         let mut nav = local_scan();
         nav.fail_probe();
         assert_eq!(nav.finish_scan(QcFindings::Failed(failure)), None);
+        let input = nav.update(0).0;
+        assert_eq!(nav.finish_scp(input.scp_attempt, false), None);
         let (input, command) = nav.update(0);
         assert_eq!(command, None);
         assert_eq!(input.page, CHARGER);
@@ -95,8 +100,11 @@ fn pd_full_scan_still_restarts_into_its_pd_stage() {
     resumed.set_silent(true, false);
     resumed.update(0);
     resumed.finish_probe(REPORT);
+    assert_eq!(resumed.finish_scan(QcFindings::Detected(REPORT)), None);
+    let input = resumed.update(0).0;
+    assert_eq!(input.page, Page::Open(Open::Scp));
     assert_eq!(
-        resumed.finish_scan(QcFindings::Detected(REPORT)),
+        resumed.finish_scp(input.scp_attempt, true),
         Some(PdCommand::Restart)
     );
     let (input, _) = resumed.update(0);

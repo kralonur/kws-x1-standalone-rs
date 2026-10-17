@@ -136,12 +136,13 @@ pub enum Screen {
     Avs,
     Energy,
     Ripple,
+    Scp,
 }
 
 impl Screen {
     /// Record values, by position; new values go last, so older records
     /// still decode.
-    const ALL: [Self; 13] = [
+    const ALL: [Self; 14] = [
         Self::Overview,
         Self::Lines,
         Self::Fixed,
@@ -155,6 +156,7 @@ impl Screen {
         Self::Avs,
         Self::Energy,
         Self::Ripple,
+        Self::Scp,
     ];
 
     /// 0 for none, else the position in [`Self::ALL`] plus one.
@@ -241,11 +243,39 @@ const RESUME_MASK: u32 = 0b11_1111;
 const _: () = assert!(Screen::ALL.len() <= RESUME_MASK as usize);
 
 /// Brightness uses only the low three bits; energy memory occupies formerly
-/// zero bits 5..3, so old records retain Off. Bits 7..6 remain reserved.
+/// zero bits 5..3, so old records retain Off. SCP findings use bits 7..6;
+/// old records retain an untested result.
 const BRIGHTNESS_MASK: u32 = 0b111;
 const ENERGY_MEMORY_SHIFT: u32 = 3;
 const ENERGY_MEMORY_MASK: u32 = 0b111;
-const RESERVED_MASK: u32 = 0b1100_0000;
+/// Previously reserved settings bits: compact SCP evidence across scan boots.
+const SCP_SHIFT: u32 = 6;
+const SCP_MASK: u32 = 0b11;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScpFindings {
+    Unverified,
+    Confirmed,
+}
+
+impl ScpFindings {
+    fn encode(value: Option<Self>) -> u32 {
+        match value {
+            None => 0,
+            Some(Self::Unverified) => 1,
+            Some(Self::Confirmed) => 2,
+        }
+    }
+
+    fn decode(bits: u32) -> Option<Option<Self>> {
+        match bits {
+            0 => Some(None),
+            1 => Some(Some(Self::Unverified)),
+            2 => Some(Some(Self::Confirmed)),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Settings {
@@ -257,6 +287,8 @@ pub struct Settings {
     /// The full scan's Quick Charge result, for its PD part to show; that
     /// boot clears it.
     pub qc_findings: Option<QcFindings>,
+    /// Read-only SCP adapter identification, carried into the PD/cable boot.
+    pub scp_findings: Option<ScpFindings>,
     /// The screen the next boot opens on; it lasts as long as `next_boot`
     /// (see [`Self::finish_boot`]).
     pub resume: Option<Screen>,
@@ -273,6 +305,7 @@ impl Default for Settings {
             energy_memory: EnergyMemory::Off,
             next_boot: NextBoot::Normal,
             qc_findings: None,
+            scp_findings: None,
             resume: None,
             calibration: Calibration::default(),
         }
@@ -281,7 +314,12 @@ impl Default for Settings {
 
 /// Record tag in the top byte of an encoded settings word, so a blank or
 /// foreign word never decodes.
-const RECORD_TAG: u32 = 0x5e;
+const RECORD_TAG: u32 = 0x5f;
+/// The QC-only layout used tag 0x5e with bits 7..6 reserved and screen IDs
+/// up to 13. Keep reading those records, but do not reinterpret another
+/// experimental layout's evidence or screen ID as an SCP result.
+const LEGACY_RECORD_TAG: u32 = 0x5e;
+const LEGACY_SCREEN_MAX: u32 = 13;
 
 impl Settings {
     /// Restart into `boot`, opening on `resume`.
@@ -343,7 +381,7 @@ impl Settings {
 
     /// Pack into one word: tag in bits 31..24, Quick Charge findings in
     /// 23..19, the next boot in 18..16, the resume screen in 15..10, rotation
-    /// in 9..8, energy memory in 5..3, brightness in 2..0.
+    /// in 9..8, SCP findings in 7..6, energy memory in 5..3, brightness in 2..0.
     /// Earlier records kept the cable test in bit 16 and Quick Charge mode in
     /// 17, which read as the same next boot here.
     pub fn encode(&self) -> u32 {
@@ -360,6 +398,7 @@ impl Settings {
             | next_boot << NEXT_BOOT_SHIFT
             | Screen::encode(self.resume) << RESUME_SHIFT
             | rotation << ROTATION_SHIFT
+            | ScpFindings::encode(self.scp_findings) << SCP_SHIFT
             | (self.energy_memory as u32) << ENERGY_MEMORY_SHIFT
             | u32::from(self.brightness)
     }
@@ -367,8 +406,12 @@ impl Settings {
     /// Unpack a word from [`Self::encode`], with the default calibration;
     /// anything else is `None`.
     pub fn decode(word: u32) -> Option<Self> {
-        if word >> 24 != RECORD_TAG || word & RESERVED_MASK != 0 {
-            return None;
+        match word >> 24 {
+            RECORD_TAG => {}
+            LEGACY_RECORD_TAG
+                if word >> SCP_SHIFT & SCP_MASK == 0
+                    && word >> RESUME_SHIFT & RESUME_MASK <= LEGACY_SCREEN_MAX => {}
+            _ => return None,
         }
         let brightness = (word & BRIGHTNESS_MASK) as u8;
         let energy_memory =
@@ -376,6 +419,7 @@ impl Settings {
         let rotation = *Rotation::ALL.get((word >> ROTATION_SHIFT & ROTATION_MASK) as usize)?;
         let next_boot = *NextBoot::ALL.get((word >> NEXT_BOOT_SHIFT & NEXT_BOOT_MASK) as usize)?;
         let qc_findings = QcFindings::decode(word >> FINDINGS_SHIFT & FINDINGS_MASK)?;
+        let scp_findings = ScpFindings::decode(word >> SCP_SHIFT & SCP_MASK)?;
         let resume = Screen::decode(word >> RESUME_SHIFT & RESUME_MASK)?;
         (usize::from(brightness) < BRIGHTNESS_PERCENT.len()).then_some(Self {
             brightness,
@@ -383,6 +427,7 @@ impl Settings {
             energy_memory,
             next_boot,
             qc_findings,
+            scp_findings,
             resume,
             calibration: Calibration::default(),
         })
@@ -426,6 +471,7 @@ mod tests {
                     },
                     resume: Some(Screen::Energy),
                     qc_findings: Some(QcFindings::Failed(Failure::NoEntry)),
+                    scp_findings: None,
                     calibration: Calibration::default(),
                 };
                 assert_eq!(Settings::decode(settings.encode()), Some(settings));
@@ -433,6 +479,11 @@ mod tests {
         }
         assert!(Settings::decode(0x5e00_003a).is_none());
         assert!(Settings::decode(0x5e00_0042).is_none());
+        assert!(Settings::decode(0x5e00_00c2).is_none());
+        assert_eq!(
+            Settings::decode(0x5f00_0042).map(|s| s.scp_findings),
+            Some(Some(ScpFindings::Unverified))
+        );
     }
 
     #[test]

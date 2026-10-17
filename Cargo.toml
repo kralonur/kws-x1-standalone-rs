@@ -5,6 +5,8 @@ default-members = ["firmware-core", "fusb302-pd"]
 
 [workspace.dependencies]
 lzma-rust2 = "0.22.0"
+# Local detection work; use a reviewed Git revision once published.
+scp-protocol = { path = "../embedded-charging-protocols-rs/scp-protocol" }
 anyhow = "1.0.104"
 clap = "4.6.7"
 hidapi = "2.6.7"

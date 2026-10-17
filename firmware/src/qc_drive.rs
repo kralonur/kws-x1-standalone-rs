@@ -33,6 +33,7 @@ pub enum Status {
     Detecting(Stage),
     /// The probe's findings; 5 V is requested again.
     Detected(Report),
+    Scp(u8, crate::scp_drive::Status),
 }
 
 /// Port B pins driving D+ and D−, each line through a pair, first then
@@ -49,7 +50,7 @@ fn encode(level: Level) -> [GpioLevel; 2] {
 }
 
 /// Owns PB3, PB4, PB8 and PB9.
-struct DataDrive {
+pub(crate) struct DataDrive {
     pins: OutputGroup<4>,
 }
 
@@ -66,10 +67,21 @@ impl DataDrive {
     /// Drive each line to its level, or leave it undriven (`None`). Both
     /// lines change together, well inside the charger's 20 ms minimum
     /// Output Voltage Glitch Filter Time (CHY100 TGLITCH(V)CHANGE).
-    fn set(&mut self, dp: Option<Level>, dm: Option<Level>) {
+    pub(crate) fn set(&mut self, dp: Option<Level>, dm: Option<Level>) {
         let [dp1, dp2] = dp.map_or([None; 2], |level| encode(level).map(Some));
         let [dm1, dm2] = dm.map_or([None; 2], |level| encode(level).map(Some));
         self.pins.drive([dp1, dp2, dm1, dm2]);
+    }
+
+    /// SCP uses the opposite D+ resistor-pair encoding from the 0.6 V
+    /// entry level. The adapter MUST verify 2.6–3.0 V with ADC before sending
+    /// anything: the resistor topology itself is not established. D− uses
+    /// 0/3.3 V digital signaling, released for source replies.
+    pub(crate) fn scp(&mut self, high: Option<bool>) {
+        let dm = high.map(|high| if high { Level::High } else { Level::Low });
+        let [dm1, dm2] = dm.map_or([None; 2], |level| encode(level).map(Some));
+        self.pins
+            .drive([Some(GpioLevel::Low), Some(GpioLevel::High), dm1, dm2]);
     }
 
     /// Drive `(D+, D−)` levels.
@@ -99,6 +111,8 @@ impl DataDrive {
 /// Trigger progress; the handshake must complete before any request.
 enum State {
     Off,
+    Releasing(u64),
+    Scp(u8, crate::scp_drive::Trigger),
     Entering(Handshake),
     Failed(Failure),
     Active {
@@ -155,9 +169,29 @@ impl Trigger {
         &mut self,
         now_ms: u64,
         target: Option<QcTarget>,
-        dm_mv: Option<u16>,
+        lines: Option<crate::line_adc::LineVoltages>,
         vbus_mv: Option<u16>,
+        adc: &mut crate::line_adc::LineAdc,
     ) -> Status {
+        if let Some(QcTarget::Scp(attempt)) = target {
+            if !matches!(self.state, State::Scp(current, _) if current == attempt) {
+                self.state = State::Scp(
+                    attempt,
+                    crate::scp_drive::Trigger::start(now_ms, &mut self.drive),
+                );
+            }
+            if let State::Scp(_, scp) = &mut self.state {
+                return Status::Scp(
+                    attempt,
+                    scp.update(&mut self.drive, adc, now_ms, lines, vbus_mv),
+                );
+            }
+        }
+        if matches!(self.state, State::Scp(..)) {
+            self.drive.set(None, None);
+            self.state = State::Releasing(now_ms);
+        }
+        let dm_mv = lines.map(|lines| lines.dm_mv);
         let state = core::mem::replace(&mut self.state, State::Off);
         self.state = match (state, target) {
             (State::Off, None) => State::Off,
@@ -167,7 +201,12 @@ impl Trigger {
                 self.drive.set(None, None);
                 State::Off
             }
-            (State::Off, Some(_)) => {
+            (State::Releasing(since), Some(_))
+                if now_ms.saturating_sub(since) < crate::scp_drive::RELEASE_MS =>
+            {
+                State::Releasing(since)
+            }
+            (State::Off | State::Releasing(_) | State::Scp(..), Some(_)) => {
                 self.drive.set(Some(Level::Mid), None);
                 State::Entering(Handshake::start(now_ms))
             }
@@ -273,7 +312,8 @@ impl Trigger {
         };
         match &self.state {
             State::Off => Status::Off,
-            State::Entering(_) => Status::Entering,
+            State::Entering(_) | State::Releasing(_) => Status::Entering,
+            State::Scp(attempt, _) => Status::Scp(*attempt, crate::scp_drive::Status::Entering),
             State::Failed(failure) => Status::Failed(*failure),
             State::Active {
                 voltage, outcome, ..
@@ -308,6 +348,8 @@ impl Trigger {
             }
             (QcTarget::Detect, None) => Voltage::V5,
             (QcTarget::Volts(voltage), _) => voltage,
+            // SCP is dispatched before the QC state machine is entered.
+            (QcTarget::Scp(_), _) => return State::Off,
         };
         self.drive.levels(session.request(voltage));
         let follow = vbus_mv.map(|mv| Follow::start(now_ms, mv, voltage.millivolts()));

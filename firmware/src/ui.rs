@@ -17,7 +17,7 @@ use firmware_core::dcp::Dcp;
 use firmware_core::energy::Totals;
 use firmware_core::power_history::{GraphTrace, GraphWindow, History, Sample};
 use firmware_core::settings::{
-    BRIGHTNESS_PERCENT, EnergyMemory, Item, QcFindings, Rotation, Settings,
+    BRIGHTNESS_PERCENT, EnergyMemory, Item, QcFindings, Rotation, ScpFindings, Settings,
 };
 use u8g2_fonts::FontRenderer;
 use u8g2_fonts::fonts;
@@ -158,6 +158,10 @@ pub enum Protocol {
     /// Quick Charge 3.0 continuous mode; `mv` is the output the steps set,
     /// when this meter sends them.
     Qc3 { mv: Option<u16> },
+    /// SCP capability identified by register reads, not an output contract.
+    ScpDetected,
+    /// FCP or SCP data another device sends on D−; not register-verified.
+    SingleWire,
     /// A charging port telling its current by fixed D+/D− voltages.
     Dcp(Dcp),
     /// A BC1.2 dedicated charging port (D+ shorted to D−), as the Quick
@@ -308,6 +312,7 @@ fn tab_style(tab: Tab, passthrough: bool) -> (&'static str, Rgb565) {
         Tab::Avs => ("AVS", YELLOW),
         Tab::Qc2 => ("QC 2.0", ORANGE),
         Tab::Qc3 => ("QC 3.0", CYAN),
+        Tab::Scp => ("SCP", ORANGE),
         Tab::Detail { page, .. } => match page {
             Detail::Pd if passthrough => ("PD SNIFF", GREEN),
             Detail::Pd => ("PD SESSION", GREEN),
@@ -644,6 +649,8 @@ fn protocol_badge(protocol: Protocol) -> (&'static str, Rgb565) {
         Protocol::Avs { .. } => ("AVS", YELLOW),
         Protocol::Qc2 { .. } => ("QC 2.0", ORANGE),
         Protocol::Qc3 { .. } => ("QC 3.0", ORANGE),
+        Protocol::ScpDetected => ("SCP", ORANGE),
+        Protocol::SingleWire => ("FCP/SCP", ORANGE),
         Protocol::Dcp(Dcp::Bias1V2) => ("1.2V DCP", YELLOW),
         Protocol::Dcp(_) => ("DIVIDER", YELLOW),
         Protocol::Bc12 => ("BC1.2", WHITE),
@@ -1280,6 +1287,8 @@ fn status(protocol: Protocol, cc: Option<u8>) -> Label {
             .push(b"A"),
         Protocol::Qc2 { mv } | Protocol::Qc3 { mv: Some(mv) } => label.volts(mv),
         Protocol::Qc3 { mv: None } => label.push(b"continuous"),
+        Protocol::ScpDetected => label.push(b"detected, 5V"),
+        Protocol::SingleWire => label.push(b"D- data"),
         Protocol::Dcp(dcp) => match dcp.milliamps() {
             Some(ma) => label.push(b"5V ").hundredths(ma).push(b"A"),
             None => label.push(b"5V"),
@@ -1680,12 +1689,7 @@ fn pd_mode<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'_>) {
 /// A PD tab while this boot keeps PD silent for Quick Charge: only how to
 /// switch back, as [`pd_mode`] switches to Quick Charge.
 fn qc_mode<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'_>) {
-    notice(
-        target,
-        "QC MODE",
-        "PD is off while Quick Charge runs",
-        ORANGE,
-    );
+    notice(target, "LEGACY MODE", "PD is off for QC / SCP", ORANGE);
     hint(target, header, "< > tabs  OK switch back to PD");
 }
 
@@ -1721,10 +1725,231 @@ fn qc2_pill(status: Status, request: Voltage) -> Option<(Voltage, &'static str, 
         Status::Active(voltage, Some(Outcome::Waiting)) => (voltage, "SETTING", ORANGE),
         Status::Active(voltage, Some(Outcome::Ignored)) => (voltage, "IGNORED", MAGENTA),
         Status::Active(voltage, _) => (voltage, "ACTIVE", GREEN),
-        Status::Off | Status::Stepping(_) | Status::Detecting(_) | Status::Detected(_) => {
+        Status::Off
+        | Status::Stepping(_)
+        | Status::Detecting(_)
+        | Status::Detected(_)
+        | Status::Scp(..) => {
             return None;
         }
     })
+}
+
+fn scp_error(error: crate::scp_drive::Failure) -> &'static str {
+    use crate::scp_drive::Failure;
+    use scp_protocol::Error;
+    match error {
+        Failure::Entry => "LEGACY ENTRY FAILED",
+        Failure::DriveLevel => "LINE LEVEL CHECK FAILED",
+        Failure::Vbus => "VBUS NOT AT 5V",
+        Failure::Clock => "MICROSECOND CLOCK FAILED",
+        Failure::Wire(error) => match error {
+            Error::Transport(never) => match never {},
+            Error::Timing => "EDGE TIMING FAILED",
+            Error::Timeout => "NO DIGITAL RESPONSE",
+            Error::Framing => "INVALID SYNC OR PING",
+            Error::Parity => "PARITY CHECK FAILED",
+            Error::Crc => "CRC CHECK FAILED",
+            Error::Nack => "TYPE REGISTER REJECTED",
+            Error::Ack => "UNEXPECTED ACK",
+            Error::NotScp => "TYPE NOT PROGRAMMABLE",
+        },
+    }
+}
+
+fn scp_power_dw(cap: scp_protocol::Capabilities) -> u16 {
+    cap.max_power_dw.unwrap_or_else(|| {
+        ((u32::from(cap.max_mv) * u32::from(cap.max_ma) + 50_000) / 100_000) as u16
+    })
+}
+
+pub fn scp_charger_lines(
+    findings: Option<ScpFindings>,
+    status: Option<crate::scp_drive::Status>,
+) -> Lines {
+    let mut rows = [[b' '; 24]; 8];
+    let mut row = 0;
+    let mut line = |text: &[u8]| {
+        if let Some(target) = rows.get_mut(row) {
+            for (cell, &byte) in target.iter_mut().zip(text) {
+                *cell = byte;
+            }
+            row += 1;
+        }
+    };
+    line(b"SUPERCHARGE (SCP)");
+    match findings {
+        Some(ScpFindings::Confirmed) => {
+            if let Some(crate::scp_drive::Status::Detected(adapter)) = status {
+                line(match adapter.modes {
+                    scp_protocol::Modes::LowVoltage => b"SCP DETECTED (LVC)",
+                    scp_protocol::Modes::HighVoltage => b"SCP DETECTED (HVC)",
+                    scp_protocol::Modes::Both => b"SCP DETECTED (LVC+HVC)",
+                });
+                if let Some(cap) = adapter.capabilities {
+                    let vout = Label::new()
+                        .push(b"VOUT: ")
+                        .fixed(u32::from(cap.min_mv) / 100, 1)
+                        .push(b"-")
+                        .fixed(u32::from(cap.max_mv) / 100, 1)
+                        .push(b"V");
+                    line(vout.as_str().as_bytes());
+                    let iout = Label::new()
+                        .push(b"IOUT: ")
+                        .hundredths(u32::from(cap.min_ma))
+                        .push(b"-")
+                        .hundredths(u32::from(cap.max_ma))
+                        .push(b"A");
+                    line(iout.as_str().as_bytes());
+                    if let (Some(vstep), Some(istep)) = (cap.vstep_mv, cap.istep_ma) {
+                        let step = Label::new()
+                            .push(b"STEP: ")
+                            .fixed(u32::from(vstep), 0)
+                            .push(b"MV / ")
+                            .fixed(u32::from(istep), 0)
+                            .push(b"MA");
+                        line(step.as_str().as_bytes());
+                    }
+                    let power = Label::new()
+                        .push(b"MAX POWER: ")
+                        .fixed(u32::from(scp_power_dw(cap)), 1)
+                        .push(b"W");
+                    line(power.as_str().as_bytes());
+                } else {
+                    line(b"TYPE REGISTER VERIFIED");
+                    line(b"NO OUTPUT REQUESTED");
+                }
+            } else {
+                line(b"EXPERIMENTAL READ-ONLY");
+                line(b"SCP DETECTED");
+                line(b"TYPE REGISTER VERIFIED");
+                line(b"NO OUTPUT REQUESTED");
+            }
+        }
+        Some(ScpFindings::Unverified) => {
+            line(b"EXPERIMENTAL READ-ONLY");
+            line(b"SCP NOT VERIFIED");
+            if let Some(crate::scp_drive::Status::Failed(error)) = status {
+                line(scp_error(error).as_bytes());
+            }
+            line(b"SUPPORT NOT DETERMINED");
+        }
+        None => {
+            line(b"EXPERIMENTAL READ-ONLY");
+            line(b"NOT TESTED YET");
+        }
+    }
+    line(b"HOLD OK: FULL RESCAN");
+    rows
+}
+
+pub fn draw_scp<D: DrawTarget<Color = Rgb565>>(
+    target: &mut D,
+    header: &Header<'_>,
+    probing: bool,
+    mode: QcMode,
+    findings: Option<ScpFindings>,
+    status: Option<crate::scp_drive::Status>,
+) {
+    draw_header(target, header);
+    if mode == QcMode::Pd {
+        notice(
+            target,
+            "PD MODE",
+            "PD must stop before SCP detection",
+            GREEN,
+        );
+        hint(target, header, "< > tabs  OK switch to SCP detection");
+        return;
+    }
+    if !probing
+        && findings == Some(ScpFindings::Confirmed)
+        && let Some(crate::scp_drive::Status::Detected(adapter)) = status
+    {
+        let lines = match adapter.capabilities {
+            Some(cap) => {
+                let range = Label::new()
+                    .hundredths(u32::from(cap.min_mv))
+                    .push(b"-")
+                    .hundredths(u32::from(cap.max_mv))
+                    .push(b"V  ")
+                    .hundredths(u32::from(cap.min_ma))
+                    .push(b"-")
+                    .hundredths(u32::from(cap.max_ma))
+                    .push(b"A");
+                let detail = match (cap.vstep_mv, cap.istep_ma) {
+                    (Some(vstep), Some(istep)) => Label::new()
+                        .push(b"step ")
+                        .fixed(u32::from(vstep), 0)
+                        .push(b"mV / ")
+                        .fixed(u32::from(istep), 0)
+                        .push(b"mA  max ")
+                        .fixed(u32::from(scp_power_dw(cap)), 1)
+                        .push(b"W"),
+                    _ => Label::new()
+                        .push(b"max ")
+                        .fixed(u32::from(scp_power_dw(cap)), 1)
+                        .push(b"W"),
+                };
+                [Some(range), Some(detail)]
+            }
+            None => [
+                Some(Label::new().push(b"Type-B programmable adapter")),
+                Some(Label::new().push(b"read-only register check")),
+            ],
+        };
+        let (volts_box, amps_box) =
+            range_card(target, "SCP RANGE", ORANGE, lines.into_iter().flatten());
+        let (volts, amps) = match adapter.capabilities {
+            Some(cap) => (
+                Label::new().hundredths(u32::from(cap.max_mv)),
+                Label::new().hundredths(u32::from(cap.max_ma)),
+            ),
+            None => (Label::new().push(b"--.--"), Label::new().push(b"-.--")),
+        };
+        value_box(target, volts_box, "MAX VOLTAGE", volts, "V", YELLOW, false);
+        value_box(target, amps_box, "MAX CURRENT", amps, "A", CYAN, false);
+        let mode_text = match adapter.modes {
+            scp_protocol::Modes::LowVoltage => "LVC  read-only",
+            scp_protocol::Modes::HighVoltage => "HVC  read-only",
+            scp_protocol::Modes::Both => "LVC + HVC  read-only",
+        };
+        output_card(target, "MODE", mode_text, ("DETECTED", GREEN));
+        hint(target, header, "< > tabs  OK rescan SCP  read-only");
+        return;
+    }
+    if probing {
+        notice(
+            target,
+            "TESTING SCP",
+            "read-only adapter identification",
+            ORANGE,
+        );
+    } else {
+        notice(
+            target,
+            match findings {
+                Some(ScpFindings::Confirmed) => "SCP DETECTED",
+                Some(ScpFindings::Unverified) => "SCP NOT VERIFIED",
+                None => "SCP NOT TESTED",
+            },
+            if let Some(crate::scp_drive::Status::Failed(error)) = status {
+                scp_error(error)
+            } else {
+                "experimental - no output requested"
+            },
+            ORANGE,
+        );
+    }
+    hint(
+        target,
+        header,
+        if probing {
+            "BACK stop  read-only probe"
+        } else {
+            "< > tabs  OK test SCP  read-only"
+        },
+    );
 }
 
 /// Everything the Quick Charge 2.0 tab shows.
@@ -2062,12 +2287,12 @@ pub fn qc_charger_lines(findings: Option<QcFindings>, mode: QcMode, section: u32
             line(b"QUICK CHARGE");
             line(b"NOT SCANNED YET");
             line(b"HOLD OK: FULL RESCAN");
-            line(b"(QC AND PD)");
+            line(b"(QC, SCP AND PD)");
         }
         None => {
             line(b"QUICK CHARGE");
             line(b"NOT TESTED YET");
-            line(b"HOLD OK: TEST QC");
+            line(b"HOLD OK: SCAN QC/SCP");
         }
     }
     rows

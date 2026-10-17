@@ -70,10 +70,36 @@ The PHY refuses it once anything was received. The checked
 transition-to-default follows. A start refused only because VBUS is still
 outside its window is retried each read period; nothing was written then.
 If the source does not answer, the meter stays at 5 V and a replug brings PD
-back. The full scan's Quick Charge part runs the probe, saves its result and
-the PD part as the next boot, and leaves this way; its PD part (or, with the
-plug in the charger, the cable test) also asks for the EPR offer and shows
-the carried result once.
+back. The full scan retains QC, then runs read-only SCP type identification
+before saving both results for the PD/cable boot. Its saved SCP resume screen
+keeps that phase and QC evidence through source restarts. Without PD, both
+probes finish directly on Charger info. The final PD/cable part also asks
+for the EPR offer and shows the carried results once.
+
+SCP has no register-write API: only type 0x7E and legacy 0x80/0x81 reads are
+allowed. A ping alone is not identification. The adapter verifies 5 V before
+entry, checks its D+ drive at 2.6–3.0 V and D− idle low before transmitting,
+and verifies 5 V after releasing the lines. The opposite D+ resistor-pair
+encoding is not assumed correct: the ADC gate must validate it each attempt.
+The physical interface remains hardware-untested.
+
+SCP shares QC's exclusive D+/D− owner and is suppressed during passthrough
+or a live PD session. Generation-tagged requests reject stale completions.
+A terminal-result watch preserves evidence independently of display timing.
+During a synchronous transaction, an exclusive borrow of the idle ADC2 owner
+makes PB0 a digital input for 40 µs sync detection; its exact control word is
+restored by a drop guard before ADC conversions can resume. GPIO unlocks
+are interrupt-guarded. No other pin is reconfigured.
+
+The portable PHY uses a DWT-derived microsecond clock, not the millisecond
+Embassy tick. Transmit overruns, slow samples, invalid sync, ping, parity,
+CRC or ACK fail without an automatic retry and release the data line.
+Only valid programmable-adapter type responses produce an SCP finding.
+The compact finding uses the two formerly reserved settings bits with a
+new record tag (0x5f). The QC-only 0x5e records retain their field positions
+and remain readable; old records with foreign evidence bits or a foreign
+resume screen are rejected, not mislabelled as SCP confirmation. `SCP detected, 5V`
+on the overview means verified capability, not an SCP output contract.
 
 The Quick Charge 3.0 steps on its page go up to 12 V, or 20 V after a
 probe found Class B, and enter and leave continuous mode through a 5 V
