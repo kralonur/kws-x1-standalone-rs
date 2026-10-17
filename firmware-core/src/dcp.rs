@@ -9,6 +9,7 @@ use qc_protocol::{
     lines::{self, Request},
     qc2::Voltage,
 };
+use scp_protocol::sniff::{Protocol, Transaction};
 
 /// A port's D+/D− signature.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -97,13 +98,24 @@ pub enum Driven {
         mv: u16,
     },
     Qc3,
-    /// Suspected FCP or SCP single-wire traffic from sampled D− transitions.
-    /// Slow voltage sampling neither validates frames nor distinguishes them.
+    /// FCP or SCP single-wire traffic: suspected from sampled D− transitions,
+    /// which neither validate frames nor tell the two apart, or decoded
+    /// transactions that touched only registers both protocols share.
     SingleWire,
+    /// Decoded transactions; `mv` is the output the latest acknowledged
+    /// voltage write requested, while VBUS is near it.
+    Fcp {
+        mv: Option<u16>,
+    },
+    Scp {
+        mv: Option<u16>,
+    },
 }
 
 /// Passive D+/D− heuristic separating steady Quick Charge levels from
-/// possible single-wire bursts. Slow sampling can miss bursts entirely.
+/// possible single-wire bursts. Slow sampling can miss bursts entirely;
+/// decoded transactions take precedence over the suspected bursts, and
+/// settled Quick Charge levels or a divider signature replace them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Passive {
     dm_low_since_ms: Option<u64>,
@@ -111,11 +123,59 @@ pub struct Passive {
     dcp_candidate: Option<(Dcp, u64)>,
     single_wire_latched: bool,
     qc_candidate: Option<(Driven, u64)>,
+    decoded: Option<Decoded>,
+}
+
+/// What decoded traffic has shown since D+ became active.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Decoded {
+    /// The protocol of the latest register only one of them has.
+    protocol: Option<Protocol>,
+    mv: Option<u16>,
+}
+
+/// A decoded request shows while VBUS is at most this many percent below it
+/// (cable drop at direct-charge currents) or above it, so a request the
+/// output has since left is not shown. Chosen, not measured.
+const FOLLOW_BELOW_PERCENT: u32 = 20;
+const FOLLOW_ABOVE_PERCENT: u32 = 10;
+
+impl Decoded {
+    fn driven(self, vbus_mv: Option<u32>) -> Driven {
+        let mv = self.mv.filter(|mv| {
+            let mv = u32::from(*mv);
+            let low = mv * (100 - FOLLOW_BELOW_PERCENT) / 100;
+            let high = mv * (100 + FOLLOW_ABOVE_PERCENT) / 100;
+            vbus_mv.is_some_and(|vbus| (low..=high).contains(&vbus))
+        });
+        match self.protocol {
+            Some(Protocol::Fcp) => Driven::Fcp { mv },
+            Some(Protocol::Scp) => Driven::Scp { mv },
+            None => Driven::SingleWire,
+        }
+    }
 }
 
 impl Passive {
     pub fn reset(&mut self) {
         *self = Self::default();
+    }
+
+    /// The lines are not sampled: forget the sampled evidence, but keep
+    /// decoded traffic until a sample shows D+ idle.
+    pub fn idle(&mut self) {
+        *self = Self {
+            decoded: self.decoded,
+            ..Self::default()
+        };
+    }
+
+    /// Record a transaction decoded from D− edges. It holds until D+ goes
+    /// idle or a reset, since FCP can stay silent after setting its output.
+    pub fn decoded(&mut self, transaction: &Transaction) {
+        let decoded = self.decoded.get_or_insert_default();
+        decoded.protocol = transaction.protocol().or(decoded.protocol);
+        decoded.mv = transaction.requested_mv().or(decoded.mv);
     }
 
     pub fn update(
@@ -163,7 +223,9 @@ impl Passive {
         match (self.qc_candidate, instant) {
             (Some((prev, since)), Some(curr)) if prev == curr => {
                 if now_ms.saturating_sub(since) >= QC_SETTLE_MS {
+                    // The device has moved on from any single-wire traffic.
                     self.single_wire_latched = false;
+                    self.decoded = None;
                     return Some(curr);
                 }
             }
@@ -172,10 +234,14 @@ impl Passive {
                     && dm_mv > DM_PULSE_MIN_MV
                     && now_ms.saturating_sub(since) >= QC_SETTLE_MS =>
             {
+                self.decoded = None;
                 return Some(Driven::Qc3);
             }
             (_, Some(curr)) => self.qc_candidate = Some((curr, now_ms)),
             (_, None) => self.qc_candidate = None,
+        }
+        if let Some(decoded) = self.decoded {
+            return Some(decoded.driven(vbus_mv));
         }
         self.single_wire_latched.then_some(Driven::SingleWire)
     }

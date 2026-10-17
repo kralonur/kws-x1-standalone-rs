@@ -48,6 +48,8 @@ pub fn identify(sources: &Sources<'_>) -> Protocol {
                     Driven::Qc2 { mv } => Protocol::Qc2 { mv },
                     Driven::Qc3 => Protocol::Qc3 { mv: None },
                     Driven::SingleWire => Protocol::SingleWire,
+                    Driven::Fcp { mv } => Protocol::Fcp { mv },
+                    Driven::Scp { mv } => Protocol::DrivenScp { mv },
                 })
         })
         .or_else(|| {

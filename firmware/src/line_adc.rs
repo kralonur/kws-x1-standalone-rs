@@ -1,12 +1,16 @@
 //! D+, D−, CC1 and CC2 line voltages, measured by ADC2 against the internal
 //! reference (RM 16.3.2). ADC2 is independent of the INA226 bus monitor and
-//! the PD controller; nothing here drives the lines.
+//! the PD controller; nothing here drives the lines. Between scans, D−'s
+//! edges can also be watched for another device's FCP/SCP traffic.
 
 use embassy_hc32::adc::{
     Adc2, AdcPin, Average, FULL_SCALE, Input, InternalReference, SampleTime, Source,
 };
 use embassy_hc32::gpio::Port;
-use embassy_time::Duration;
+use embassy_hc32::intc::{EirqTrigger, Line, Route};
+use embassy_time::{Duration, Timer};
+
+use crate::dm_sniff;
 
 /// The four line voltages in mV, scaled by the measured reference
 /// ([`REFERENCE_MV`]).
@@ -36,6 +40,11 @@ const AVERAGE: Average = Average::Four;
 /// cycles above plus 12-bit conversions), 0.1 ms at a 30 MHz PCLK2, so this
 /// is a wide bound.
 const SCAN_TIMEOUT: Duration = Duration::from_millis(3);
+/// While D− is watched, a scan first waits for a gap in its traffic,
+/// checking this often and at most this many times. Chosen: a few
+/// transactions' length, so steady traffic delays a scan by 50 ms at most.
+const QUIET_POLL: Duration = Duration::from_millis(1);
+const QUIET_POLLS: u32 = 50;
 
 /// Internal reference in mV. The manual gives about 1100 mV (RM 16.3.2),
 /// with no tolerance and no per-chip calibration value. The stock firmware
@@ -53,6 +62,11 @@ const DATA_SCALE: u32 = 1;
 pub struct LineAdc {
     /// CC1, CC2, D−, D+, then the internal reference.
     adc: Adc2<5>,
+    /// The NVIC line and priority D−'s edge interrupt uses.
+    edge_line: Line,
+    edge_priority: u8,
+    /// D−'s edge interrupt route, while its edges are watched.
+    edges: Option<Route>,
 }
 
 impl LineAdc {
@@ -67,8 +81,14 @@ impl LineAdc {
     /// Call once during startup; route ADC2's end-of-scan event before the
     /// first [`Self::read`]. The caller gives up ADC2, these four pins, PWC
     /// FCG3's ADC2/CMP gates, PWCMR.ADBUFE and CMP RVADC to this owner; no
-    /// other code may configure them.
-    pub async unsafe fn new(adc: hc32f460_pac::Adc2) -> Result<Self, embassy_hc32::adc::Error> {
+    /// other code may configure them. It also gives up external-interrupt
+    /// channel [`dm_sniff::EIRQ`] and `edge_line`, whose handler must call
+    /// [`dm_sniff::on_interrupt`].
+    pub async unsafe fn new(
+        adc: hc32f460_pac::Adc2,
+        edge_line: Line,
+        edge_priority: u8,
+    ) -> Result<Self, embassy_hc32::adc::Error> {
         // SAFETY: forwarded from this function's contract.
         unsafe {
             let pin = |(port, pin), sample_time| Input {
@@ -90,13 +110,56 @@ impl LineAdc {
             ];
             Ok(Self {
                 adc: Adc2::new(adc, inputs, Some(AVERAGE), SCAN_TIMEOUT)?,
+                edge_line,
+                edge_priority,
+                edges: None,
             })
+        }
+    }
+
+    /// Watch D−'s edges for another device's FCP/SCP traffic, or stop.
+    /// Scans and [`Self::dm_input`] stop watching while they run.
+    pub fn listen(&mut self, on: bool) {
+        if on == self.edges.is_some() {
+            return;
+        }
+        // Without a decoder, nothing would catch an edge storm.
+        if !on || !dm_sniff::start() {
+            // Errata 2.4.2: the NVIC first (dropping the route), then the
+            // pin's interrupt.
+            self.edges = None;
+            dm_analog();
+            return;
+        }
+        // Errata 2.4.2: the pin's interrupt first, then the NVIC. RM 9.4.11:
+        // digital input on, EXTI on; output and pull-up stay off.
+        dm_control(|w| {
+            w.ddis().clear_bit();
+            w.inte().set_bit()
+        });
+        embassy_hc32::intc::configure_eirq(dm_sniff::EIRQ, EirqTrigger::Both);
+        embassy_hc32::intc::eirq_clear(dm_sniff::EIRQ);
+        // SAFETY: this owner holds the channel and `edge_line`, whose handler
+        // the constructor's caller installed.
+        let route = unsafe {
+            Route::new(
+                u16::from(dm_sniff::EIRQ),
+                self.edge_line,
+                self.edge_priority,
+            )
+        };
+        match route {
+            Ok(route) => self.edges = Some(route),
+            // Never leave the pin digital without a watcher.
+            Err(_) => dm_analog(),
         }
     }
 
     /// Temporarily borrow the idle D− ADC pin as a fast digital receiver.
     /// The borrow prevents conversions until the saved pin mode is restored.
     pub fn dm_input(&mut self) -> DmInput<'_> {
+        // This meter is about to drive D−; its own edges are not traffic.
+        self.listen(false);
         // SAFETY: this owner already exclusively owns PB0. Only that pin's
         // control and the shared, interrupt-guarded write lock are accessed.
         let gpio = unsafe { hc32f460_pac::Gpio::steal() };
@@ -122,7 +185,20 @@ impl LineAdc {
     /// Run one scan, returning line voltages and the reference count for
     /// ripple normalization. `None` on timeout or an unusable reference.
     pub async fn read(&mut self) -> Option<(LineVoltages, u16)> {
-        let [cc1, cc2, dm, dp, reference] = self.adc.read().await.ok()?;
+        let listening = self.edges.is_some();
+        if listening {
+            // Pausing mid-transaction would lose it: wait for a gap.
+            for _ in 0..QUIET_POLLS {
+                if dm_sniff::quiet() {
+                    break;
+                }
+                Timer::after(QUIET_POLL).await;
+            }
+        }
+        self.listen(false);
+        let scan = self.adc.read().await;
+        self.listen(listening);
+        let [cc1, cc2, dm, dp, reference] = scan.ok()?;
         let line = |count: u16, scale| millivolts(count, scale, reference);
         Some((
             LineVoltages {
@@ -134,6 +210,29 @@ impl LineAdc {
             reference,
         ))
     }
+}
+
+/// Modify PB0's (D−'s) pin control.
+fn dm_control(
+    change: impl FnOnce(&mut hc32f460_pac::gpio::pcrb0::W) -> &mut hc32f460_pac::gpio::pcrb0::W,
+) {
+    // SAFETY: the line ADC exclusively owns PB0 and its interrupt channel.
+    // Only that pin's control and the shared, interrupt-guarded write lock
+    // are accessed.
+    let gpio = unsafe { hc32f460_pac::Gpio::steal() };
+    with_unlocked(&gpio, |gpio| {
+        gpio.pcrb0().modify(|_, w| change(w));
+    });
+}
+
+/// Return D− to its analog input mode, unwatched: RM 16.5.4 wants the
+/// digital input off for the ADC.
+fn dm_analog() {
+    dm_control(|w| {
+        w.inte().clear_bit();
+        w.ddis().set_bit()
+    });
+    dm_sniff::stop();
 }
 
 /// GPIO write-protect key (RM 9.4.10, `PWPR.WP`); `PWPR.WE` set unlocks.

@@ -11,6 +11,7 @@
 
 mod bus;
 mod clock_setup;
+mod dm_sniff;
 mod energy_store;
 mod flash;
 #[cfg(feature = "flash-probe")]
@@ -350,6 +351,9 @@ const PD_EIRQ: u8 = 12;
 const TILT_EIRQ: u8 = 13;
 /// NVIC lines; each must match its `INTnnn` handler below.
 const PD_LINE: embassy_hc32::intc::Line = line(4);
+/// D−'s edge interrupt (PB0, EIRQ0); each must match its handler below.
+/// Not line 0: the image check takes its vector as the default handler.
+const DM_LINE: embassy_hc32::intc::Line = line(1);
 const TILT_LINE: embassy_hc32::intc::Line = line(13);
 /// ADC2 end of scan (event 452): group 14's window is lines 116..=121
 /// (RM Table 10-2).
@@ -377,6 +381,10 @@ const RIPPLE_DMA_EVENTS: [(u16, embassy_hc32::intc::Line); 2] = [
 /// timing never starves; bus and tilt wakes rank ahead of the PD alert.
 const BUS_PRIORITY: u8 = 8;
 const PD_PRIORITY: u8 = 9;
+/// D− edge timestamps: the most urgent after SysTick, so no other handler
+/// delays one past the decoder's 8 µs allowance. Its handler takes about a
+/// microsecond, and only while another device sends FCP/SCP.
+const DM_PRIORITY: u8 = 1;
 /// The PD session's executor: above thread mode, so a frame draw (measured
 /// at up to 42 ms, uninterrupted) cannot hold back a reply past the source's
 /// SenderResponseTimer (at least 27 ms, USB PD Table 7.9), which a source
@@ -393,6 +401,12 @@ fn INT004() {
     if embassy_hc32::exti::on_interrupt(PD_EIRQ) {
         PD_IRQ_COUNT.fetch_add(1, Ordering::Relaxed);
     }
+}
+
+/// PB0 / EIRQ0: timestamp and decode a D− edge; see [`dm_sniff`].
+#[cortex_m_rt::interrupt]
+fn INT001() {
+    dm_sniff::on_interrupt(interrupt::INT001);
 }
 
 /// PB13 external interrupt: the async driver clears the flag and wakes
@@ -541,6 +555,9 @@ const METER_READ_PERIOD: embassy_time::Duration = embassy_time::Duration::from_m
 /// the display and buttons run between them. VBUS still updates only every
 /// INA226 conversion (64 averages of 1.1 ms bus + shunt, about 141 ms).
 const SCP_STEP_PERIOD: embassy_time::Duration = embassy_time::Duration::from_millis(20);
+/// How long D− stays unwatched after an edge storm. Chosen: noise that
+/// persists then costs one millisecond of interrupts per second.
+const STORM_BACKOFF: embassy_time::Duration = embassy_time::Duration::from_secs(1);
 /// I2C3 clock in Hz: Fast-mode 400 kHz, the LIS3DH maximum (LIS Table 8);
 /// the FUSB302B (DS Table 14) and INA226 accept faster clocks.
 const I2C3_HZ: u32 = 400_000;
@@ -640,9 +657,19 @@ async fn line_task(mut adc: line_adc::LineAdc, mut trigger: qc_drive::Trigger) {
     let lines_sender = LINE_VOLTAGES.sender();
     let reference_sender = ADC_REFERENCE.sender();
     let status_sender = QC_STATUS.sender();
+    let mut status = qc_drive::Status::Off;
+    // After an edge storm, D− is not watched again before this.
+    let mut listen_after = Instant::now();
     loop {
         let input = BUTTON_STATE.try_get();
         let request = input.and_then(button_logic::Input::qc_request);
+        if dm_sniff::take_storm() {
+            listen_after = Instant::now() + STORM_BACKOFF;
+        }
+        // Decode another device's FCP/SCP while this meter leaves D− alone.
+        adc.listen(
+            request.is_none() && status == qc_drive::Status::Off && Instant::now() >= listen_after,
+        );
         // The trigger watches D− during its handshake. Ripple also needs a
         // current ADC2 reference, but it never takes ownership of that ADC.
         let scan = if request.is_some()
@@ -667,7 +694,7 @@ async fn line_task(mut adc: line_adc::LineAdc, mut trigger: qc_drive::Trigger) {
             false => None,
         };
         let now_ms = Instant::now().as_millis();
-        let status = trigger.update(now_ms, request, lines, vbus_mv, &mut adc);
+        status = trigger.update(now_ms, request, lines, vbus_mv, &mut adc);
         if let qc_drive::Status::Scp(
             attempt,
             terminal @ (scp_drive::Status::Detected(_) | scp_drive::Status::Failed(_)),
@@ -1151,6 +1178,9 @@ async fn meter_task(
             dirty |= view == View::Energy;
         }
 
+        while let Ok(transaction) = dm_sniff::TRANSACTIONS.try_receive() {
+            passive_lines.decoded(&transaction);
+        }
         let mut line_scanned = false;
         if let Some(update) = line_updates.try_changed() {
             lines = update;
@@ -1197,7 +1227,7 @@ async fn meter_task(
                     passive_lines.update(now.as_millis(), lines.dp_mv, lines.dm_mv, vbus_mv)
                 }
                 None => {
-                    passive_lines.reset();
+                    passive_lines.idle();
                     None
                 }
             };
@@ -1677,7 +1707,9 @@ async fn main(spawner: Spawner) {
         // it reads high; observed low with the slider ON).
         pc13_input = InputPin::new_pull_up(Port::C, 13);
         // PA6, PA7, PB0 and PB1 become analog inputs owned by ADC2.
-        let Ok(adc) = line_adc::LineAdc::new(hc32f460_pac::Adc2::steal()).await else {
+        let Ok(adc) =
+            line_adc::LineAdc::new(hc32f460_pac::Adc2::steal(), DM_LINE, DM_PRIORITY).await
+        else {
             // Do not start protocol tasks without a valid line-voltage reader.
             loop {
                 core::hint::spin_loop();

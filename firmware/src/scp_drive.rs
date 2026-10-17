@@ -340,25 +340,33 @@ struct Phy<'a> {
     cycles_per_us: u32,
 }
 
+/// Start the DWT cycle counter and return HCLK cycles per µs, or `None`
+/// when that clock cannot time microseconds.
+pub fn cycle_clock() -> Option<u32> {
+    // The HAL's SysTick reload is HCLK cycles per one millisecond tick.
+    const MICROS_PER_TICK: u32 = 1_000;
+    let period = SYST::get_reload() + 1;
+    let cycles_per_us = period / MICROS_PER_TICK;
+    if cycles_per_us == 0 || !period.is_multiple_of(MICROS_PER_TICK) {
+        return None;
+    }
+    // SAFETY: only enable the shared read-only cycle clock; never reset it.
+    // The energy-store adapter also enables/reads DWT without resetting.
+    let mut core = unsafe { cortex_m::Peripherals::steal() };
+    core.DCB.enable_trace();
+    core.DWT.enable_cycle_counter();
+    let start = DWT::cycle_count();
+    cortex_m::asm::delay(cycles_per_us);
+    if DWT::cycle_count() == start {
+        return None;
+    }
+    Some(cycles_per_us)
+}
+
 impl<'a> Phy<'a> {
     fn new(drive: &'a mut DataDrive, receiver: DmInput<'a>) -> Option<Self> {
-        // The HAL's SysTick reload is HCLK cycles per one millisecond tick.
-        const MICROS_PER_TICK: u32 = 1_000;
-        let period = SYST::get_reload() + 1;
-        let cycles_per_us = period / MICROS_PER_TICK;
-        if cycles_per_us == 0 || !period.is_multiple_of(MICROS_PER_TICK) {
-            return None;
-        }
-        // SAFETY: only enable the shared read-only cycle clock; never reset it.
-        // The energy-store adapter also enables/reads DWT without resetting.
-        let mut core = unsafe { cortex_m::Peripherals::steal() };
-        core.DCB.enable_trace();
-        core.DWT.enable_cycle_counter();
+        let cycles_per_us = cycle_clock()?;
         let start = DWT::cycle_count();
-        cortex_m::asm::delay(cycles_per_us);
-        if DWT::cycle_count() == start {
-            return None;
-        }
         Some(Self {
             drive,
             receiver,

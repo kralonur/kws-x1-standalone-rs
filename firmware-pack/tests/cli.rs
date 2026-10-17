@@ -19,8 +19,8 @@ const DESCRIPTOR: [u8; 16] = [
 ];
 // The fixture has 160 vectors and the firmware's permitted custom IRQ lines.
 const VECTOR_COUNT: usize = 160;
-const CUSTOM_IRQS: [usize; 15] = [
-    4, 13, 31, 38, 39, 40, 41, 86, 87, 88, 110, 111, 112, 113, 116,
+const CUSTOM_IRQS: [usize; 16] = [
+    1, 4, 13, 31, 38, 39, 40, 41, 86, 87, 88, 110, 111, 112, 113, 116,
 ];
 
 fn digest(data: &[u8]) -> String {

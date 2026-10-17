@@ -120,7 +120,8 @@ What this firmware does **not** do, for now:
 
 - **No SCP authentication.** SCP output control is only an explicit request
   on the SCP page, never automatic.
-  AFC, FCP and other protocols are not triggered. Beyond PD, QC and verified
+  AFC, FCP and other protocols are not triggered; FCP is only decoded
+  when another device drives it. Beyond PD, QC and verified
   SCP detection, the overview names the Type-C current
   advertisement, the fixed D+/D- voltages some ports use to tell their
   current (`DIVIDER`, `1.2V DCP`) and the BC1.2 short once the Quick Charge
@@ -226,7 +227,7 @@ point the way it flows (they follow the screen rotation).
 
 | Page | Shows | Buttons |
 | ---- | ----- | ------- |
-| **Overview** | voltage, current, power; the highest of each since boot while a live page shows (`MAX`); protocol (`USB`, `TYPE-C`, `PD 2.0`, `PD 3.0`, `PPS`, `AVS`, `QC 2.0`, `QC 3.0`, `FCP/SCP`, `SCP`, `DIVIDER`, `1.2V DCP`, `BC1.2`) with the CC pin and contract; flow chevrons; a heartbeat dot | hold OK: reset `MAX`; Back: settings |
+| **Overview** | voltage, current, power; the highest of each since boot while a live page shows (`MAX`); protocol (`USB`, `TYPE-C`, `PD 2.0`, `PD 3.0`, `PPS`, `AVS`, `QC 2.0`, `QC 3.0`, `FCP`, `FCP/SCP`, `SCP`, `DIVIDER`, `1.2V DCP`, `BC1.2`) with the CC pin and contract; flow chevrons; a heartbeat dot | hold OK: reset `MAX`; Back: settings |
 | **Lines** | D+, D-, CC1 and CC2 voltages | |
 | **Energy** | charge (Ah), energy (Wh) and the time since the last reset; how the totals are kept | hold OK: reset the totals |
 | **Graph** | power, voltage or current over the last 1, 2, 5 or 10 minutes; the latest second's and the window's highest voltage, current and power | OK, Left/Right choose power, voltage or current, OK, Left/Right change the window, OK done; Back closes; hold OK: clear the graph |
@@ -367,9 +368,18 @@ use in the `PROTOCOL` strip along the bottom. The meter starts on it.
   - `QC 2.0` / `QC 3.0` again: Quick Charge another device drives, read from
     D+/D-. A raised request counts once the output moved past halfway to
     it; continuous mode shows `continuous`.
-  - `FCP/SCP`: single-wire data another device sends on D- (`D- data`).
-    FCP and SCP share one physical layer, so line voltages cannot tell
-    them apart, and nothing is register-verified.
+  - `FCP` / `SCP` / `FCP/SCP`: single-wire data another device sends on
+    D-. The meter decodes each transaction from D-'s edges, checking its
+    framing, parity and CRC. A register only one protocol uses names it
+    (`FCP` or `SCP`), and an accepted voltage write shows the output it
+    asked for (`9V`) while VBUS is near it; otherwise the status is
+    `D- data`. `FCP/SCP` means
+    only the identification registers both share were seen, or the traffic
+    was only suspected from line-voltage samples. Decoding stops while this
+    meter drives D+/D- itself and during each line scan, which waits for a
+    gap between transactions. What was decoded stays until D+ goes idle.
+    SCP identification was seen from a real tablet and charger; the
+    requested voltage is not yet checked on hardware.
   - `SCP`: this meter's read-only SCP check verified the charger's type
     registers and VBUS is at the default 5 V (`detected, 5V`). It is
     evidence of support, not an SCP output contract. Once this meter's SCP

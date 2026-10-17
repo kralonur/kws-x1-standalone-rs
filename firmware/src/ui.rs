@@ -176,8 +176,17 @@ pub enum Protocol {
         mv: u16,
         ma: u16,
     },
-    /// FCP or SCP data another device sends on D−; not register-verified.
+    /// FCP or SCP data another device sends on D−, not told apart yet.
     SingleWire,
+    /// FCP transactions another device sends; `mv` is the output its latest
+    /// acknowledged voltage write requested, while VBUS is near it.
+    Fcp {
+        mv: Option<u16>,
+    },
+    /// SCP transactions another device sends, as for [`Self::Fcp`].
+    DrivenScp {
+        mv: Option<u16>,
+    },
     /// A charging port telling its current by fixed D+/D− voltages.
     Dcp(Dcp),
     /// A BC1.2 dedicated charging port (D+ shorted to D−), as the Quick
@@ -665,7 +674,10 @@ fn protocol_badge(protocol: Protocol) -> (&'static str, Rgb565) {
         Protocol::Avs { .. } => ("AVS", YELLOW),
         Protocol::Qc2 { .. } => ("QC 2.0", ORANGE),
         Protocol::Qc3 { .. } => ("QC 3.0", ORANGE),
-        Protocol::ScpDetected | Protocol::Scp { .. } => ("SCP", ORANGE),
+        Protocol::ScpDetected | Protocol::Scp { .. } | Protocol::DrivenScp { .. } => {
+            ("SCP", ORANGE)
+        }
+        Protocol::Fcp { .. } => ("FCP", ORANGE),
         Protocol::SingleWire => ("FCP/SCP", ORANGE),
         Protocol::Dcp(Dcp::Bias1V2) => ("1.2V DCP", YELLOW),
         Protocol::Dcp(_) => ("DIVIDER", YELLOW),
@@ -1304,10 +1316,15 @@ fn status(protocol: Protocol, cc: Option<u8>) -> Label {
             .push(b" ")
             .hundredths(u32::from(ma))
             .push(b"A"),
-        Protocol::Qc2 { mv } | Protocol::Qc3 { mv: Some(mv) } => label.volts(mv),
+        Protocol::Qc2 { mv }
+        | Protocol::Qc3 { mv: Some(mv) }
+        | Protocol::Fcp { mv: Some(mv) }
+        | Protocol::DrivenScp { mv: Some(mv) } => label.volts(mv),
         Protocol::Qc3 { mv: None } => label.push(b"continuous"),
         Protocol::ScpDetected => label.push(b"detected, 5V"),
-        Protocol::SingleWire => label.push(b"D- data"),
+        Protocol::SingleWire | Protocol::Fcp { mv: None } | Protocol::DrivenScp { mv: None } => {
+            label.push(b"D- data")
+        }
         Protocol::Dcp(dcp) => match dcp.milliamps() {
             Some(ma) => label.push(b"5V ").hundredths(ma).push(b"A"),
             None => label.push(b"5V"),
