@@ -1070,16 +1070,13 @@ impl Navigation {
         }
     }
 
-    /// Keep SCP evidence, never treating a failed read as proof of absence.
-    pub fn finish_scp(&mut self, attempt: u8, verified: bool) -> Option<PdCommand> {
+    /// Keep SCP evidence: absence only when the adapter showed it, never
+    /// from a test that went wrong.
+    pub fn finish_scp(&mut self, attempt: u8, findings: ScpFindings) -> Option<PdCommand> {
         if self.input.scp_attempt != attempt || self.input.page != Page::Open(Open::Scp) {
             return None;
         }
-        self.input.settings.scp_findings = Some(if verified {
-            ScpFindings::Confirmed
-        } else {
-            ScpFindings::Unverified
-        });
+        self.input.settings.scp_findings = Some(findings);
         self.input.trigger = None;
         if !self.input.scp_scanning() {
             self.input.page = Page::Tabs(Tab::Scp);
@@ -1088,9 +1085,14 @@ impl Navigation {
         let NextBoot::ScanQuickCharge { then_cable_test } = self.input.settings.next_boot else {
             return None;
         };
-        let boot = if !self.silent {
-            NextBoot::Normal
-        } else if then_cable_test {
+        self.input.page = Page::Tabs(Tab::detail(Detail::Charger));
+        // Without PD the scan ends in this boot, already on the charger
+        // page: a saved resume screen would open the next plug-in there.
+        if !self.silent {
+            self.input.settings.set_next_boot(NextBoot::Normal, None);
+            return None;
+        }
+        let boot = if then_cable_test {
             NextBoot::CableTest
         } else {
             NextBoot::ScanPd
@@ -1098,8 +1100,7 @@ impl Navigation {
         self.input
             .settings
             .set_next_boot(boot, Some(Screen::Charger));
-        self.input.page = Page::Tabs(Tab::detail(Detail::Charger));
-        self.silent.then_some(PdCommand::Restart)
+        Some(PdCommand::Restart)
     }
 
     /// The last row the shown detail list can start at; a list that got
@@ -1251,6 +1252,13 @@ impl Navigation {
             wizard.hold_ok(self.mean);
             return Some(None);
         }
+        // Hold OK stops a running SCP output, else rescans the adapter.
+        if self.input.page == Page::Tabs(Tab::Scp)
+            && matches!(self.input.trigger, Some(QcTarget::ScpOutput { .. }))
+        {
+            self.input.trigger = None;
+            return Some(None);
+        }
         if self.input.page == Page::Tabs(Tab::Scp) && !self.selectable && !self.input.passthrough {
             self.input.trigger = None;
             self.input.scp_selection = None;
@@ -1291,15 +1299,19 @@ impl Navigation {
             Page::Groups(Tab::Overview) => Page::Settings(SettingsFocus::default()),
             Page::Groups(_) | Page::Settings(SettingsFocus::Row(_)) => Page::default(),
             Page::Settings(focus) => Page::Settings(SettingsFocus::Row(focus.row())),
-            Page::Tabs(Tab::Scp)
-                if matches!(self.input.trigger, Some(QcTarget::ScpOutput { .. })) =>
-            {
+            Page::Tabs(tab) => Page::Groups(tab),
+            Page::Open(Open::Scp) => {
                 self.input.trigger = None;
                 Page::Tabs(Tab::Scp)
             }
-            Page::Tabs(tab) => Page::Groups(tab),
-            Page::Open(Open::Scp | Open::ScpSet(_)) => {
-                self.input.trigger = None;
+            // Cancel the edit, as on PPS: the output in force stays, and
+            // the preview returns to it.
+            Page::Open(Open::ScpSet(_)) => {
+                if let (Some(selection), Some(QcTarget::ScpOutput { mv, ma, .. })) =
+                    (&mut self.input.scp_selection, self.input.trigger)
+                {
+                    selection.reset_to(mv, ma);
+                }
                 Page::Tabs(Tab::Scp)
             }
             Page::Open(Open::Probe(QcPage::Charger)) => {

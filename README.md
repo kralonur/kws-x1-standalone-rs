@@ -96,7 +96,7 @@ This is **kws-x1-standalone-rs**.
   Quick Charge 3.0 0.2 V steps from 3.6 V, checked against VBUS, and a probe
   that reports Quick Charge 2.0 or 3.0 and Class A or B. On USB-C the meter
   switches the charger out of PD for it by itself.
-- Experimental SCP: checked adapter-type and rating register reads, retained
+- SCP: checked adapter-type and rating register reads, retained
   Charger-info results, and an explicit SCP page that can set the output
   voltage and current limit within the charger's reported ratings.
 - A full charger scan (hold OK on the charger page): Quick Charge, SCP, the PD
@@ -118,8 +118,8 @@ This is **kws-x1-standalone-rs**.
 
 What this firmware does **not** do, for now:
 
-- **SCP is experimental and hardware-untested.** No authentication; output
-  control is only an explicit request on the SCP page, never automatic.
+- **No SCP authentication.** SCP output control is only an explicit request
+  on the SCP page, never automatic.
   AFC, FCP and other protocols are not triggered. Beyond PD, QC and verified
   SCP detection, the overview names the Type-C current
   advertisement, the fixed D+/D- voltages some ports use to tell their
@@ -236,9 +236,9 @@ point the way it flows (they follow the screen rotation).
 | **AVS** | the charger's SPR AVS ranges, the set voltage and the current the meter asks for at it, the live output; `ACTIVE` or `NOT APPLIED`; with PD off for QC/SCP only `LEGACY MODE` | OK, Left/Right voltage (100 mV, 500 mV held), OK requests; in `LEGACY MODE` OK switches back to PD |
 | **QC 2.0** | 5, 9, 12 and 20 V and `OFF`, the voltages the charger ignored greyed out, the status on its row; under a PD contract only `PD MODE` | OK tests the charger, then opens at 5 V with the choice open (under a PD contract it first switches the charger out of PD); Left/Right choose, OK requests and closes the choice, Back closes it; the request stays in force on other screens until `OFF` |
 | **QC 3.0** | the step range, the set voltage, VBUS, D+ and D−; under a PD contract only `PD MODE` | OK tests the charger, then starts continuous mode at 5 V (under a PD contract it first switches the charger out of PD); Left/Right move it by 0.2 V (repeats held); OK or Back closes it; the steps stay in force on other screens until `OFF` on QC 2.0 |
-| **SCP** | experimental identification, then the set voltage and current limit, the live output; `ACTIVE`, `SETTING`, `STOPPING` or `FAILED` | OK tests adapter-type registers; after a detection with ratings, OK, Left/Right voltage (20 mV, 100 mV held), OK, current limit (50 mA, 250 mA held), OK applies; Back stops the output; hold OK: rescan; PD must stop first |
+| **SCP** | identification, then the set voltage and current limit, the live output; `ACTIVE`, `SETTING`, `STOPPING` or `FAILED` | OK tests adapter-type registers; after a detection with ratings, OK, Left/Right voltage (20 mV, 100 mV held), OK, current limit (50 mA, 250 mA held), OK applies; Back cancels an edit, then leaves the page with the output still in force; hold OK: stop the output, or rescan when none runs; PD must stop first |
 | **PD Session** | sink: session state, CC levels and the charger's offer as received. Passthrough: CC pin, Rp level and the latest PD messages | OK to scroll |
-| **Charger** | the offer (`*` = needs a 5 A cable), the charger's identity, maker and peak ratings, power status and source info, a power bank's battery, QC and experimental SCP results | OK to scroll; hold OK: full scan (Quick Charge, SCP identification, PD, EPR, and the 5 A cable test with the plug in the charger) |
+| **Charger** | the offer (`*` = needs a 5 A cable), the charger's identity, maker and peak ratings, power status and source info, a power bank's battery, QC and SCP results | OK to scroll; hold OK: full scan (Quick Charge, SCP identification, PD, EPR, and the 5 A cable test with the plug in the charger) |
 | **Cable** | the cable's e-marker: a readable summary (type, speed, rating, length, alt modes, maker), identity, ratings, status and modes | OK to scroll; hold OK to read the e-marker (drops to fixed 5 V first) |
 | **System** | I2C bus state and counters, frame and button timing, stack use, `LAST RESET:` cause | OK to scroll |
 | **Settings** | `BRIGHTNESS` (5 levels, 60% at first), `ROTATION` (`AUTO` follows the tilt sensor, `NORMAL`, `FLIPPED`), `ENERGY MEMORY`, `CALIBRATION`, `VERSION` (shown only) | Left/Right row, OK change it, Left/Right value, OK or Back done |
@@ -557,7 +557,9 @@ This is the **PPS** screen (tab `PPS` in Trigger): the charger's
 programmable ranges, to request a voltage and current limit.
 
 - **`PPS RANGE`**: each PPS range the charger offers, a line each (the card
-  takes one or two), for example `3.30-21.00V  up to 5.00A`.
+  takes one or two), for example `3.30-21.00V  5.00A`: the voltage range and
+  the most current at any voltage in it. A PPS range states no power, so none
+  is shown; multiplying the maxima would overstate a power-limited charger.
 - **`SET VOLTAGE`**: the voltage to request, in 20 mV steps (100 mV while
   held), from the bottom of the charger's range (often 3.3 V) to its top.
   The arrows show it is the value Left/Right change.
@@ -584,7 +586,7 @@ allows at the set voltage. SPR AVS runs from 9 V, at most 100 W; EPR AVS from
 
 - **`AVS RANGE`**: each AVS range, a line each, for example
   `9.00-20.00V  3.00A / 2.25A`: the SPR current up to 15 V, then above 15 V
-  (only on a range that reaches 20 V); `15.00-30.00V EPR 140W`: an EPR range
+  (only on a range that reaches 20 V); `15.00-30.00V  140W  EPR`: an EPR range
   capped at 30 V and its power, which the current at each voltage follows.
 - **`SET VOLTAGE`**: the voltage to request, in 100 mV steps (500 mV while
   held), framed with arrows while Left/Right change it.
@@ -764,7 +766,7 @@ own PD negotiation. It scrolls (OK) through three sections.
 <img src="pictures/charger_screen.webp" width="480" alt="Charger screen">
 
 This is the **Charger** screen (tab `CHARGER` in Info): what the charger says
-about itself, plus QC tests and experimental SCP identification. The PD
+about itself, plus QC tests and SCP identification. The PD
 parts are the charger's claims; legacy results come from active probes. It
 scrolls (OK) through the parts; a long offer takes two screens.
 
@@ -814,11 +816,15 @@ returns to Charger info on success or failure, without opening QC controls.
 
 **`SUPERCHARGE (SCP)`**
 
-Always present, marked `EXPERIMENTAL READ-ONLY`. `SCP DETECTED` requires
+Always present. `SCP DETECTED` requires
 programmable-adapter type registers with checked framing, parity and CRC,
 and a measured 5 V output. Reported low/high-voltage modes are capabilities,
-not a negotiated output or current allowance. `SCP NOT VERIFIED` includes
-the live failure reason; it does not mean unsupported. `NOT TESTED YET`
+not a negotiated output or current allowance. `NO SCP` means the charger
+showed it has none: no reaction to the entry handshake, no answer to the
+first read (`NO DIGITAL RESPONSE`), or a type that is not programmable
+(`TYPE NOT PROGRAMMABLE`). `SCP NOT VERIFIED` means the test itself went
+wrong (a damaged reply, timing, or a VBUS or line check); it includes the
+live failure reason and does not mean unsupported. `NOT TESTED YET`
 means no result. The compact result survives scan restarts alongside QC,
 but a new normal attachment does not inherit a previous charger's SCP proof.
 
@@ -1129,7 +1135,7 @@ brief rise to about 0.85 V every second. The stock firmware behaves the
 same, and this firmware only listens in passthrough, so the cause lies
 outside the firmware. It is not yet known.
 
-## SCP identification (experimental)
+## SCP
 
 <img src="pictures/scp_screen.webp" width="480" alt="SCP screen">
 
@@ -1159,9 +1165,11 @@ The output counts as `ACTIVE` once VBUS is within 5% of the setpoint; it
 must get there within 2 s and stay there. A missed setpoint, protection or
 mode loss, readback mismatch or failed transaction ends the request and
 releases the lines, so the charger's D+ protection and watchdog return it to
-5 V; OK starts a new request. Back restores ordinary output mode and releases
-the lines, which pass to Quick Charge only once VBUS is back at 5 V or 4 s
-have passed. No authentication registers are written.
+5 V; OK starts a new request. Back only cancels an edit, restoring the
+preview to the output in force, or leaves the page: like Quick Charge, the
+output stays in force on other screens. Hold OK on the SCP page stops it:
+the meter restores ordinary output mode and releases the lines, which pass
+to Quick Charge only once VBUS is back at 5 V or 4 s have passed. No authentication registers are written.
 
 Charger info retains the result; the overview says `SCP` / `detected, 5V`
 only with confirmed evidence at default VBUS, not as an active SCP power
@@ -1169,8 +1177,7 @@ contract. Existing PD and QC requests take precedence. Full scans run this
 identification after QC and before PD/cable checks. Failures remain unverified.
 
 This is an active digital probe, not passive voltage-signature detection.
-The electrical drive and receive implementation is not hardware-validated.
-Leave the downstream port empty for initial testing. `LINE LEVEL CHECK FAILED`
+`LINE LEVEL CHECK FAILED`
 means the drive/idle check refused transmission; `EDGE TIMING FAILED` or
 `NO DIGITAL RESPONSE` does not establish that the charger lacks SCP.
 

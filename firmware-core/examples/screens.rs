@@ -660,7 +660,7 @@ fn qc2(canvas: &mut Canvas) -> Result<()> {
     Ok(())
 }
 
-/// Experimental SCP layout fixtures, not hardware measurements.
+/// SCP layout fixtures, not hardware measurements.
 fn scp_fixture_adapter() -> scp_protocol::Adapter {
     scp_protocol::Adapter {
         modes: scp_protocol::Modes::Both,
@@ -1029,10 +1029,11 @@ mod tests {
             (None, "NOT TESTED YET"),
             (Some(ScpFindings::Unverified), "SUPPORT NOT DETERMINED"),
             (Some(ScpFindings::Confirmed), "TYPE REGISTER VERIFIED"),
+            (Some(ScpFindings::Absent), "NO SCP"),
         ] {
             let rows = ui::scp_charger_lines(findings, None);
             let text = String::from_utf8(rows.into_iter().flatten().collect()).unwrap();
-            assert!(text.contains("EXPERIMENTAL READ-ONLY"));
+            assert!(!text.contains("EXPERIMENTAL"));
             assert!(text.contains(expected));
             assert!(!text.contains("NOT SUPPORTED"));
         }

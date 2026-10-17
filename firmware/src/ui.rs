@@ -1762,6 +1762,7 @@ fn scp_error(error: crate::scp_drive::Failure) -> &'static str {
         Failure::DriveLevel => "LINE LEVEL CHECK FAILED",
         Failure::Vbus => "VBUS CHECK FAILED",
         Failure::Clock => "MICROSECOND CLOCK FAILED",
+        Failure::Silent => "NO DIGITAL RESPONSE",
         Failure::Control(error) => match error {
             scp_protocol::control::ControlError::Wire(error) => scp_error(Failure::Wire(error)),
             scp_protocol::control::ControlError::Request(_) => "UNSUPPORTED SETPOINT",
@@ -1782,24 +1783,23 @@ fn scp_error(error: crate::scp_drive::Failure) -> &'static str {
     }
 }
 
-/// The SCP card's second line: step sizes and the rated power, each only
-/// when the adapter reports it. Power is never derived from the voltage and
-/// current maxima, which need not be available together.
-fn scp_detail(cap: scp_protocol::Capabilities) -> Option<Label> {
-    let steps = cap.vstep_mv.zip(cap.istep_ma).map(|(vstep, istep)| {
-        Label::new()
-            .push(b"step ")
-            .fixed(u32::from(vstep), 0)
-            .push(b"mV / ")
-            .fixed(u32::from(istep), 0)
-            .push(b"mA")
-    });
-    let power = |label: Label, dw: u16| label.push(b"max ").fixed(u32::from(dw), 1).push(b"W");
-    match (steps, cap.max_power_dw) {
-        (Some(steps), Some(dw)) => Some(power(steps.push(b"  "), dw)),
-        (Some(steps), None) => Some(steps),
-        (None, Some(dw)) => Some(power(Label::new(), dw)),
-        (None, None) => None,
+/// The SCP card's one line, laid out as a PPS or AVS range: the voltage
+/// range, the maximum current and, only when the adapter reports it, the
+/// rated power. Power is never derived from the voltage and current maxima,
+/// which need not be available together. Steps are on Charger info.
+fn scp_range(cap: scp_protocol::Capabilities) -> Label {
+    let line = Label::new()
+        .hundredths(u32::from(cap.min_mv))
+        .push(b"-")
+        .hundredths(u32::from(cap.max_mv))
+        .push(b"V  ")
+        .hundredths(u32::from(cap.max_ma))
+        .push(b"A");
+    // Whole watts as EPR AVS shows them; a tenth only when there is one.
+    match cap.max_power_dw {
+        Some(dw) if dw % 10 == 0 => line.push(b"  ").fixed(u32::from(dw / 10), 0).push(b"W"),
+        Some(dw) => line.push(b"  ").fixed(u32::from(dw), 1).push(b"W"),
+        None => line,
     }
 }
 
@@ -1862,22 +1862,25 @@ pub fn scp_charger_lines(
                     line(b"NO OUTPUT REQUESTED");
                 }
             } else {
-                line(b"EXPERIMENTAL READ-ONLY");
                 line(b"SCP DETECTED");
                 line(b"TYPE REGISTER VERIFIED");
                 line(b"NO OUTPUT REQUESTED");
             }
         }
         Some(ScpFindings::Unverified) => {
-            line(b"EXPERIMENTAL READ-ONLY");
             line(b"SCP NOT VERIFIED");
             if let Some(crate::scp_drive::Status::Failed(error)) = status {
                 line(scp_error(error).as_bytes());
             }
             line(b"SUPPORT NOT DETERMINED");
         }
+        Some(ScpFindings::Absent) => {
+            line(b"NO SCP");
+            if let Some(crate::scp_drive::Status::Failed(error)) = status {
+                line(scp_error(error).as_bytes());
+            }
+        }
         None => {
-            line(b"EXPERIMENTAL READ-ONLY");
             line(b"NOT TESTED YET");
         }
     }
@@ -1918,21 +1921,7 @@ pub fn draw_scp<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'
     if !probing && let Some(selection) = scp.selection {
         let output = selection.output();
         let cap = selection.adapter().capabilities;
-        let range = cap.map(|cap| {
-            Label::new()
-                .hundredths(u32::from(cap.min_mv))
-                .push(b"-")
-                .hundredths(u32::from(cap.max_mv))
-                .push(b"V  ")
-                .hundredths(u32::from(cap.max_ma))
-                .push(b"A max")
-        });
-        let (volts_box, amps_box) = range_card(
-            target,
-            "SCP OUTPUT - EXPERIMENTAL",
-            ORANGE,
-            range.into_iter().chain(cap.and_then(scp_detail)),
-        );
+        let (volts_box, amps_box) = range_card(target, "SCP RANGE", ORANGE, cap.map(scp_range));
         value_box(
             target,
             volts_box,
@@ -1964,7 +1953,7 @@ pub fn draw_scp<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'
             Some(crate::scp_drive::Status::Stopping) => ("STOPPING", ORANGE),
             Some(crate::scp_drive::Status::Failed(_)) => ("FAILED", MAGENTA),
             _ if scp.active => ("ENTERING", ORANGE),
-            _ => ("OFF", MUTED),
+            _ => ("", MUTED),
         };
         let failure = match status {
             Some(crate::scp_drive::Status::Failed(error)) => Some(scp_error(error)),
@@ -1973,17 +1962,17 @@ pub fn draw_scp<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'
         output_card(
             target,
             "OUTPUT",
-            failure.unwrap_or_else(|| live.as_ref().map_or("--.--V", Label::as_str)),
+            failure.unwrap_or_else(|| live.as_ref().map_or("--.--V  -.--A", Label::as_str)),
             (caption, color),
         );
         hint(
             target,
             header,
             match scp.focus {
-                Some(PpsFocus::Voltage) => "< > voltage  OK current  BACK stop",
-                Some(PpsFocus::Current) => "< > limit  OK APPLY  BACK stop",
-                None if scp.active => "< > tabs  OK edit  BACK stop",
-                None => "OK set output  HOLD OK rescan",
+                Some(PpsFocus::Voltage) => "< > volts  OK next: current",
+                Some(PpsFocus::Current) => "< > amps  OK request",
+                None if scp.active => "< > tabs  OK adjust  HOLD OK stop",
+                None => "< > tabs  OK adjust  HOLD OK rescan",
             },
         );
         return;
@@ -1993,25 +1982,10 @@ pub fn draw_scp<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'
         && let Some(crate::scp_drive::Status::Detected(adapter)) = status
     {
         let lines = match adapter.capabilities {
-            Some(cap) => {
-                let range = Label::new()
-                    .hundredths(u32::from(cap.min_mv))
-                    .push(b"-")
-                    .hundredths(u32::from(cap.max_mv))
-                    .push(b"V  ")
-                    .hundredths(u32::from(cap.min_ma))
-                    .push(b"-")
-                    .hundredths(u32::from(cap.max_ma))
-                    .push(b"A");
-                [Some(range), scp_detail(cap)]
-            }
-            None => [
-                Some(Label::new().push(b"Type-B programmable adapter")),
-                Some(Label::new().push(b"read-only register check")),
-            ],
+            Some(cap) => scp_range(cap),
+            None => Label::new().push(b"ratings not reported"),
         };
-        let (volts_box, amps_box) =
-            range_card(target, "SCP RANGE", ORANGE, lines.into_iter().flatten());
+        let (volts_box, amps_box) = range_card(target, "SCP RANGE", ORANGE, [lines]);
         let (volts, amps) = match adapter.capabilities {
             Some(cap) => (
                 Label::new().hundredths(u32::from(cap.max_mv)),
@@ -2022,33 +1996,29 @@ pub fn draw_scp<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'
         value_box(target, volts_box, "MAX VOLTAGE", volts, "V", YELLOW, false);
         value_box(target, amps_box, "MAX CURRENT", amps, "A", CYAN, false);
         let mode_text = match adapter.modes {
-            scp_protocol::Modes::LowVoltage => "LVC  read-only",
-            scp_protocol::Modes::HighVoltage => "HVC  read-only",
-            scp_protocol::Modes::Both => "LVC + HVC  read-only",
+            scp_protocol::Modes::LowVoltage => "LVC",
+            scp_protocol::Modes::HighVoltage => "HVC",
+            scp_protocol::Modes::Both => "LVC + HVC",
         };
         output_card(target, "MODE", mode_text, ("DETECTED", GREEN));
-        hint(target, header, "< > tabs  OK rescan SCP  read-only");
+        hint(target, header, "< > tabs  OK rescan SCP");
         return;
     }
     if probing {
-        notice(
-            target,
-            "TESTING SCP",
-            "read-only adapter identification",
-            ORANGE,
-        );
+        notice(target, "TESTING SCP", "adapter identification", ORANGE);
     } else {
         notice(
             target,
             match findings {
                 Some(ScpFindings::Confirmed) => "SCP DETECTED",
                 Some(ScpFindings::Unverified) => "SCP NOT VERIFIED",
+                Some(ScpFindings::Absent) => "NO SCP",
                 None => "SCP NOT TESTED",
             },
             if let Some(crate::scp_drive::Status::Failed(error)) = status {
                 scp_error(error)
             } else {
-                "experimental - no output requested"
+                "no output requested"
             },
             ORANGE,
         );
@@ -2057,9 +2027,9 @@ pub fn draw_scp<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'
         target,
         header,
         if probing {
-            "BACK stop  read-only probe"
+            "BACK stop"
         } else {
-            "< > tabs  OK test SCP  read-only"
+            "< > tabs  OK test SCP"
         },
     );
 }
@@ -2692,7 +2662,7 @@ pub fn draw_pps<D: DrawTarget<Color = Rgb565>>(
                 .hundredths(u32::from(range.min_mv))
                 .push(b"-")
                 .hundredths(u32::from(range.max_mv))
-                .push(b"V  up to ")
+                .push(b"V  ")
                 .hundredths(u32::from(range.max_ma))
                 .push(b"A")
         }),
@@ -2759,14 +2729,15 @@ pub fn draw_avs<D: DrawTarget<Color = Rgb565>>(
             .push(b"V  ")
             .hundredths(u32::from(range.ma_15v))
             .push(b"A");
+        // EPR AVS states its power instead of a current.
         if let Some(pdp) = range.pdp_w {
             Label::new()
                 .hundredths(u32::from(range.min_mv))
                 .push(b"-")
                 .hundredths(u32::from(range.max_mv))
-                .push(b"V EPR ")
+                .push(b"V  ")
                 .fixed(u32::from(pdp), 0)
-                .push(b"W")
+                .push(b"W  EPR")
         } else if range.ma_20v == 0 {
             line
         } else {

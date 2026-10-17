@@ -6,6 +6,21 @@ use firmware_core::buttons::{
 use firmware_core::settings::{NextBoot, QcFindings, ScpFindings, Screen, Settings};
 use qc_protocol::qc2::Failure;
 
+fn hold_ok(nav: &mut Navigation) -> Input {
+    // A long press past the 0.5 s threshold, then release.
+    const HOLD_MS: u32 = 600;
+    let mut input = Input::default();
+    for (mask, samples) in [
+        (OK, HOLD_MS / firmware_core::buttons::POLL_MS),
+        (0, u32::from(DEFAULT_THRESHOLD)),
+    ] {
+        for _ in 0..samples {
+            input = nav.update(mask).0;
+        }
+    }
+    input
+}
+
 fn tap(nav: &mut Navigation, mask: u8) -> Input {
     let mut input = Input::default();
     for mask in [mask, 0] {
@@ -24,16 +39,19 @@ fn scp_is_explicit_and_repeated_attempts_ignore_old_results() {
     assert_eq!(nav.update(0).0.qc_request(), None);
     let first = tap(&mut nav, OK);
     assert_eq!(first.qc_request(), Some(QcTarget::Scp(first.scp_attempt)));
-    assert_eq!(nav.finish_scp(first.scp_attempt, true), None);
+    assert_eq!(
+        nav.finish_scp(first.scp_attempt, ScpFindings::Confirmed),
+        None
+    );
     let done = nav.update(0).0;
     assert_eq!(done.page, Page::Tabs(Tab::Scp));
     assert_eq!(done.qc_request(), None);
     assert_eq!(done.settings.scp_findings, Some(ScpFindings::Confirmed));
     let second = tap(&mut nav, OK);
     assert_ne!(first.scp_attempt, second.scp_attempt);
-    nav.finish_scp(first.scp_attempt, false);
+    nav.finish_scp(first.scp_attempt, ScpFindings::Unverified);
     assert_eq!(nav.update(0).0.page, Page::Open(Open::Scp));
-    nav.finish_scp(second.scp_attempt, false);
+    nav.finish_scp(second.scp_attempt, ScpFindings::Unverified);
     assert_eq!(
         nav.update(0).0.settings.scp_findings,
         Some(ScpFindings::Unverified)
@@ -95,14 +113,14 @@ fn output_adapter() -> scp_protocol::Adapter {
 // Protect against accidental output enabling from detection, stale results,
 // preview taps, scan completion, passthrough or PD ownership changes.
 #[test]
-fn scp_output_requires_confirmation_and_stops_on_back_pd_or_passthrough() {
+fn scp_output_requires_confirmation_and_stops_on_hold_pd_or_passthrough() {
     use firmware_core::buttons::{PpsFocus, RIGHT};
     let mut nav = Navigation::new(Page::Tabs(Tab::Scp), Settings::default());
     let scanning = tap(&mut nav, OK);
     nav.set_scp_adapter(scanning.scp_attempt.wrapping_sub(1), output_adapter());
     assert!(nav.update(0).0.scp_selection.is_none());
     nav.set_scp_adapter(scanning.scp_attempt, output_adapter());
-    nav.finish_scp(scanning.scp_attempt, true);
+    nav.finish_scp(scanning.scp_attempt, ScpFindings::Confirmed);
     assert_eq!(nav.update(0).0.qc_request(), None);
     let preview = tap(&mut nav, OK);
     assert_eq!(preview.page, Page::Open(Open::ScpSet(PpsFocus::Voltage)));
@@ -119,7 +137,24 @@ fn scp_output_requires_confirmation_and_stops_on_back_pd_or_passthrough() {
             ma: 1_000
         })
     );
-    assert_eq!(tap(&mut nav, BACK).qc_request(), None);
+    // Back cancels an edit and leaves the tab like any page; the output
+    // stays in force and the preview returns to it. Hold OK stops it.
+    tap(&mut nav, OK);
+    tap(&mut nav, RIGHT);
+    let cancelled = tap(&mut nav, BACK);
+    assert_eq!(cancelled.page, Page::Tabs(Tab::Scp));
+    assert_eq!(
+        cancelled.scp_selection.unwrap().output().millivolts(),
+        5_520
+    );
+    let away = tap(&mut nav, BACK);
+    assert_eq!(away.page, Page::Groups(Tab::Scp));
+    assert!(matches!(
+        away.qc_request(),
+        Some(QcTarget::ScpOutput { .. })
+    ));
+    tap(&mut nav, OK);
+    assert_eq!(hold_ok(&mut nav).qc_request(), None);
     // A failure must end the request, never retry the write on its own.
     tap(&mut nav, OK);
     tap(&mut nav, OK);
@@ -158,7 +193,7 @@ fn full_scan_scp_completion_cannot_enable_output() {
     nav.finish_scan(QcFindings::Failed(Failure::NoEntry));
     let input = nav.update(0).0;
     nav.set_scp_adapter(input.scp_attempt, output_adapter());
-    nav.finish_scp(input.scp_attempt, true);
+    nav.finish_scp(input.scp_attempt, ScpFindings::Confirmed);
     assert_eq!(nav.update(0).0.qc_request(), None);
 }
 
@@ -319,7 +354,7 @@ fn held_arrow_repeats_on_scp_voltage() {
     let mut nav = Navigation::new(Page::Tabs(Tab::Scp), Settings::default());
     let scanning = tap(&mut nav, OK);
     nav.set_scp_adapter(scanning.scp_attempt, output_adapter());
-    nav.finish_scp(scanning.scp_attempt, true);
+    nav.finish_scp(scanning.scp_attempt, ScpFindings::Confirmed);
     tap(&mut nav, OK);
     for _ in 0..1_000 / POLL_MS {
         nav.update(RIGHT);

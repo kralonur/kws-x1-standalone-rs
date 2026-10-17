@@ -41,6 +41,13 @@ impl Selection {
         self.adapter
     }
 
+    /// Return the preview to `mv`/`mA`, the output in force after a cancel.
+    pub fn reset_to(&mut self, mv: u16, ma: u16) {
+        if let Ok(output) = Output::new(self.adapter, mv, ma) {
+            self.output = output;
+        }
+    }
+
     /// Move the voltage (mV) or current limit (mA) by at least `amount`,
     /// in whole advertised steps and never less than one.
     pub fn step(&mut self, voltage: bool, forward: bool, amount: u16) {

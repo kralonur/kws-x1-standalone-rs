@@ -117,7 +117,10 @@ impl Trigger {
             State::Promoting(_) => State::Detecting(Detection::new()),
             State::Detecting(mut detection) => {
                 let result = match Phy::new(drive, adc.dm_input()) {
-                    Some(mut phy) => detection.poll(&mut phy).map_err(Failure::Wire),
+                    Some(mut phy) => detection.poll(&mut phy).map_err(|error| match error {
+                        scp_protocol::Error::Timeout if !detection.answered() => Failure::Silent,
+                        error => Failure::Wire(error),
+                    }),
                     None => Err(Failure::Clock),
                 };
                 match result {

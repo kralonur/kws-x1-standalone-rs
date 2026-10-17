@@ -768,11 +768,18 @@ async fn button_task(
             }
             Some(qc_drive::Status::Scp(attempt, scp_drive::Status::Detected(adapter))) => {
                 navigation.set_scp_adapter(attempt, adapter);
-                navigation.finish_scp(attempt, true)
+                navigation.finish_scp(attempt, ScpFindings::Confirmed)
             }
-            Some(qc_drive::Status::Scp(attempt, scp_drive::Status::Failed(_))) => {
+            Some(qc_drive::Status::Scp(attempt, scp_drive::Status::Failed(failure))) => {
                 navigation.fail_scp_output(attempt);
-                navigation.finish_scp(attempt, false)
+                navigation.finish_scp(
+                    attempt,
+                    if failure.absent() {
+                        ScpFindings::Absent
+                    } else {
+                        ScpFindings::Unverified
+                    },
+                )
             }
             _ => None,
         };

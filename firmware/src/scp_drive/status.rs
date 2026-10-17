@@ -14,8 +14,22 @@ pub enum Failure {
     DriveLevel,
     Vbus,
     Clock,
+    /// No answer to the first read, after its retries.
+    Silent,
     Wire(scp_protocol::Error<core::convert::Infallible>),
     Control(scp_protocol::control::ControlError<core::convert::Infallible>),
+}
+
+impl Failure {
+    /// The adapter showed it has no SCP: no BC1.2 short or no reaction to
+    /// the entry handshake, no answer at all, or a type that is not
+    /// programmable. Other failures leave support undetermined.
+    pub fn absent(self) -> bool {
+        matches!(
+            self,
+            Self::Entry | Self::Silent | Self::Wire(scp_protocol::Error::NotScp)
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

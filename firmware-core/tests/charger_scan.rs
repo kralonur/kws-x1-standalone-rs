@@ -4,7 +4,7 @@ use firmware_core::buttons::{
     BACK, DEFAULT_THRESHOLD, Detail, Input, Navigation, OK, Open, POLL_MS, Page, PdCommand, QcPage,
     QcTarget, Tab,
 };
-use firmware_core::settings::{NextBoot, QcFindings, Screen, Settings};
+use firmware_core::settings::{NextBoot, QcFindings, ScpFindings, Screen, Settings};
 use qc_protocol::detect::Report;
 use qc_protocol::qc2::Failure;
 
@@ -48,12 +48,18 @@ fn non_pd_success_returns_to_charger_without_a_restart_or_voltage_selection() {
     assert_eq!(nav.finish_scan(QcFindings::Detected(REPORT)), None);
     let input = nav.update(0).0;
     assert_eq!(input.page, Page::Open(Open::Scp));
-    assert_eq!(nav.finish_scp(input.scp_attempt, true), None);
+    assert_eq!(
+        nav.finish_scp(input.scp_attempt, ScpFindings::Confirmed),
+        None
+    );
     let (input, command) = nav.update(0);
     assert_eq!(command, None);
     assert_eq!(input.page, CHARGER);
     assert_eq!(input.qc_request(), None);
     assert_eq!(input.qc.report(), Some(REPORT));
+    // The next plug-in opens on the default page, not back on Charger.
+    assert_eq!(input.settings.next_boot, NextBoot::Normal);
+    assert_eq!(input.settings.resume, None);
 }
 
 #[test]
@@ -63,7 +69,10 @@ fn non_pd_failure_also_returns_to_charger_and_releases_the_probe() {
         nav.fail_probe();
         assert_eq!(nav.finish_scan(QcFindings::Failed(failure)), None);
         let input = nav.update(0).0;
-        assert_eq!(nav.finish_scp(input.scp_attempt, false), None);
+        assert_eq!(
+            nav.finish_scp(input.scp_attempt, ScpFindings::Unverified),
+            None
+        );
         let (input, command) = nav.update(0);
         assert_eq!(command, None);
         assert_eq!(input.page, CHARGER);
@@ -104,7 +113,7 @@ fn pd_full_scan_still_restarts_into_its_pd_stage() {
     let input = resumed.update(0).0;
     assert_eq!(input.page, Page::Open(Open::Scp));
     assert_eq!(
-        resumed.finish_scp(input.scp_attempt, true),
+        resumed.finish_scp(input.scp_attempt, ScpFindings::Confirmed),
         Some(PdCommand::Restart)
     );
     let (input, _) = resumed.update(0);

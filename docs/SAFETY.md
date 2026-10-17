@@ -89,7 +89,6 @@ A ping alone is not identification. The adapter verifies 5 V before
 entry, checks its D+ drive at 2.6–3.0 V and D− idle low before transmitting,
 and verifies 5 V after releasing the lines. The opposite D+ resistor-pair
 encoding is not assumed correct: the ADC gate must validate it each attempt.
-The physical interface remains hardware-untested.
 
 SCP shares QC's exclusive D+/D− owner and is suppressed during passthrough
 or a live PD session. Generation-tagged requests reject stale completions.

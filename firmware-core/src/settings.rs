@@ -256,6 +256,8 @@ const SCP_MASK: u32 = 0b11;
 pub enum ScpFindings {
     Unverified,
     Confirmed,
+    /// The adapter showed it has no SCP.
+    Absent,
 }
 
 impl ScpFindings {
@@ -264,6 +266,7 @@ impl ScpFindings {
             None => 0,
             Some(Self::Unverified) => 1,
             Some(Self::Confirmed) => 2,
+            Some(Self::Absent) => 3,
         }
     }
 
@@ -272,6 +275,7 @@ impl ScpFindings {
             0 => Some(None),
             1 => Some(Some(Self::Unverified)),
             2 => Some(Some(Self::Confirmed)),
+            3 => Some(Some(Self::Absent)),
             _ => None,
         }
     }
