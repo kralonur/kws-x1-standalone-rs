@@ -33,10 +33,9 @@ lzma-rust2 = "0.22.0"
 microfft = { version = "0.6.0", default-features = false }
 object = "0.40.0"
 panic-halt = "1.0.0"
-pd-protocol = { git = "https://github.com/kralonur/embedded-charging-protocols-rs", rev = "25f80d398c6a3cc0340c1d05ca23865dabc632ba" }
-qc-protocol = { git = "https://github.com/kralonur/embedded-charging-protocols-rs", rev = "25f80d398c6a3cc0340c1d05ca23865dabc632ba" }
-# Local detection work; use a reviewed Git revision once published.
-scp-protocol = { path = "../embedded-charging-protocols-rs/scp-protocol" }
+pd-protocol = { git = "https://github.com/kralonur/embedded-charging-protocols-rs", rev = "d4be57a54f7a0b110bfdd65115d6d35014911b1b" }
+qc-protocol = { git = "https://github.com/kralonur/embedded-charging-protocols-rs", rev = "d4be57a54f7a0b110bfdd65115d6d35014911b1b" }
+scp-protocol = { git = "https://github.com/kralonur/embedded-charging-protocols-rs", rev = "d4be57a54f7a0b110bfdd65115d6d35014911b1b" }
 serde = "1.0.229"
 serde_json = "1.0.154"
 sha2 = "0.11.1"

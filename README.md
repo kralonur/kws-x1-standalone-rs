@@ -69,7 +69,7 @@ by full Git revision, and every library is usable on its own.
 | ---------- | -------- |
 | [kws-x1-standalone-rs](https://github.com/kralonur/kws-x1-standalone-rs) | firmware for a USB-C power meter, built on the libraries below |
 | [hc32f460-embassy-rs](https://github.com/kralonur/hc32f460-embassy-rs) | `hc32f460-pac` and `embassy-hc32`: peripheral access crate and Embassy HAL for the HC32F460 MCU |
-| [embedded-charging-protocols-rs](https://github.com/kralonur/embedded-charging-protocols-rs) | `pd-protocol`: allocation-free, `no_std`, hardware-independent USB PD sink engine |
+| [embedded-charging-protocols-rs](https://github.com/kralonur/embedded-charging-protocols-rs) | `pd-protocol`, `qc-protocol` and `scp-protocol`: allocation-free, `no_std`, hardware-independent USB PD sink engine, Quick Charge, and SCP and FCP |
 | [usbpd](https://github.com/kralonur/usbpd) | fork of [elagil/usbpd](https://github.com/elagil/usbpd): the `usbpd` policy engine and the `usbpd-traits` PHY interface |
 
 This is **kws-x1-standalone-rs**.
@@ -1265,9 +1265,8 @@ means the drive/idle check refused transmission; `EDGE TIMING FAILED` or
 `NO DIGITAL RESPONSE` does not establish that the charger lacks SCP.
 
 The portable detector lives in `scp-protocol` in the charging-protocols
-workspace. This branch uses a local sibling path dependency pending a
-published, reviewed Git revision; a standalone checkout/CI needs that repo.
-Nothing is flashed automatically.
+workspace, pinned by full Git revision like the other libraries. Nothing is
+flashed automatically.
 
 ## FCP
 
