@@ -30,6 +30,8 @@ is not affiliated with or endorsed by KOWSI.
 - [Screens](#screens)
   - [Sink mode](#sink-mode)
   - [Passthrough mode](#passthrough-mode)
+- [SCP](#scp)
+- [FCP](#fcp)
 - [Quick Charge](#quick-charge)
 - [Full charger offer and 5 A without a cable](#full-charger-offer-and-5-a-without-a-cable)
 - [Hand-test checklist](#hand-test-checklist)
@@ -668,7 +670,66 @@ screen; see [Quick Charge](#quick-charge).
   handshake, test and `PD MODE` hints as on the QC 2.0 screen, and `< > tabs`
   after `NO QC 3.0`.
 
-#### 11. PD Session
+#### 11. SCP
+
+<img src="pictures/scp_screen.webp" width="480" alt="SCP screen">
+
+This is the **SCP** screen (tab `SCP` in Trigger): SuperCharge, to identify
+the charger and set its output voltage and current limit. It is laid out as
+the PPS screen; [SCP](#scp) explains the test and the output control.
+
+- **`SCP RANGE`**: the voltage range and highest current the charger
+  reports, and its rated power when it reports one, for example
+  `5.50-11.00V  3.00A  33W`.
+- **`SET VOLTAGE`** and **`CURRENT LIMIT`**: the output to request, in the
+  charger's own steps, framed with arrows while Left/Right change them.
+- **`OUTPUT`**: the live output, with its state on the right: `ENTERING`,
+  `SETTING` (waiting for VBUS), `ACTIVE`, `STOPPING` or `FAILED`. On a
+  failure the reason replaces the reading.
+- **`MAX VOLTAGE`**, **`MAX CURRENT`** and **`MODE`** (`LVC`, `HVC` or
+  `LVC + HVC`, with `DETECTED`): shown instead when the charger is found but
+  its ratings are incomplete (`ratings not reported`), so no output can be
+  set.
+- **`TESTING SCP` / `adapter identification`**: the test runs.
+- **`SCP DETECTED`, `NO SCP`, `SCP NOT VERIFIED` or `SCP NOT TESTED`**: the
+  result, with the reason below it (for example `TYPE NOT PROGRAMMABLE`), or
+  `no output requested`.
+- **`PD MODE` / `PD must stop before SCP detection`**: a PD contract holds
+  the charger.
+- **Hint row**: `< > tabs  OK test SCP`, and `BACK stop` while it runs.
+  Once the ratings are read, `< > tabs  OK adjust  HOLD OK rescan`, then
+  `< > volts  OK next: current` and `< > amps  OK request` while editing,
+  and `< > tabs  OK adjust  HOLD OK stop` while an output runs; without
+  complete ratings, `< > tabs  OK rescan SCP`. In `PD MODE`,
+  `< > tabs  OK switch to SCP detection`.
+
+#### 12. FCP
+
+<img src="pictures/fcp_screen.webp" width="480" alt="FCP screen">
+
+This is the **FCP** screen (tab `FCP` in Trigger): the fixed voltages a Fast
+Charge Protocol charger lists, to request one. It is laid out as the QC 2.0
+screen; [FCP](#fcp) explains the test and the requests.
+
+- **Rows**: each voltage the charger lists, for example `5.20V`, `9V` and
+  `12V`, the highest with the charger's rated power (`18W rated`), then `OFF`
+  (`plain USB`). The choice is framed.
+- **Status pill** on the requested row: `WAIT`, `SETTING` (waiting for
+  VBUS), `ACTIVE`, `STOPPING` or `FAILED`.
+- **`TESTING FCP` / `adapter identification`**: the test runs.
+- **`NO FCP`, `FCP NOT VERIFIED` or `FCP NOT TESTED`**: no voltages to show
+  yet, with the reason below it (for example `NO FCP VOLTAGES`), or
+  `no output requested`.
+- **`PD MODE` / `PD must stop before FCP detection`**: a PD contract holds
+  the charger.
+- **Hint row**: `< > tabs  OK test FCP`, and `BACK stop` while it runs.
+  Once the voltages are read, `< > tabs  OK choose  HOLD OK rescan`, then
+  `< > choose  OK request  BACK cancel` while choosing, and
+  `< > tabs  OK change  HOLD OK stop` while a request runs. A failed request
+  shows its reason here instead. In `PD MODE`,
+  `< > tabs  OK switch to FCP detection`.
+
+#### 13. PD Session
 
 <img src="pictures/pd_session_screen.webp" width="480" alt="PD Session screen">
 
@@ -775,12 +836,12 @@ own PD negotiation. It scrolls (OK) through three sections.
 | `002B` | session ended without a contract |
 | `002C` | Hard Reset sent |
 
-#### 12. Charger
+#### 14. Charger
 
 <img src="pictures/charger_screen.webp" width="480" alt="Charger screen">
 
 This is the **Charger** screen (tab `CHARGER` in Info): what the charger says
-about itself, plus QC tests and SCP identification. The PD
+about itself, plus QC tests and SCP and FCP identification. The PD
 parts are the charger's claims; legacy results come from active probes. It
 scrolls (OK) through the parts; a long offer takes two screens.
 
@@ -904,7 +965,7 @@ first battery, as the charger describes it.
 **Answer words** used in these sections: `OK`, `WAITING`, `NOT SUPPORTED`,
 `NO REPLY`, `BLOCKED`, `RESET`, `PD2 N/A` (not available under PD 2.0).
 
-#### 13. Cable
+#### 15. Cable
 
 <img src="pictures/cable_screen.webp" width="480" alt="Cable screen">
 
@@ -991,7 +1052,7 @@ GET_STATUS`, `SECOND PLUG NO DATA`).
 **Status words**: `NOT QUERIED`, `ACK`, `NAK`, `BUSY NO RETRY`,
 `TIMEOUT NO RETRY`, `LIST INCOMPLETE`, `NOT SUPPORTED`.
 
-#### 14. System
+#### 16. System
 
 <img src="pictures/system_screen.webp" width="480" alt="System screen">
 
@@ -1161,9 +1222,7 @@ outside the firmware. It is not yet known.
 
 ## SCP
 
-<img src="pictures/scp_screen.webp" width="480" alt="SCP screen">
-
-Open **Trigger → SCP** and press OK. Under PD, the first OK switches to a
+The [SCP screen](#11-scp) shows each field. Open **Trigger → SCP** and press OK. Under PD, the first OK switches to a
 PD-silent boot; press OK on SCP again to test. The probe performs BC1.2 entry,
 checks its D+ drive against 2.6–3.0 V, then reads adapter type 0x7E, with
 0x80/0x81 fallback when appropriate, and the read-only rating registers
@@ -1212,9 +1271,7 @@ Nothing is flashed automatically.
 
 ## FCP
 
-<img src="pictures/fcp_screen.webp" width="480" alt="FCP screen">
-
-Open **Trigger → FCP** and press OK. Under PD, the first OK switches to a
+The [FCP screen](#12-fcp) shows each field. Open **Trigger → FCP** and press OK. Under PD, the first OK switches to a
 PD-silent boot; press OK on FCP again to test. The probe uses the same entry
 and line checks as SCP, then reads the charger's FCP capability (0x21), each
 output voltage it lists (0x30 onwards) and its rated power (0x22). A charger
