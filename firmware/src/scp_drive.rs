@@ -1,12 +1,13 @@
-//! Hardware adapter for SCP detection and explicit output control. Table numbers
-//! refer to Appendix B of the SCP draft standard cited in `scp-protocol`.
+//! Hardware adapter for SCP and FCP detection and explicit output control.
+//! Table numbers refer to Appendix B of the SCP draft standard cited in
+//! `scp-protocol`.
 
 use core::convert::Infallible;
 use cortex_m::peripheral::{DWT, SYST};
 use qc_protocol::qc2::{Handshake, Level, Progress};
 use scp_protocol::{
-    Adapter, Detection, Transport,
-    control::{ControlError, Session},
+    Transport,
+    control::{ControlError, RequestError},
 };
 
 use crate::{
@@ -40,31 +41,126 @@ const REFRESH_MS: u64 = 500;
 /// bound, so a lost VBUS read cannot hold the lines or a PD restart.
 const STOP_TIMEOUT_MS: u64 = 2_000 + OUTPUT_SETTLE_MS;
 
-pub struct Trigger {
-    state: State,
+/// What runs over the single-wire PHY once entry is done: SCP or FCP,
+/// which share the entry, the PHY and the trigger's checks.
+pub trait Link {
+    type Detection;
+    type Adapter: Copy;
+    type Output: Copy;
+    type Session;
+    /// An output request: SCP's (mV, mA), FCP's mV.
+    type Request: Copy + PartialEq;
+    fn detection() -> Self::Detection;
+    /// The adapter answered a read, so a later timeout is not silence.
+    fn answered(detection: &Self::Detection) -> bool;
+    fn detect<T: Transport>(
+        detection: &mut Self::Detection,
+        phy: &mut T,
+    ) -> Result<Option<Self::Adapter>, scp_protocol::Error<T::Error>>;
+    /// Whether `request` is inside the application's power-path envelope.
+    fn allowed(request: Self::Request) -> bool;
+    fn start(adapter: Self::Adapter, request: Self::Request)
+    -> Result<Self::Session, RequestError>;
+    fn output(session: &Self::Session) -> Self::Output;
+    fn requested(output: Self::Output) -> Self::Request;
+    fn millivolts(output: Self::Output) -> u16;
+    fn busy(session: &Self::Session) -> bool;
+    fn set(session: &mut Self::Session, request: Self::Request) -> Result<(), RequestError>;
+    fn refresh(session: &mut Self::Session);
+    fn stop(session: &mut Self::Session);
+    fn poll<T: Transport>(
+        session: &mut Self::Session,
+        phy: &mut T,
+    ) -> Result<(), ControlError<T::Error>>;
 }
-enum State {
+
+pub enum Scp {}
+
+impl Link for Scp {
+    type Detection = scp_protocol::Detection;
+    type Adapter = scp_protocol::Adapter;
+    type Output = scp_protocol::control::Output;
+    type Session = scp_protocol::control::Session;
+    type Request = (u16, u16);
+    fn detection() -> Self::Detection {
+        scp_protocol::Detection::new()
+    }
+    fn answered(detection: &Self::Detection) -> bool {
+        detection.answered()
+    }
+    fn detect<T: Transport>(
+        detection: &mut Self::Detection,
+        phy: &mut T,
+    ) -> Result<Option<Self::Adapter>, scp_protocol::Error<T::Error>> {
+        detection.poll(phy)
+    }
+    fn allowed((mv, ma): Self::Request) -> bool {
+        (firmware_core::scp::MIN_MV..=firmware_core::scp::MAX_MV).contains(&mv)
+            && ma <= firmware_core::scp::MAX_MA
+    }
+    fn start(
+        adapter: Self::Adapter,
+        (mv, ma): Self::Request,
+    ) -> Result<Self::Session, RequestError> {
+        firmware_core::scp::request(adapter, mv, ma)
+            .and_then(|output| Self::Session::start(adapter, output))
+    }
+    fn output(session: &Self::Session) -> Self::Output {
+        session.output()
+    }
+    fn requested(output: Self::Output) -> Self::Request {
+        (output.millivolts(), output.milliamps())
+    }
+    fn millivolts(output: Self::Output) -> u16 {
+        output.millivolts()
+    }
+    fn busy(session: &Self::Session) -> bool {
+        session.busy()
+    }
+    fn set(session: &mut Self::Session, (mv, ma): Self::Request) -> Result<(), RequestError> {
+        session
+            .request(mv, ma)
+            .and_then(|output| session.set(output))
+    }
+    fn refresh(session: &mut Self::Session) {
+        session.refresh();
+    }
+    fn stop(session: &mut Self::Session) {
+        session.stop();
+    }
+    fn poll<T: Transport>(
+        session: &mut Self::Session,
+        phy: &mut T,
+    ) -> Result<(), ControlError<T::Error>> {
+        session.poll(phy)
+    }
+}
+
+pub struct Trigger<L: Link> {
+    state: State<L>,
+}
+enum State<L: Link> {
     Releasing(u64),
     Entering(Handshake),
     Promoting(u64),
     /// Identification and ratings, one register read per step.
-    Detecting(Detection),
-    Checking(Adapter),
-    Detected(Adapter),
+    Detecting(L::Detection),
+    Checking(L::Adapter),
+    Detected(L::Adapter),
     Output {
-        session: Session,
+        session: L::Session,
         /// When the setpoint finished writing; `None` while it is written.
         written_ms: Option<u64>,
         refresh_ms: u64,
         applied: bool,
     },
     /// The stop's transactions run, one per step.
-    Closing(Session),
+    Closing(L::Session),
     Stopping(u64, Option<Failure>),
     Failed(Failure),
 }
 
-impl Trigger {
+impl<L: Link> Trigger<L> {
     pub fn start(now_ms: u64, drive: &mut DataDrive) -> Self {
         drive.set(None, None);
         Self {
@@ -79,8 +175,8 @@ impl Trigger {
         now_ms: u64,
         lines: Option<LineVoltages>,
         vbus_mv: Option<u16>,
-        request: Option<(u16, u16)>,
-    ) -> Status {
+        request: Option<L::Request>,
+    ) -> Status<L::Adapter, L::Output> {
         let at_default = vbus_mv.is_some_and(|mv| DEFAULT_VBUS_MV.contains(&mv));
         let valid_lines = lines.is_some_and(|lines| {
             (DP_MIN_MV..=DP_MAX_MV).contains(&lines.dp_mv) && lines.dm_mv <= IDLE_MAX_MV
@@ -114,13 +210,17 @@ impl Trigger {
             }
             State::Promoting(_) if !at_default => State::Failed(Failure::Vbus),
             State::Promoting(_) if !valid_lines => State::Failed(Failure::DriveLevel),
-            State::Promoting(_) => State::Detecting(Detection::new()),
+            State::Promoting(_) => State::Detecting(L::detection()),
             State::Detecting(mut detection) => {
                 let result = match Phy::new(drive, adc.dm_input()) {
-                    Some(mut phy) => detection.poll(&mut phy).map_err(|error| match error {
-                        scp_protocol::Error::Timeout if !detection.answered() => Failure::Silent,
-                        error => Failure::Wire(error),
-                    }),
+                    Some(mut phy) => {
+                        L::detect(&mut detection, &mut phy).map_err(|error| match error {
+                            scp_protocol::Error::Timeout if !L::answered(&detection) => {
+                                Failure::Silent
+                            }
+                            error => Failure::Wire(error),
+                        })
+                    }
                     None => Err(Failure::Clock),
                 };
                 match result {
@@ -139,9 +239,7 @@ impl Trigger {
             State::Checking(adapter) if at_default => match request {
                 None => State::Detected(adapter),
                 // Only queued here: the transactions run one per step.
-                Some((mv, ma)) => match firmware_core::scp::request(adapter, mv, ma)
-                    .and_then(|output| Session::start(adapter, output))
-                {
+                Some(request) => match L::start(adapter, request) {
                     Ok(session) => State::Output {
                         session,
                         written_ms: None,
@@ -168,26 +266,23 @@ impl Trigger {
                     if vbus > firmware_core::scp::MAX_MV {
                         return Err(Failure::Vbus);
                     }
-                    let (mv, ma) = request.ok_or(Failure::Vbus)?;
+                    let request = request.ok_or(Failure::Vbus)?;
                     // Revalidate against freshly read ratings, not cached UI evidence.
-                    if !(firmware_core::scp::MIN_MV..=firmware_core::scp::MAX_MV).contains(&mv)
-                        || ma > firmware_core::scp::MAX_MA
-                    {
+                    if !L::allowed(request) {
                         return Err(Failure::Vbus);
                     }
-                    let target = session.output();
+                    let target = L::output(&session);
                     // A changed request waits for the running procedure.
-                    if !session.busy() && (target.millivolts(), target.milliamps()) != (mv, ma) {
-                        session
-                            .request(mv, ma)
-                            .and_then(|output| session.set(output))
+                    if !L::busy(&session) && L::requested(target) != request {
+                        L::set(&mut session, request)
                             .map_err(|error| Failure::Control(ControlError::Request(error)))?;
                         written_ms = None;
                         applied = false;
                     }
-                    if !session.busy() {
+                    if !L::busy(&session) {
                         if let Some(written) = written_ms {
-                            let followed = firmware_core::scp::followed(target, vbus);
+                            let followed =
+                                firmware_core::scp::followed(L::millivolts(target), vbus);
                             if (applied && !followed)
                                 || (!followed && now_ms.saturating_sub(written) >= OUTPUT_SETTLE_MS)
                             {
@@ -198,13 +293,13 @@ impl Trigger {
                         if now_ms.saturating_sub(refresh_ms) < REFRESH_MS {
                             return Ok(());
                         }
-                        session.refresh();
+                        L::refresh(&mut session);
                     }
                     // One transaction per step; any traffic refreshes the
                     // watchdog.
-                    communicate(drive, adc, |phy| session.poll(phy))?;
+                    communicate(drive, adc, |phy| L::poll(&mut session, phy))?;
                     refresh_ms = now_ms;
-                    if !session.busy() && written_ms.is_none() {
+                    if !L::busy(&session) && written_ms.is_none() {
                         written_ms = Some(now_ms);
                     }
                     Ok(())
@@ -232,7 +327,7 @@ impl Trigger {
                 applied,
                 ..
             } => Status::Output {
-                output: session.output(),
+                output: L::output(session),
                 applied,
             },
             State::Closing(_) | State::Stopping(_, _) => Status::Stopping,
@@ -255,7 +350,7 @@ impl Trigger {
             State::Detected(_) | State::Failed(_) => false,
             State::Output {
                 session, applied, ..
-            } => session.busy() || !applied,
+            } => L::busy(session) || !applied,
             _ => true,
         }
     }
@@ -270,13 +365,13 @@ impl Trigger {
         drive: &mut DataDrive,
         adc: &mut LineAdc,
         vbus_mv: Option<u16>,
-    ) -> Status {
+    ) -> Status<L::Adapter, L::Output> {
         let state = core::mem::replace(&mut self.state, State::Failed(Failure::Vbus));
         let (since, error) = match state {
             State::Stopping(since, error) => (since, error),
             State::Output { mut session, .. } => {
                 // Queued work is replaced: a half-written setpoint ends here.
-                session.stop();
+                L::stop(&mut session);
                 return self.close(session, now_ms, drive, adc, vbus_mv);
             }
             State::Closing(session) => return self.close(session, now_ms, drive, adc, vbus_mv),
@@ -289,14 +384,14 @@ impl Trigger {
     /// Run one stop transaction; release once they are all done or one fails.
     fn close(
         &mut self,
-        mut session: Session,
+        mut session: L::Session,
         now_ms: u64,
         drive: &mut DataDrive,
         adc: &mut LineAdc,
         vbus_mv: Option<u16>,
-    ) -> Status {
-        match communicate(drive, adc, |phy| session.poll(phy)) {
-            Ok(()) if session.busy() => {
+    ) -> Status<L::Adapter, L::Output> {
+        match communicate(drive, adc, |phy| L::poll(&mut session, phy)) {
+            Ok(()) if L::busy(&session) => {
                 self.state = State::Closing(session);
                 Status::Stopping
             }
@@ -313,7 +408,7 @@ impl Trigger {
         now_ms: u64,
         drive: &mut DataDrive,
         vbus_mv: Option<u16>,
-    ) -> Status {
+    ) -> Status<L::Adapter, L::Output> {
         drive.set(None, None);
         self.state = State::Stopping(since, error);
         let settled = vbus_mv.is_some_and(|mv| DEFAULT_VBUS_MV.contains(&mv)) && now_ms > since;

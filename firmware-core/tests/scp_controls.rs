@@ -212,8 +212,8 @@ fn scp_selection_honors_steps_power_and_platform_envelope() {
         selection.step(false, true, 50);
     }
     assert_eq!(selection.output().milliamps(), 3_150);
-    assert!(followed(selection.output(), 11_200));
-    assert!(!followed(selection.output(), 9_000));
+    assert!(followed(selection.output().millivolts(), 11_200));
+    assert!(!followed(selection.output().millivolts(), 9_000));
     assert!(request(adapter, 12_000, 1_000).is_err());
     let mut wide = adapter;
     let cap = wide.capabilities.as_mut().unwrap();

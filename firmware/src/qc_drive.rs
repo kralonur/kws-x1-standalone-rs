@@ -115,7 +115,7 @@ impl DataDrive {
 enum State {
     Off,
     Releasing(u64),
-    Scp(u8, crate::scp_drive::Trigger),
+    Scp(u8, crate::scp_drive::Trigger<crate::scp_drive::Scp>),
     Entering(Handshake),
     Failed(Failure),
     Active {

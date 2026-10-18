@@ -135,8 +135,7 @@ pub fn request(
     Output::new(adapter, mv, ma)
 }
 
-pub fn followed(output: Output, vbus_mv: u16) -> bool {
-    let target = u32::from(output.millivolts());
-    u32::from(vbus_mv.abs_diff(output.millivolts())) * 100 <= target * VBUS_TOLERANCE_PERCENT
+pub fn followed(mv: u16, vbus_mv: u16) -> bool {
+    u32::from(vbus_mv.abs_diff(mv)) * 100 <= u32::from(mv) * VBUS_TOLERANCE_PERCENT
         && vbus_mv <= MAX_MV
 }

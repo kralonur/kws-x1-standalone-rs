@@ -1,4 +1,4 @@
-//! SCP detection and output status, also used by the host renderer.
+//! SCP and FCP detection and output status, also used by the host renderer.
 
 use core::ops::RangeInclusive;
 
@@ -21,26 +21,28 @@ pub enum Failure {
 }
 
 impl Failure {
-    /// The adapter showed it has no SCP: no BC1.2 short or no reaction to
-    /// the entry handshake, no answer at all, or a type that is not
-    /// programmable. Other failures leave support undetermined.
+    /// The adapter showed it lacks the protocol: no BC1.2 short or no
+    /// reaction to the entry handshake, no answer at all, a type that is not
+    /// programmable or no FCP voltages. Other failures leave support
+    /// undetermined.
     pub fn absent(self) -> bool {
         matches!(
             self,
-            Self::Entry | Self::Silent | Self::Wire(scp_protocol::Error::NotScp)
+            Self::Entry
+                | Self::Silent
+                | Self::Wire(scp_protocol::Error::NotScp | scp_protocol::Error::NotFcp)
         )
     }
 }
 
+/// A trigger's progress, by default SCP's: the adapter `A` detection found
+/// and the output `O` requested.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Status {
+pub enum Status<A = scp_protocol::Adapter, O = scp_protocol::control::Output> {
     Entering,
     Reading,
-    Detected(scp_protocol::Adapter),
-    Output {
-        output: scp_protocol::control::Output,
-        applied: bool,
-    },
+    Detected(A),
+    Output { output: O, applied: bool },
     Stopping,
     Stopped,
     Failed(Failure),

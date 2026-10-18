@@ -1796,6 +1796,7 @@ fn scp_error(error: crate::scp_drive::Failure) -> &'static str {
             Error::Nack => "REGISTER REJECTED",
             Error::Ack => "INVALID ACK BYTE",
             Error::NotScp => "TYPE NOT PROGRAMMABLE",
+            Error::NotFcp => "NO FCP VOLTAGES",
         },
     }
 }
