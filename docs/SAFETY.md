@@ -35,6 +35,30 @@ All of these must authorize a transaction:
 4. The pinned `usbpd` engine, protocol layer and device policy manager.
 
 New message support must be reviewed at every gate, not just the engine.
+
+The explicit partner port scan is PD3-only and runs from an established SPR
+fixed 5 V contract; asked above it, the board first requests that contract
+through the ordinary selection path. Both policy and native TX gates require
+the requested scan; the native PHY also measures vSafe5V before each scan
+request and otherwise defers it unsent. Get_Sink_Cap is sent only to a source
+advertising dual-role power; USB PD R3.2 V1.2 section 7.5 and Table 7.4 let a
+Sink-only port initiate it. SOP Discover Identity never uses the cable
+transport or changes VCONN. The scan uses bounded seven-object replies, keeps
+NAK/BUSY/timeout outcomes, and preserves the common SVDM version on later
+requests until Hard Reset. Identity waits the 50 ms maximum of
+tVDMSenderResponse (Table 7.9); another well-formed message in that window is
+a Protocol Error (Soft Reset) and a malformed response fails closed. Because
+the sink initiates Discover Identity, a received PD3 Structured VDM request is
+answered with one NAK at the received version (Table 7.2), authorized by both
+TX gates; Attention and responses get no reply. Identity requires the three mandatory VDOs; absent or unknown
+Product Type VDO layouts are never decoded. Confirmation of a power change and
+cable inspection are blocked during the scan; reset/cancellation revokes
+pending scan work. Passthrough and cable-test boots cannot start it. No source
+operation, role swaps or new reset permissions are added. Calculated input
+watts and decoded identity fields are informational claims only; they never
+authorize a request, role swap or VCONN change. Offline checks do not qualify
+interoperability, timing under display load or physical protection.
+
 Board limits, scheduling, voltage measurements and routing remain caller inputs.
 The sink uses the unassigned identity convention; no VID or metadata is invented.
 Protocol responses are not proof of physical fault detection or protection.

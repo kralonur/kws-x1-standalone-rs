@@ -36,16 +36,17 @@ pub const PPS_REFRESH_MS: u64 = 4_000;
 /// Highest SPR fixed voltage in mV (USB PD Table 6.9); above it a fixed
 /// profile needs EPR Mode.
 const SPR_FIXED_MAX_MV: u16 = 20_000;
-/// The only contract a cable query starts from: fixed 5 V, at the meter's
-/// own request current (`shared::Selection::request_cable`'s gate).
-const CABLE_QUERY_MV: u16 = 5_000;
-/// Wait after the 5 V contract a cable query requested, in ms, before asking
-/// the cable. The query first checks VBUS is within 4.75..=5.5 V, from the
+/// The only contract a cable query or port scan starts from: fixed 5 V, at the
+/// meter's own request current (`shared::Selection::request_cable`'s and
+/// `request_port_scan`'s gates).
+const QUERY_MV: u16 = 5_000;
+/// Wait after the 5 V contract a query requested, in ms, before asking.
+/// Both queries first check VBUS is within 4.75..=5.5 V, from the
 /// meter's sensor, which averages 64 pairs of 1.1 ms bus and shunt
 /// conversions (about 141 ms, `ina226::INIT`). Two such periods (282 ms)
 /// leave only readings taken after PS_RDY; a stale higher one fails the
-/// session. Rounded up.
-const CABLE_SETTLE_MS: u64 = 300;
+/// cable query or defers the port scan. Rounded up.
+const FIVE_VOLT_SETTLE_MS: u64 = 300;
 /// Fixed supply PDO units: 50 mV voltage, 10 mA maximum current (USB PD Table 6.9).
 const FIXED_VOLTAGE_UNIT_MV: u16 = 50;
 const FIXED_CURRENT_UNIT_MA: u16 = 10;
@@ -180,13 +181,20 @@ pub fn request_fixed(
     shared::request_fixed::<BoardLimits>(caps, mv)
 }
 
+/// A query that is only asked from fixed 5 V.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Query {
+    Cable,
+    Port,
+}
+
 pub struct Selection {
     inner: shared::Selection<BoardLimits>,
     mode_cursor: Cell<Option<u16>>,
-    /// A cable query asked above 5 V: the meter requested 5 V first and asks
-    /// the cable once that contract is in place.
-    cable_after_5v: Cell<bool>,
-    /// When the 5 V contract a cable query waits for was first seen, in ms.
+    /// A query asked above 5 V: the meter requested 5 V first and asks once
+    /// that contract is in place.
+    after_5v: Cell<Option<Query>>,
+    /// When the 5 V contract a query waits for was first seen, in ms.
     five_volts_since: Cell<Option<u64>>,
     /// See [`Self::set_plug_in_charger`].
     plug_in_charger: Cell<bool>,
@@ -202,7 +210,7 @@ impl Selection {
         Self {
             inner: shared::Selection::new(),
             mode_cursor: Cell::new(None),
-            cable_after_5v: Cell::new(false),
+            after_5v: Cell::new(None),
             five_volts_since: Cell::new(None),
             plug_in_charger: Cell::new(false),
         }
@@ -222,8 +230,8 @@ impl Selection {
     /// Apply one request from the input task. Previews go through the shared
     /// selection's own checks; only `Confirm` schedules a Request.
     pub fn apply(&self, command: PdCommand) {
-        // Any other request replaces a cable query still waiting for 5 V.
-        self.cable_after_5v.set(false);
+        // Any other request replaces a query still waiting for 5 V.
+        self.after_5v.set(None);
         self.five_volts_since.set(None);
         match command {
             PdCommand::StepFixed(step) => self.step_fixed(step),
@@ -233,7 +241,8 @@ impl Selection {
             PdCommand::Confirm => {
                 self.confirm();
             }
-            PdCommand::QueryCable => self.query_cable(),
+            PdCommand::QueryCable => self.query_at_5v(Query::Cable),
+            PdCommand::QueryPort => self.query_at_5v(Query::Port),
             PdCommand::QueryEpr => {
                 self.request_epr_offer();
             }
@@ -242,31 +251,38 @@ impl Selection {
         }
     }
 
-    /// Ask the cable for its identity, first requesting fixed 5 V when another
-    /// contract is held: the cable is only asked from 5 V.
-    fn query_cable(&self) {
-        if self.request_cable() {
+    /// Ask the cable or the partner, first requesting fixed 5 V when another
+    /// contract is held: both are only asked from 5 V.
+    fn query_at_5v(&self, query: Query) {
+        if self.request(query) {
             return;
         }
         let five = self
             .options()
-            .find(|option| option.supply == Supply::Fixed && option.mv == CABLE_QUERY_MV);
-        if self.target_mv() != CABLE_QUERY_MV || self.target_supply() != Supply::Fixed {
+            .find(|option| option.supply == Supply::Fixed && option.mv == QUERY_MV);
+        if self.target_mv() != QUERY_MV || self.target_supply() != Supply::Fixed {
             let requested = five.is_some_and(|five| self.preview(five) && self.confirm());
-            self.cable_after_5v.set(requested);
+            self.after_5v.set(requested.then_some(query));
         }
     }
 
-    /// Ask the cable once the 5 V contract a cable query requested has held
-    /// for [`CABLE_SETTLE_MS`]; called on each pass of the session's control.
-    pub fn resume_cable_query(&self) {
-        if !self.cable_after_5v.get() {
-            return;
+    fn request(&self, query: Query) -> bool {
+        match query {
+            Query::Cable => self.request_cable(),
+            Query::Port => self.request_port_scan(),
         }
+    }
+
+    /// Ask once the 5 V contract a query requested has held for
+    /// [`FIVE_VOLT_SETTLE_MS`]; called on each pass of the session's control.
+    pub fn resume_5v_query(&self) {
+        let Some(query) = self.after_5v.get() else {
+            return;
+        };
         let at_5v = !self.request_in_flight()
-            && self.established_target().is_some_and(|target| {
-                target.mv == CABLE_QUERY_MV && target.supply == Supply::Fixed
-            });
+            && self
+                .established_target()
+                .is_some_and(|target| target.mv == QUERY_MV && target.supply == Supply::Fixed);
         if !at_5v {
             self.five_volts_since.set(None);
             return;
@@ -274,8 +290,8 @@ impl Selection {
         let now = self.now_ms();
         let since = self.five_volts_since.get().unwrap_or(now);
         self.five_volts_since.set(Some(since));
-        if now.saturating_sub(since) >= CABLE_SETTLE_MS && self.request_cable() {
-            self.cable_after_5v.set(false);
+        if now.saturating_sub(since) >= FIVE_VOLT_SETTLE_MS && self.request(query) {
+            self.after_5v.set(None);
             self.five_volts_since.set(None);
         }
     }

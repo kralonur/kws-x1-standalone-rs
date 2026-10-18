@@ -332,12 +332,14 @@ fn epr_capable(first: u32) -> bool {
     first >> PDO_TYPE_SHIFT == 0 && first & EPR_MODE_CAPABLE != 0
 }
 
-fn answer_caption<T>(answer: &firmware_core::pd_partner::Answer<T>) -> &'static [u8] {
+pub(super) fn answer_caption<T>(answer: &firmware_core::pd_partner::Answer<T>) -> &'static [u8] {
     use firmware_core::pd_partner::Answer;
     match answer {
         Answer::Value(_) => b"OK",
         Answer::Pending => b"WAITING",
         Answer::NotSupported => b"NOT SUPPORTED",
+        Answer::Nak => b"NAK",
+        Answer::Busy => b"BUSY",
         Answer::Timeout => b"NO REPLY",
         Answer::Deferred => b"BLOCKED",
         Answer::Interrupted => b"RESET",

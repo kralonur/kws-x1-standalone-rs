@@ -1,9 +1,11 @@
 //! Board observation adapter and renderer; controller I/O/telemetry live in fusb302-pd.
 mod cable;
 mod partner;
+mod port;
 
 pub use cable::{cable_lines, cable_sections, cable_svid_index, control_cable_selection};
 pub use partner::{CAPABILITY_SECTIONS, partner_lines, partner_sections};
+pub use port::{port_lines, port_sections, widen};
 
 use firmware_core::pd_cable::CableStatus;
 use firmware_core::pd_sniff::Supply;

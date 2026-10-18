@@ -338,6 +338,8 @@ pub struct Session<'a, B: I2c, D, C, P: Platform> {
     reset: Option<ResetStep>,
     protocol_started: bool,
     unsupported_reply: Option<u16>,
+    // The VDM Header of the one NAK owed to a Structured VDM request.
+    vdm_nak_reply: Option<u32>,
     // Object Position of the last acknowledged Request, and of the contract it
     // established at PS_RDY: object 1 is the vSafe5V Fixed PDO (section 6.4.1).
     requested_object: Option<u8>,
@@ -450,6 +452,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             reset: None,
             protocol_started: false,
             unsupported_reply: None,
+            vdm_nak_reply: None,
             requested_object: None,
             contract_object: None,
             bist_test_data: false,
@@ -1100,6 +1103,16 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
             });
         let unsupported_reply =
             bytes.len() == 2 && self.unsupported_reply == Some(header & header::WITHOUT_ID);
+        // The NAK owed to a Structured VDM request (`ReadyResponse::SvdmNak`, Table
+        // 7.2): one Data Object, Vendor_Defined, Sink/UFP, negotiated revision.
+        let vdm_nak = sop == Sop::Partner
+            && bytes.len() == 6
+            && header & header::WITHOUT_ID
+                == header::objects(1)
+                    | header::revision(self.tx_revision)
+                    | header::data::VENDOR_DEFINED
+            && rdo.is_some()
+            && rdo == self.vdm_nak_reply;
         let revision_reply = sop == Sop::Partner
             && self.revision_reply
             && header & header::WITHOUT_ID
@@ -1221,7 +1234,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                             supply: s.target_supply(),
                         })
             });
-        // Information requests (`pd_partner`): exactly one of the three, PD3
+        // Information requests (`pd_partner`): exactly one reviewed request, PD3
         // only, from Ready with an established contract that no Request, reset
         // or cable inspection is changing, and no other request awaiting its answer.
         // An answer window that ended without an answer (SenderResponseTimer
@@ -1247,7 +1260,22 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                 .is_some_and(|s| !s.request_in_flight() && s.established_target().is_some());
         let query = query_ready
             .then(|| pd_protocol::pd_partner::query_request(bytes))
-            .flatten();
+            .flatten()
+            .filter(|&query| {
+                !pd_protocol::pd_partner::is_port_query(query)
+                    || self
+                        .config
+                        .selection
+                        .is_some_and(|s| s.port_query_armed(query))
+            });
+        if query.is_some_and(pd_protocol::pd_partner::is_port_query) {
+            // Independent physical check: never probe a partner above fixed 5 V.
+            // Out of range the scan is Deferred unsent, not a session fault.
+            match self.cable_safe5().await {
+                Err(Error::InputVoltage { .. }) => return self.defer(b'V'),
+                result => result?,
+            }
+        }
         // EPR_Get_Source_Cap (`pd_spr::Limits::EPR_OFFER`): exactly its bytes,
         // as an information request, while policy has asked for the EPR offer.
         let epr_request = query_ready
@@ -1307,6 +1335,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                 && !self.caps_reply);
         if !is_request
             && !unsupported_reply
+            && !vdm_nak
             && !is_sink_caps
             && !cable_identity
             && !reset_accept
@@ -1560,6 +1589,9 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                 if unsupported_reply {
                     self.unsupported_reply = None;
                 }
+                if vdm_nak {
+                    self.vdm_nak_reply = None;
+                }
                 if revision_reply {
                     self.revision_reply = false;
                 }
@@ -1579,7 +1611,10 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                     self.pps_status_until = Some(t_ack + PPS_STATUS_ANSWER_MS);
                 }
                 if let Some(query) = query {
-                    self.query_until = Some((t_ack + QUERY_ANSWER_MS, query));
+                    self.query_until = Some((
+                        t_ack + pd_protocol::pd_partner::query_response_ms(query),
+                        query,
+                    ));
                 }
                 if epr_request {
                     self.epr_until = Some(t_ack + QUERY_ANSWER_MS);
@@ -1681,6 +1716,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         self.status_reply = None;
         self.sink_alert_until = None;
         self.unsupported_reply = None;
+        self.vdm_nak_reply = None;
         self.revision_reply = false;
         self.sink_caps_reply = false;
         self.skedb_reply = false;
@@ -1776,7 +1812,8 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         Ok(())
     }
     /// `cause`: b'G' SinkTxOK not seen in time, b'M' a SOP Message came first,
-    /// b'C' a SOP Message arrived and ours was dropped unsent (section 7.3).
+    /// b'C' a SOP Message arrived and ours was dropped unsent (section 7.3),
+    /// b'V' a port scan request found VBUS outside vSafe5V.
     /// (`gated_send` records b'Q' when it sent through the stale-SinkTxNG fallback.)
     fn defer<T>(&mut self, cause: u8) -> Result<T, Error<B::Error>> {
         self.trace().sink_tx_cause = cause;
@@ -1914,6 +1951,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                 }
                 let revision = (buffer[0] >> 6) & 3;
                 self.unsupported_reply = None;
+                self.vdm_nak_reply = None;
                 self.revision_reply = false;
                 self.sink_caps_reply = false;
                 self.skedb_reply = false;
@@ -2114,7 +2152,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                     // Protocol Error; a malformed answer fails closed.
                     use pd_protocol::pd_partner::{Reply, query_answer};
                     match query_answer(query, &buffer[..length]) {
-                        Reply::Answer | Reply::NotSupported => {}
+                        Reply::Answer | Reply::NotSupported | Reply::Nak | Reply::Busy => {}
                         Reply::Other if same_revision => {
                             self.protocol_error()?;
                             return Ok(length);
@@ -2173,8 +2211,6 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                     && self.config.selection.is_none_or(|s| !s.request_in_flight())
                 {
                     use pd_protocol::pd_spr::{ReadyResponse, ready_response};
-                    let extended = (header & header::EXTENDED != 0 && length >= 4)
-                        .then(|| u16::from_le_bytes([buffer[2], buffer[3]]));
                     // PE_BIST_Test_Mode (section 9.2.26.4.2.1), only at vSafe5V: the
                     // FUSB302 BIST_TMODE keeps sending GoodCRC and clears the RX
                     // FIFO; Hard Reset restores CONTROL3 (restore_baseline).
@@ -2197,7 +2233,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                         }
                         _ => {}
                     }
-                    match ready_response(self.tx_revision, header, extended) {
+                    match ready_response(self.tx_revision, header, &buffer[2..length]) {
                         ReadyResponse::Unsupported | ReadyResponse::UnsupportedAfterChunk => {
                             self.unsupported_reply = Some(
                                 header::revision(self.tx_revision)
@@ -2217,6 +2253,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                             }
                             self.unsupported_reply = Some((u16::from(self.tx_revision) << 6) | 4);
                         }
+                        ReadyResponse::SvdmNak(nak) => self.vdm_nak_reply = Some(nak),
                         ReadyResponse::Revision => self.revision_reply = true,
                         ReadyResponse::SinkCap => self.sink_caps_reply = true,
                         ReadyResponse::SinkCapExtended => self.skedb_reply = true,

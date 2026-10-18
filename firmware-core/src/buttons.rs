@@ -865,6 +865,8 @@ pub enum PdCommand {
     Confirm,
     /// Ask the cable for its E-marker identity (from fixed 5 V only).
     QueryCable,
+    /// Ask the partner for its sink PDOs and SOP identity at fixed 5 V (PD3).
+    QueryPort,
     /// Ask an EPR capable charger for its EPR offer (informational only).
     QueryEpr,
     /// Restart the meter through a charger power cycle, into the saved
@@ -1385,6 +1387,9 @@ impl Navigation {
             return None;
         };
         match page {
+            Detail::Pd if self.selectable && !self.input.passthrough && !self.cable_test => {
+                Some(Some(PdCommand::QueryPort))
+            }
             Detail::Cable => Some(Some(PdCommand::QueryCable)),
             Detail::Charger if self.cable_test => Some(Some(PdCommand::QueryEpr)),
             // The full scan: Quick Charge first, with PD silent (a charger

@@ -578,6 +578,7 @@ dependencies = [
  "qc-protocol",
  "scp-protocol",
  "u8g2-fonts",
+ "usbpd",
 ]
 
 [[package]]
@@ -997,7 +998,7 @@ checksum = "a513e167849a384b7f9b746e517604398518590a9142f4846a32e3c2a4de7b11"
 [[package]]
 name = "pd-protocol"
 version = "0.1.0"
-source = "git+https://github.com/kralonur/embedded-charging-protocols-rs?rev=d4be57a54f7a0b110bfdd65115d6d35014911b1b#d4be57a54f7a0b110bfdd65115d6d35014911b1b"
+source = "git+https://github.com/kralonur/embedded-charging-protocols-rs?rev=e85905dc21a0c6063c7aca7cfa3ee46683dde74d#e85905dc21a0c6063c7aca7cfa3ee46683dde74d"
 dependencies = [
  "usbpd",
  "usbpd-traits",
@@ -1048,7 +1049,7 @@ dependencies = [
 [[package]]
 name = "qc-protocol"
 version = "0.1.0"
-source = "git+https://github.com/kralonur/embedded-charging-protocols-rs?rev=d4be57a54f7a0b110bfdd65115d6d35014911b1b#d4be57a54f7a0b110bfdd65115d6d35014911b1b"
+source = "git+https://github.com/kralonur/embedded-charging-protocols-rs?rev=e85905dc21a0c6063c7aca7cfa3ee46683dde74d#e85905dc21a0c6063c7aca7cfa3ee46683dde74d"
 
 [[package]]
 name = "quick-error"
@@ -1134,7 +1135,7 @@ checksum = "e1cf6437eb19a8f4a6cc0f7dca544973b0b78843adbfeb3683d1a94a0024a294"
 [[package]]
 name = "scp-protocol"
 version = "0.1.0"
-source = "git+https://github.com/kralonur/embedded-charging-protocols-rs?rev=d4be57a54f7a0b110bfdd65115d6d35014911b1b#d4be57a54f7a0b110bfdd65115d6d35014911b1b"
+source = "git+https://github.com/kralonur/embedded-charging-protocols-rs?rev=e85905dc21a0c6063c7aca7cfa3ee46683dde74d#e85905dc21a0c6063c7aca7cfa3ee46683dde74d"
 dependencies = [
  "crc",
  "thiserror",
@@ -1420,7 +1421,7 @@ dependencies = [
 [[package]]
 name = "usbpd"
 version = "2.0.0"
-source = "git+https://github.com/kralonur/usbpd?rev=99bf0229450fa807e225c9b2f6b85f655c2842f4#99bf0229450fa807e225c9b2f6b85f655c2842f4"
+source = "git+https://github.com/kralonur/usbpd?rev=16b13a23dafad6c5dd0c18801ee978b785730f83#16b13a23dafad6c5dd0c18801ee978b785730f83"
 dependencies = [
  "byteorder",
  "embassy-futures",
@@ -1434,7 +1435,7 @@ dependencies = [
 [[package]]
 name = "usbpd-traits"
 version = "2.0.0"
-source = "git+https://github.com/kralonur/usbpd?rev=99bf0229450fa807e225c9b2f6b85f655c2842f4#99bf0229450fa807e225c9b2f6b85f655c2842f4"
+source = "git+https://github.com/kralonur/usbpd?rev=16b13a23dafad6c5dd0c18801ee978b785730f83#16b13a23dafad6c5dd0c18801ee978b785730f83"
 
 [[package]]
 name = "utf8parse"

@@ -801,7 +801,12 @@ fn pd_detail(canvas: &mut Canvas, observation: Observation, passthrough: bool) {
         passthrough,
         std::iter::once(pd::lines(observation))
             .chain(pd::startup_lines(observation))
-            .chain(pd::caps_lines(observation)),
+            .chain(pd::caps_lines(observation))
+            .map(pd::widen)
+            .chain(
+                (0..pd::port_sections(observation))
+                    .map(|section| pd::port_lines(observation, section)),
+            ),
         0,
     );
 }
@@ -809,6 +814,53 @@ fn pd_detail(canvas: &mut Canvas, observation: Observation, passthrough: bool) {
 /// PD Session photo.
 fn pd_session(canvas: &mut Canvas) -> Result<()> {
     pd_detail(canvas, five_volt_session(), false);
+    Ok(())
+}
+
+/// The DRP phone in the port check photo: its one Fixed 5V 0.5 A Source PDO
+/// as captured on the wire.
+const PHONE: [u32; 1] = [0x3601_9032];
+
+/// A port check of that phone as captured on the wire: its Sink_Capabilities
+/// and Discover Identity ACK.
+fn scanned_port() -> Result<Observation> {
+    use pd_protocol::{
+        pd_partner::{Answer, PortInfo},
+        pd_port::{Identity, Objects},
+    };
+    let bytes =
+        |objects: &[u32]| -> Vec<u8> { objects.iter().flat_map(|raw| raw.to_le_bytes()).collect() };
+    let mut observation = session(&PHONE, Supply::Fixed, 5_000, 500);
+    let sink = Objects::decode(&bytes(&[
+        0x3601_912c,
+        0x0002_d0c8,
+        0x8b41_90c8,
+        0xc0dc_212c,
+    ]))
+    .context("bounded sink PDO fixture")?;
+    let identity = Identity::decode(&bytes(&[0xff00_a041, 0xd040_04e8, 0, 0x6860_0000]))
+        .context("identity fixture")?;
+    observation
+        .spr
+        .as_mut()
+        .context("sink session fixture")?
+        .partner
+        .port = Some(PortInfo {
+        sink: Answer::Value(sink),
+        identity: Answer::Value(identity),
+    });
+    Ok(observation)
+}
+
+fn pd_input(canvas: &mut Canvas) -> Result<()> {
+    let observation = scanned_port()?;
+    detail(
+        canvas,
+        Detail::Pd,
+        false,
+        (0..pd::port_sections(observation)).map(|section| pd::port_lines(observation, section)),
+        4,
+    );
     Ok(())
 }
 
@@ -1011,7 +1063,7 @@ fn main() -> Result<()> {
             .nth(1)
             .context("usage: screens <output directory>")?,
     );
-    let pages: [(&str, Draw); 22] = [
+    let pages: [(&str, Draw); 23] = [
         ("overview_screen", overview),
         ("lines_screen", lines),
         ("energy_screen", energy),
@@ -1026,6 +1078,7 @@ fn main() -> Result<()> {
         ("charger_scp_screen", charger_scp),
         ("fcp_screen", fcp),
         ("pd_session_screen", pd_session),
+        ("pd_input_screen", pd_input),
         ("charger_screen", charger),
         ("cable_screen", cable),
         ("cable_details_screen", cable_details),
@@ -1047,6 +1100,90 @@ fn main() -> Result<()> {
 mod tests {
     use super::*;
     use firmware_core::settings::ScpFindings;
+    use pd_protocol::{
+        pd_partner::Answer,
+        pd_port::{Identity, Objects},
+    };
+
+    fn port_text(observation: Observation) -> String {
+        String::from_utf8(
+            (0..pd::port_sections(observation))
+                .flat_map(|section| pd::port_lines(observation, section).into_iter().flatten())
+                .collect(),
+        )
+        .unwrap()
+    }
+
+    fn set_identity(observation: &mut Observation, identity: Answer<Identity>) {
+        let port = observation.spr.as_mut().unwrap().partner.port.as_mut();
+        port.unwrap().identity = identity;
+    }
+
+    // UI-boundary regressions from a real port check capture (a DRP phone as
+    // source): received claims are shown decoded, and absent or unknown
+    // Product Type VDO layouts never produce USB claims.
+    #[test]
+    fn port_check_shows_the_received_sink_pdos_and_identity() {
+        let mut observation = scanned_port().unwrap();
+        let text = port_text(observation);
+        for expected in [
+            "SINK PDOS:OK",
+            "IDENTITY:OK",
+            "1 FIX 5.00V 3.00A (15W)",
+            "3 VAR 5.0-9.0V 2.00A (18W)",
+            "4 PPS 3.3-11.0V 2.20A (24.2W)",
+            "VID:04E8 PID:6860",
+            "BCD:0000 XID:00000000",
+            "UFP:PERIPHERAL",
+            "USB DEVICE:Y HOST:Y",
+            "MODAL:N CONN:RECEPTACLE",
+            "PARTNER:DRP",
+            "SOURCE: DRP USB SUSPEND USB DATA",
+            "SINK: DRP HIGHER CAP USB DATA DRD",
+            "FRS:NONE",
+        ] {
+            assert!(text.contains(expected), "missing: {expected}");
+        }
+        assert_eq!(pd::port_sections(observation), 4);
+        for (objects, sections, ufp) in [
+            (vec![0xff00_a041, 0xd040_04e8, 0, 0x6860_0000], 4, false),
+            (
+                vec![0xff00_a041, 0x5100_0000, 0, 0, 0x6d00_0003, 0, 0x4700_0005],
+                5,
+                true,
+            ),
+            (vec![0xff00_8041, 0x5100_0000, 0, 0, 0x6d00_0003], 4, false),
+        ] {
+            let bytes: Vec<u8> = objects.into_iter().flat_map(u32::to_le_bytes).collect();
+            set_identity(
+                &mut observation,
+                Answer::Value(Identity::decode(&bytes).unwrap()),
+            );
+            let text = port_text(observation);
+            assert_eq!(pd::port_sections(observation), sections);
+            assert_eq!(text.contains("SPEED:USB4 GEN3"), ufp);
+            if ufp {
+                assert!(text.contains("USB2:Y BB:N 3.2:Y 4:Y"));
+                assert!(text.contains("ALT MODES:NONE"));
+            }
+        }
+        set_identity(&mut observation, Answer::Nak);
+        observation
+            .spr
+            .as_mut()
+            .unwrap()
+            .partner
+            .port
+            .as_mut()
+            .unwrap()
+            .sink = Answer::NotSent;
+        let text = port_text(observation);
+        assert!(text.contains("SINK PDOS:NOT DRP"));
+        assert!(text.contains("IDENTITY:NAK"));
+        assert_eq!(pd::port_sections(observation), 4);
+        set_identity(&mut observation, Answer::Timeout);
+        assert!(port_text(observation).contains("IDENTITY:NO REPLY"));
+    }
 
     #[test]
     fn charger_keeps_pd_query_tabs_and_asks_for_pd_without_an_offer() {

@@ -1509,7 +1509,12 @@ async fn meter_task(
                             detail,
                             core::iter::once(pd::lines(observation))
                                 .chain(pd::startup_lines(observation))
-                                .chain(pd::caps_lines(observation)),
+                                .chain(pd::caps_lines(observation))
+                                .map(pd::widen)
+                                .chain(
+                                    (0..pd::port_sections(observation))
+                                        .map(|section| pd::port_lines(observation, section)),
+                                ),
                             top,
                             scrolling,
                         ),

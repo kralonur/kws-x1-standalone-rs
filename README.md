@@ -243,7 +243,7 @@ point the way it flows (they follow the screen rotation).
 | **QC 3.0** | the step range, the set voltage, VBUS, D+ and D−; under a PD contract only `PD MODE` | OK tests the charger, then starts continuous mode at 5 V (under a PD contract it first switches the charger out of PD); Left/Right move it by 0.2 V (repeats held); OK or Back closes it; the steps stay in force on other screens until `OFF` on QC 2.0 |
 | **SCP** | identification, then the set voltage and current limit, the live output; `ACTIVE`, `SETTING`, `STOPPING` or `FAILED` | OK tests adapter-type registers; after a detection with ratings, OK, Left/Right voltage (20 mV, 100 mV held), OK, current limit (50 mA, 250 mA held), OK applies; Back cancels an edit, then leaves the page with the output still in force; hold OK: stop the output, or rescan when none runs; PD must stop first |
 | **FCP** | identification, then the voltages the charger lists and `OFF`, the status on the requested row (`WAIT`, `SETTING`, `ACTIVE`, `STOPPING`); under a PD contract only `PD MODE` | OK tests the charger, then opens the choice at the voltage in force, else the first; Left/Right choose, OK requests and closes the choice, Back closes it; the request stays in force on other screens until `OFF`; hold OK: stop the output, or rescan when none runs; PD must stop first |
-| **PD Session** | sink: session state, CC levels and the charger's offer as received. Passthrough: CC pin, Rp level and the latest PD messages | OK to scroll |
+| **PD Session** | sink: session state, CC levels, the source's offer and the port check (a dual-role device's sink PDOs and identity). Passthrough: CC pin, Rp level and the latest PD messages | OK to scroll; hold OK: port check (drops to fixed 5 V first, PD 3.0 only) |
 | **Charger** | the offer (`*` = needs a 5 A cable), the charger's identity, maker and peak ratings, power status and source info, a power bank's battery, QC, SCP and FCP results | OK to scroll; hold OK: full scan (Quick Charge, SCP and FCP identification, PD, EPR, and the 5 A cable test with the plug in the charger) |
 | **Cable** | the cable's e-marker: a readable summary (type, speed, rating, length, alt modes, maker), identity, ratings, status and modes | OK to scroll; hold OK to read the e-marker (drops to fixed 5 V first) |
 | **System** | I2C bus state and counters, frame and button timing, stack use, `LAST RESET:` cause | OK to scroll |
@@ -734,7 +734,8 @@ screen; [FCP](#fcp) explains the test and the requests.
 <img src="pictures/pd_session_screen.webp" width="480" alt="PD Session screen">
 
 This is the **PD Session** screen (tab `PD SESSION` in Info): the meter's
-own PD negotiation. It scrolls (OK) through three sections.
+own PD negotiation. It scrolls (OK) through the session, startup, source offer
+and port check sections.
 
 **Session section**
 
@@ -797,6 +798,54 @@ own PD negotiation. It scrolls (OK) through three sections.
   orientations); `NO SINGLE LINE`: it could not pick one and did not start.
 - `CC1 SOP:--- CABLE:---` and `CC2 …`: messages heard on each pin for the
   charger and for a cable.
+
+**Port check (PD3 only)**
+
+<img src="pictures/pd_input_screen.webp" width="480" alt="Port check on the PD Session screen">
+
+The port check reads what a phone or other dual-role device **accepts** as
+input. Plug the device in where the charger normally goes: it sees the meter's
+sink pull-down, switches to supplying power (as when it charges earbuds),
+powers the meter and offers it PD. Hold OK on PD Session: from another
+contract the meter first requests fixed 5 V. A source that advertises
+dual-role power is then asked for its **sink PDOs**, followed by SOP
+**Discover Identity**; one without that flag is asked only for identity. No
+power or data role swap, VCONN change or cable test is performed, and a
+device that only charges cannot be checked: it never powers the meter.
+
+Scroll to `PORT CHECK` for the outcomes, then `SINK PDOS (ACCEPTS)`,
+`PDO 1 FLAGS`, `DISCOVER IDENTITY` and `UFP VDO`:
+
+- `PDO 1 FLAGS` lists the capability bits set in the first source PDO (shown
+  before a scan too) and, after a scan, the first sink PDO: `DRP` dual-role
+  power, `USB SUSPEND`, `UNCONSTRAINED` power, `USB DATA` communication
+  capable, `DRD` dual-role data, `UNCHUNKED` extended messages, `EPR` capable
+  and `HIGHER CAP` (the device works better above 5 V), then `FRS` with the
+  current a fast role swap needs (`NONE` when unsupported). `NONE` means no
+  bit is set.
+- `DISCOVER IDENTITY`: VID, PID, bcdDevice, XID, the UFP and DFP product
+  types, USB device and host, `MODAL` (the device offers alternate modes as a
+  UFP) and `CONN` (receptacle or plug).
+- `UFP VDO`, when a known UFP v1.2 or v1.3 layout was received: the highest
+  USB speed, USB 2.0, Billboard, USB 3.2 and USB4 device support, and
+  `ALT MODES`: `TBT3`, `RECONFIG` (modes that reconfigure the connector's
+  signals, such as DisplayPort) and `NO RECONFIG` (modes that do not), with
+  the VBUS and VCONN needs of those modes.
+
+The device's own offer to the meter is in the session's source-offer section.
+Watts in parentheses are calculated from each PDO (the top voltage for
+variable and PPS ranges), not a measured charging rate. QC, AFC and SCP input
+support cannot be inferred from PD results. The XID is not proof of
+certification.
+
+`NOT DRP` (sink PDOs not asked), `NAK`, `BUSY`, `NO REPLY`, `NOT SUPPORTED`,
+`BLOCKED` and `RESET` are distinct outcomes. `NO REPLY` for identity means the
+request was acknowledged but no answer arrived within 50 ms, the longest the
+specification lets the meter wait; some phones answer after about 30 ms.
+`BLOCKED` means the request was never sent, for example with VBUS outside
+4.75–5.5 V. There is no automatic retry; a later hold starts a new scan. Power
+changes and cable inspection wait while the scan runs. The scan is disabled in
+passthrough and the 5 A cable-test boot.
 
 **ERR codes** (hexadecimal):
 

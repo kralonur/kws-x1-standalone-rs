@@ -33,9 +33,9 @@ lzma-rust2 = "0.22.0"
 microfft = { version = "0.6.0", default-features = false }
 object = "0.40.0"
 panic-halt = "1.0.0"
-pd-protocol = { git = "https://github.com/kralonur/embedded-charging-protocols-rs", rev = "d4be57a54f7a0b110bfdd65115d6d35014911b1b" }
-qc-protocol = { git = "https://github.com/kralonur/embedded-charging-protocols-rs", rev = "d4be57a54f7a0b110bfdd65115d6d35014911b1b" }
-scp-protocol = { git = "https://github.com/kralonur/embedded-charging-protocols-rs", rev = "d4be57a54f7a0b110bfdd65115d6d35014911b1b" }
+pd-protocol = { git = "https://github.com/kralonur/embedded-charging-protocols-rs", rev = "e85905dc21a0c6063c7aca7cfa3ee46683dde74d" }
+qc-protocol = { git = "https://github.com/kralonur/embedded-charging-protocols-rs", rev = "e85905dc21a0c6063c7aca7cfa3ee46683dde74d" }
+scp-protocol = { git = "https://github.com/kralonur/embedded-charging-protocols-rs", rev = "e85905dc21a0c6063c7aca7cfa3ee46683dde74d" }
 serde = "1.0.229"
 serde_json = "1.0.154"
 sha2 = "0.11.1"
@@ -43,8 +43,8 @@ tempfile = "3.27.0"
 tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
 u8g2-fonts = "0.8.0"
-usbpd = { git = "https://github.com/kralonur/usbpd", rev = "99bf0229450fa807e225c9b2f6b85f655c2842f4" }
-usbpd-traits = { git = "https://github.com/kralonur/usbpd", rev = "99bf0229450fa807e225c9b2f6b85f655c2842f4" }
+usbpd = { git = "https://github.com/kralonur/usbpd", rev = "16b13a23dafad6c5dd0c18801ee978b785730f83" }
+usbpd-traits = { git = "https://github.com/kralonur/usbpd", rev = "16b13a23dafad6c5dd0c18801ee978b785730f83" }
 
 # Size optimization keeps the application below the preserved graphics bank.
 # This is the source firmware's release profile, not a new hardware qualification.

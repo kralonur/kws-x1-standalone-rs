@@ -3495,6 +3495,14 @@ pub fn draw_detail<D: DrawTarget<Color = Rgb565>, const WIDTH: usize>(
         }
     }
     view.end = rows.saturating_sub(LIST_ROWS);
+    // Only the sink's PD session page scans; passthrough only listens.
+    let sink = matches!(
+        header,
+        Header::Tabs {
+            passthrough: false,
+            ..
+        }
+    );
     scrollbar(
         target,
         u32::from(rows),
@@ -3509,11 +3517,13 @@ pub fn draw_detail<D: DrawTarget<Color = Rgb565>, const WIDTH: usize>(
             (true, _) => "< > scroll  OK done",
             (false, true) => match page {
                 Detail::Charger => "< > tabs  OK scroll  hold OK scan",
+                Detail::Pd if sink => "< > tabs  OK scroll  hold OK scan",
                 Detail::Cable => "< > tabs  OK scroll  hold OK read",
                 _ => "< > tabs  OK scroll",
             },
             (false, false) => match page {
                 Detail::Charger => "< > tabs  hold OK scan",
+                Detail::Pd if sink => "< > tabs  hold OK scan",
                 Detail::Cable => "< > tabs  hold OK read",
                 _ => "< > tabs  BACK groups",
             },

@@ -49,3 +49,4 @@ panic-halt.workspace = true
 qc-protocol.workspace = true
 scp-protocol.workspace = true
 u8g2-fonts.workspace = true
+usbpd.workspace = true
