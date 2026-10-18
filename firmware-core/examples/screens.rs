@@ -821,8 +821,9 @@ fn pd_session(canvas: &mut Canvas) -> Result<()> {
 /// as captured on the wire.
 const PHONE: [u32; 1] = [0x3601_9032];
 
-/// A port check of that phone as captured on the wire: its Sink_Capabilities
-/// and Discover Identity ACK.
+/// A port check of that phone: its Sink_Capabilities and Discover Identity ACK
+/// as captured on the wire, with the PPS current (2.30 A) and bcdDevice (0201)
+/// the meter read from it.
 fn scanned_port() -> Result<Observation> {
     use pd_protocol::{
         pd_partner::{Answer, PortInfo},
@@ -835,10 +836,10 @@ fn scanned_port() -> Result<Observation> {
         0x3601_912c,
         0x0002_d0c8,
         0x8b41_90c8,
-        0xc0dc_212c,
+        0xc0dc_212e,
     ]))
     .context("bounded sink PDO fixture")?;
-    let identity = Identity::decode(&bytes(&[0xff00_a041, 0xd040_04e8, 0, 0x6860_0000]))
+    let identity = Identity::decode(&bytes(&[0xff00_a041, 0xd040_04e8, 0, 0x6860_0201]))
         .context("identity fixture")?;
     observation
         .spr
@@ -1131,9 +1132,9 @@ mod tests {
             "IDENTITY:OK",
             "1 FIX 5.00V 3.00A (15W)",
             "3 VAR 5.0-9.0V 2.00A (18W)",
-            "4 PPS 3.3-11.0V 2.20A (24.2W)",
+            "4 PPS 3.3-11.0V 2.30A (25.3W)",
             "VID:04E8 PID:6860",
-            "BCD:0000 XID:00000000",
+            "BCD:0201 XID:00000000",
             "UFP:PERIPHERAL",
             "USB DEVICE:Y HOST:Y",
             "MODAL:N CONN:RECEPTACLE",
@@ -1146,7 +1147,7 @@ mod tests {
         }
         assert_eq!(pd::port_sections(observation), 4);
         for (objects, sections, ufp) in [
-            (vec![0xff00_a041, 0xd040_04e8, 0, 0x6860_0000], 4, false),
+            (vec![0xff00_a041, 0xd040_04e8, 0, 0x6860_0201], 4, false),
             (
                 vec![0xff00_a041, 0x5100_0000, 0, 0, 0x6d00_0003, 0, 0x4700_0005],
                 5,

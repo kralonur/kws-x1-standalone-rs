@@ -734,8 +734,8 @@ screen; [FCP](#fcp) explains the test and the requests.
 <img src="pictures/pd_session_screen.webp" width="480" alt="PD Session screen">
 
 This is the **PD Session** screen (tab `PD SESSION` in Info): the meter's
-own PD negotiation. It scrolls (OK) through the session, startup, source offer
-and port check sections.
+own PD negotiation. It scrolls (OK) through the session, startup and port
+check sections.
 
 **Session section**
 
@@ -748,8 +748,8 @@ and port check sections.
 - **`TRY ACK ACC RDY`**: request written, acknowledged with GoodCRC (`G`:
   GoodCRC seen without the send-done flag), `Accept` received, `PS_RDY`
   received. `Y` yes, `-` not yet.
-- **`MS: AK AC RD`**: milliseconds from sending the request to its GoodCRC,
-  to `Accept`, and to `PS_RDY`.
+- **`MS: AK AC RD`**: milliseconds for each step: the request sent to its
+  GoodCRC, GoodCRC to `Accept`, and `Accept` to `PS_RDY`.
 - **`VBUS:05.13V MEASURED`**: the live bus voltage. Before a live reading the
   row is `V:G--.-- RD--.-- RT--.--`: VBUS before the request, at `PS_RDY`, and
   after the session ended.
@@ -771,7 +771,8 @@ and port check sections.
   - `SEL:09V`: the fixed profile being prepared.
   - `HOLD BACK TO STOP`, `POST S1:---- C3:----` (controller registers after
     the session), `RESTORE NOT VERIFIED`, `VCONN STATE UNVERIFIED`,
-    `VALUE:----` (an unexpected register value), or a cable `VID`/`PID`.
+    `VALUE:----` (an unexpected register value), `WAIT - NO RETRY` (a cable
+    query is running) or a cable `VID`/`PID`.
 - **Last row**, the session state:
   - `05V CONTRACT LIVE` / `PPS07.02V 05.00A LIVE` (`AVS…` likewise): a
     contract is in force.
@@ -782,6 +783,9 @@ and port check sections.
   - `WAIT CC TEST`, `MEAS RX POWER`, `RX LISTEN TX OFF`,
     `CAPS RESTORED TX OFF`: startup steps.
   - `SKIP BUS LATCHED`: the session never started; the bus was closed.
+  - `QUICK CHARGE PD OFF`: PD stays off for a Quick Charge boot.
+  - The `EPR: …` states listed under the [PD Profiles](#6-pd-profiles) hint
+    row, while EPR mode is entered or left, or after it failed.
   - `FAIL REG:----`, `SKIP REG:----`, `DIFF REG:----`: stopped on a
     register error, an unexpected start state, or a value that did not read
     back.
@@ -816,6 +820,9 @@ device that only charges cannot be checked: it never powers the meter.
 Scroll to `PORT CHECK` for the outcomes, then `SINK PDOS (ACCEPTS)`,
 `PDO 1 FLAGS`, `DISCOVER IDENTITY` and `UFP VDO`:
 
+- `PORT CHECK`: `PARTNER:DRP` or `PARTNER:SOURCE ONLY` (from the dual-role
+  power flag), then the `SINK PDOS:` and `IDENTITY:` outcomes, or
+  `HOLD OK: SCAN AT 5V` before a scan.
 - `PDO 1 FLAGS` lists the capability bits set in the first source PDO (shown
   before a scan too) and, after a scan, the first sink PDO: `DRP` dual-role
   power, `USB SUSPEND`, `UNCONSTRAINED` power, `USB DATA` communication
@@ -832,7 +839,7 @@ Scroll to `PORT CHECK` for the outcomes, then `SINK PDOS (ACCEPTS)`,
   signals, such as DisplayPort) and `NO RECONFIG` (modes that do not), with
   the VBUS and VCONN needs of those modes.
 
-The device's own offer to the meter is in the session's source-offer section.
+The device's own offer to the meter is on the [Charger](#14-charger) page.
 Watts in parentheses are calculated from each PDO (the top voltage for
 variable and PPS ranges), not a measured charging rate. QC, AFC and SCP input
 support cannot be inferred from PD results. The XID is not proof of
