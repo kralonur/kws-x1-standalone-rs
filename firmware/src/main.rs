@@ -333,6 +333,8 @@ static ADC_REFERENCE: Watch<CriticalSectionRawMutex, Option<u16>, 1> = Watch::ne
 static QC_STATUS: Watch<CriticalSectionRawMutex, qc_drive::Status, 1> = Watch::new();
 // Terminal SCP evidence must survive a fast transition back to an idle driver.
 static SCP_RESULT: Watch<CriticalSectionRawMutex, (u8, scp_drive::Status), 1> = Watch::new();
+/// Every FCP status, kept after the trigger goes idle so its result shows.
+static FCP_RESULT: Watch<CriticalSectionRawMutex, (u8, scp_drive::FcpStatus), 1> = Watch::new();
 /// The meter's averaged raw reading: `meter_task` sends it, the button task
 /// hands it to the calibration steps.
 static METER_MEAN: Watch<CriticalSectionRawMutex, Option<Mean>, 1> = Watch::new();
@@ -686,7 +688,7 @@ async fn line_task(mut adc: line_adc::LineAdc, mut trigger: qc_drive::Trigger) {
         reference_sender.send(scan.map(|(_, reference)| reference));
         // The trigger judges requests by the output, read here rather than
         // at the meter page's frame pace.
-        let vbus_mv = match request.is_some() || trigger.scp_active() {
+        let vbus_mv = match request.is_some() || trigger.single_wire_active() {
             true => read_meter(ina226::BUS_VOLTAGE)
                 .await
                 .filter(|_| !bus_failed())
@@ -702,8 +704,15 @@ async fn line_task(mut adc: line_adc::LineAdc, mut trigger: qc_drive::Trigger) {
         {
             SCP_RESULT.sender().send((attempt, terminal));
         }
+        if let qc_drive::Status::Fcp(attempt, fcp) = status {
+            FCP_RESULT.sender().send_if_modified(|current| {
+                let changed = *current != Some((attempt, fcp));
+                *current = Some((attempt, fcp));
+                changed
+            });
+        }
         status_sender.send(status);
-        Timer::after(if trigger.scp_busy() {
+        Timer::after(if trigger.single_wire_busy() {
             SCP_STEP_PERIOD
         } else {
             METER_READ_PERIOD
@@ -797,6 +806,15 @@ async fn button_task(
                 navigation.set_scp_adapter(attempt, adapter);
                 navigation.finish_scp(attempt, ScpFindings::Confirmed)
             }
+            Some(qc_drive::Status::Fcp(attempt, scp_drive::FcpStatus::Detected(adapter))) => {
+                navigation.finish_fcp(attempt, Some(adapter));
+                None
+            }
+            Some(qc_drive::Status::Fcp(attempt, scp_drive::FcpStatus::Failed(_))) => {
+                navigation.fail_fcp_output(attempt);
+                navigation.finish_fcp(attempt, None);
+                None
+            }
             Some(qc_drive::Status::Scp(attempt, scp_drive::Status::Failed(failure))) => {
                 navigation.fail_scp_output(attempt);
                 navigation.finish_scp(
@@ -828,7 +846,10 @@ async fn button_task(
             restart_pending = true;
         }
         let command = if restart_pending {
-            if matches!(qc_updates.try_get(), Some(qc_drive::Status::Scp(..))) {
+            if matches!(
+                qc_updates.try_get(),
+                Some(qc_drive::Status::Scp(..) | qc_drive::Status::Fcp(..))
+            ) {
                 None
             } else {
                 restart_pending = false;
@@ -1000,6 +1021,8 @@ async fn meter_task(
     let mut qc_status = qc_drive::Status::Off;
     let mut scp_updates = SCP_RESULT.anon_receiver();
     let mut scp_status = None;
+    let mut fcp_updates = FCP_RESULT.anon_receiver();
+    let mut fcp_status = None;
     // Peaks follow the meter page's reads; a reset hold on the overview
     // clears them.
     let mut peaks = ui::Peaks::default();
@@ -1206,6 +1229,10 @@ async fn meter_task(
             scp_status = Some(update);
             dirty = true;
         }
+        if let Some(update) = fcp_updates.try_changed() {
+            fcp_status = Some(update);
+            dirty |= matches!(view, View::Fcp { .. });
+        }
         if let Some(update) = qc_updates.try_changed() {
             qc_status = update;
             qc_findings = match update {
@@ -1363,6 +1390,25 @@ async fn meter_task(
                             },
                             active: matches!(input.trigger, Some(QcTarget::ScpOutput { .. })),
                             reading: reading(last_raw_v, last_raw_i, input.settings.calibration),
+                        },
+                    );
+                }
+                View::Fcp { probing, preview } => {
+                    ui::draw_fcp(
+                        &mut Canvas(frame),
+                        &header,
+                        &ui::Fcp {
+                            mode: qc_mode(latest_observation()),
+                            probing,
+                            preview,
+                            adapter: input.fcp_adapter,
+                            request: match input.trigger {
+                                Some(QcTarget::FcpOutput { mv, .. }) => Some(mv),
+                                _ => None,
+                            },
+                            status: fcp_status
+                                .filter(|(attempt, _)| *attempt == input.fcp_attempt)
+                                .map(|(_, status)| status),
                         },
                     );
                 }

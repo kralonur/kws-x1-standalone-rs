@@ -47,3 +47,6 @@ pub enum Status<A = scp_protocol::Adapter, O = scp_protocol::control::Output> {
     Stopped,
     Failed(Failure),
 }
+
+/// An FCP trigger's progress.
+pub type FcpStatus = Status<scp_protocol::fcp::Adapter, scp_protocol::fcp::Output>;

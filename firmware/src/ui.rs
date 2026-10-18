@@ -178,8 +178,9 @@ pub enum Protocol {
     },
     /// FCP or SCP data another device sends on D−, not told apart yet.
     SingleWire,
-    /// FCP transactions another device sends; `mv` is the output its latest
-    /// acknowledged voltage write requested, while VBUS is near it.
+    /// FCP at `mv`: this meter's applied request, or, for transactions
+    /// another device sends, the output its latest acknowledged voltage
+    /// write requested while VBUS is near it.
     Fcp {
         mv: Option<u16>,
     },
@@ -338,6 +339,7 @@ fn tab_style(tab: Tab, passthrough: bool) -> (&'static str, Rgb565) {
         Tab::Qc2 => ("QC 2.0", ORANGE),
         Tab::Qc3 => ("QC 3.0", CYAN),
         Tab::Scp => ("SCP", ORANGE),
+        Tab::Fcp => ("FCP", ORANGE),
         Tab::Detail { page, .. } => match page {
             Detail::Pd if passthrough => ("PD SNIFF", GREEN),
             Detail::Pd => ("PD SESSION", GREEN),
@@ -1765,7 +1767,8 @@ fn qc2_pill(status: Status, request: Voltage) -> Option<(Voltage, &'static str, 
         | Status::Stepping(_)
         | Status::Detecting(_)
         | Status::Detected(_)
-        | Status::Scp(..) => {
+        | Status::Scp(..)
+        | Status::Fcp(..) => {
             return None;
         }
     })
@@ -2050,6 +2053,112 @@ pub fn draw_scp<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'
             "< > tabs  OK test SCP"
         },
     );
+}
+
+/// Everything the FCP tab shows.
+pub struct Fcp {
+    pub mode: QcMode,
+    pub probing: bool,
+    /// The row being chosen, while the choice is open.
+    pub preview: Option<usize>,
+    pub adapter: Option<scp_protocol::fcp::Adapter>,
+    /// The voltage asked of the adapter in mV, kept while other tabs show.
+    pub request: Option<u16>,
+    /// The current attempt's latest status.
+    pub status: Option<crate::scp_drive::FcpStatus>,
+}
+
+/// The FCP tab: the probe's result until it finds an adapter, then one row
+/// per voltage the adapter lists and an off row, laid out as the Quick
+/// Charge 2.0 tab.
+pub fn draw_fcp<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'_>, page: &Fcp) {
+    use crate::scp_drive::FcpStatus;
+    let &Fcp {
+        mode,
+        probing,
+        preview,
+        adapter,
+        request,
+        status,
+    } = page;
+    draw_header(target, header);
+    if mode == QcMode::Pd {
+        notice(
+            target,
+            "PD MODE",
+            "PD must stop before FCP detection",
+            GREEN,
+        );
+        hint(target, header, "< > tabs  OK switch to FCP detection");
+        return;
+    }
+    let failure = match status {
+        Some(FcpStatus::Failed(error)) => Some(error),
+        _ => None,
+    };
+    if probing {
+        notice(target, "TESTING FCP", "adapter identification", ORANGE);
+        hint(target, header, "BACK stop");
+        return;
+    }
+    let Some(adapter) = adapter else {
+        notice(
+            target,
+            match failure {
+                Some(error) if error.absent() => "NO FCP",
+                Some(_) => "FCP NOT VERIFIED",
+                None => "FCP NOT TESTED",
+            },
+            failure.map_or("no output requested", scp_error),
+            ORANGE,
+        );
+        hint(target, header, "< > tabs  OK test FCP");
+        return;
+    };
+    let pill = match status {
+        Some(FcpStatus::Output { applied: true, .. }) => ("ACTIVE", GREEN),
+        Some(FcpStatus::Output { applied: false, .. }) => ("SETTING", ORANGE),
+        Some(FcpStatus::Stopping) => ("STOPPING", ORANGE),
+        Some(FcpStatus::Failed(_)) => ("FAILED", MAGENTA),
+        _ => ("WAIT", ORANGE),
+    };
+    let levels = adapter.levels();
+    for (row, &mv) in levels.iter().enumerate() {
+        // The rated power is the adapter's, shown once at its top voltage.
+        let power = adapter
+            .max_power_mw
+            .filter(|_| row + 1 == levels.len())
+            .map(|mw| match mw % 1_000 {
+                0 => Label::new().fixed(mw / 1_000, 0),
+                _ => Label::new().fixed(mw / 100, 1),
+            })
+            .map(|watts| watts.push(b"W rated"));
+        selector_row(
+            target,
+            row,
+            Label::new().volts(mv).as_str(),
+            level_color(mv),
+            [power.as_ref().map_or("", Label::as_str), ""],
+            preview == Some(row),
+            (request == Some(mv)).then_some(pill),
+        );
+    }
+    selector_row(
+        target,
+        levels.len(),
+        "OFF",
+        WHITE,
+        ["plain USB", ""],
+        preview == Some(levels.len()),
+        None,
+    );
+    let hint_text = match (preview, failure, request) {
+        (Some(_), ..) => "< > choose  OK request  BACK cancel",
+        (None, Some(error), _) => scp_error(error),
+        (None, None, None) => "< > tabs  OK choose  HOLD OK rescan",
+        (None, None, Some(_)) => "< > tabs  OK change  HOLD OK stop",
+    };
+    hint(target, header, hint_text);
 }
 
 /// Everything the Quick Charge 2.0 tab shows.

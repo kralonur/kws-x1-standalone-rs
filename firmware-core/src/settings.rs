@@ -137,12 +137,13 @@ pub enum Screen {
     Energy,
     Ripple,
     Scp,
+    Fcp,
 }
 
 impl Screen {
     /// Record values, by position; new values go last, so older records
     /// still decode.
-    const ALL: [Self; 14] = [
+    const ALL: [Self; 15] = [
         Self::Overview,
         Self::Lines,
         Self::Fixed,
@@ -157,6 +158,7 @@ impl Screen {
         Self::Energy,
         Self::Ripple,
         Self::Scp,
+        Self::Fcp,
     ];
 
     /// 0 for none, else the position in [`Self::ALL`] plus one.

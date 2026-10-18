@@ -89,6 +89,7 @@ mod qc_drive {
         Detecting(Stage),
         Detected(Report),
         Scp(u8, crate::scp_drive::Status),
+        Fcp(u8, crate::scp_drive::FcpStatus),
     }
 }
 mod energy_store {
@@ -697,6 +698,31 @@ fn scp(canvas: &mut Canvas) -> Result<()> {
     Ok(())
 }
 
+/// FCP layout fixture, not a hardware measurement: 9 V requested and
+/// applied on an 18 W adapter.
+fn fcp(canvas: &mut Canvas) -> Result<()> {
+    let mut strip = Vec::new();
+    let adapter = scp_protocol::fcp::Adapter::new(&[5_200, 9_000, 12_000], Some(18_000))
+        .context("FCP fixture")?;
+    ui::draw_fcp(
+        canvas,
+        &tabs(Tab::Fcp, Level::Tabs, false, &mut strip),
+        &ui::Fcp {
+            mode: QcMode::Plain,
+            probing: false,
+            preview: None,
+            adapter: Some(adapter),
+            request: Some(9_000),
+            status: Some(scp_drive::FcpStatus::Output {
+                output: scp_protocol::fcp::Output::new(adapter, 9_000)
+                    .context("FCP fixture output")?,
+                applied: true,
+            }),
+        },
+    );
+    Ok(())
+}
+
 fn charger_scp(canvas: &mut Canvas) -> Result<()> {
     detail(
         canvas,
@@ -971,7 +997,7 @@ fn main() -> Result<()> {
             .nth(1)
             .context("usage: screens <output directory>")?,
     );
-    let pages: [(&str, Draw); 21] = [
+    let pages: [(&str, Draw); 22] = [
         ("overview_screen", overview),
         ("lines_screen", lines),
         ("energy_screen", energy),
@@ -984,6 +1010,7 @@ fn main() -> Result<()> {
         ("qc3_screen", qc3),
         ("scp_screen", scp),
         ("charger_scp_screen", charger_scp),
+        ("fcp_screen", fcp),
         ("pd_session_screen", pd_session),
         ("charger_screen", charger),
         ("cable_screen", cable),

@@ -8,6 +8,7 @@ use qc_protocol::qc2::{Handshake, Level, Progress};
 use scp_protocol::{
     Transport,
     control::{ControlError, RequestError},
+    fcp,
 };
 
 use crate::{
@@ -15,7 +16,7 @@ use crate::{
     qc_drive::DataDrive,
 };
 mod status;
-pub use status::{DEFAULT_VBUS_MV, Failure, Status};
+pub use status::{DEFAULT_VBUS_MV, Failure, FcpStatus, Status};
 
 /// Time in ms both lines stay released before entry. Application choice,
 /// well past the charger's 20 ms minimum glitch filter (CHY100
@@ -121,6 +122,61 @@ impl Link for Scp {
         session
             .request(mv, ma)
             .and_then(|output| session.set(output))
+    }
+    fn refresh(session: &mut Self::Session) {
+        session.refresh();
+    }
+    fn stop(session: &mut Self::Session) {
+        session.stop();
+    }
+    fn poll<T: Transport>(
+        session: &mut Self::Session,
+        phy: &mut T,
+    ) -> Result<(), ControlError<T::Error>> {
+        session.poll(phy)
+    }
+}
+
+pub enum Fcp {}
+
+impl Link for Fcp {
+    type Detection = fcp::Detection;
+    type Adapter = fcp::Adapter;
+    type Output = fcp::Output;
+    type Session = fcp::Session;
+    type Request = u16;
+    fn detection() -> Self::Detection {
+        fcp::Detection::new()
+    }
+    fn answered(detection: &Self::Detection) -> bool {
+        detection.answered()
+    }
+    fn detect<T: Transport>(
+        detection: &mut Self::Detection,
+        phy: &mut T,
+    ) -> Result<Option<Self::Adapter>, scp_protocol::Error<T::Error>> {
+        detection.poll(phy)
+    }
+    fn allowed(mv: Self::Request) -> bool {
+        (firmware_core::scp::MIN_MV..=firmware_core::scp::MAX_MV).contains(&mv)
+    }
+    fn start(adapter: Self::Adapter, mv: Self::Request) -> Result<Self::Session, RequestError> {
+        fcp::Output::new(adapter, mv).and_then(|output| Self::Session::start(adapter, output))
+    }
+    fn output(session: &Self::Session) -> Self::Output {
+        session.output()
+    }
+    fn requested(output: Self::Output) -> Self::Request {
+        output.millivolts()
+    }
+    fn millivolts(output: Self::Output) -> u16 {
+        output.millivolts()
+    }
+    fn busy(session: &Self::Session) -> bool {
+        session.busy()
+    }
+    fn set(session: &mut Self::Session, mv: Self::Request) -> Result<(), RequestError> {
+        session.request(mv).and_then(|output| session.set(output))
     }
     fn refresh(session: &mut Self::Session) {
         session.refresh();
@@ -355,8 +411,9 @@ impl<L: Link> Trigger<L> {
         }
     }
 
-    /// Disable protocol output mode on an orderly stop, then release D+.
-    /// Errors use D+ protection/the watchdog rather than blind cleanup writes.
+    /// On an orderly stop, run the link's stop (SCP leaves protocol output
+    /// mode, FCP sets its lowest voltage), then release D+. Errors use D+
+    /// protection and SCP's watchdog rather than blind cleanup writes.
     /// Do not hand the lines to QC until measured VBUS is back at default,
     /// or `STOP_TIMEOUT_MS` has passed.
     pub fn stop(

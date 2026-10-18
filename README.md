@@ -99,6 +99,8 @@ This is **kws-x1-standalone-rs**.
 - SCP: checked adapter-type and rating register reads, retained
   Charger-info results, and an explicit SCP page that can set the output
   voltage and current limit within the charger's reported ratings.
+- FCP: the voltages the charger lists (such as 5.2, 9 and 12 V) and its rated
+  power, and an explicit FCP page that requests one of them.
 - A full charger scan (hold OK on the charger page): Quick Charge, SCP, the PD
   offer, the EPR offer and, with the plug in the charger, the 5 A offer, on
   one page.
@@ -118,10 +120,10 @@ This is **kws-x1-standalone-rs**.
 
 What this firmware does **not** do, for now:
 
-- **No SCP authentication.** SCP output control is only an explicit request
-  on the SCP page, never automatic.
-  AFC, FCP and other protocols are not triggered; FCP is only decoded
-  when another device drives it. Beyond PD, QC and verified
+- **No SCP authentication.** SCP and FCP output control is only an explicit
+  request on their pages, never automatic. FCP results last until the next
+  restart and are not part of the full charger scan or the Charger page.
+  AFC and other protocols are not triggered. Beyond PD, QC and verified
   SCP detection, the overview names the Type-C current
   advertisement, the fixed D+/D- voltages some ports use to tell their
   current (`DIVIDER`, `1.2V DCP`) and the BC1.2 short once the Quick Charge
@@ -177,7 +179,7 @@ What this firmware does **not** do, for now:
 | Back | up one level: cancel the edit or scroll, leave the tabs; from a group, back to the overview; on the overview, open the settings | – |
 
 The pages sit in three groups: **Monitor** (Overview, Lines, Energy, Graph, Ripple), **Trigger**
-(PD Profiles, PPS, AVS, QC 2.0, QC 3.0, SCP) and **Info** (PD Session, Charger, Cable,
+(PD Profiles, PPS, AVS, QC 2.0, QC 3.0, SCP, FCP) and **Info** (PD Session, Charger, Cable,
 System). The header shows the group's tabs as a strip, each in its own
 colour: the shown tab is named, the others fold to thin bars. A dot per group
 sits on the right. The shown tab marks what Left/Right move: a bar beside its
@@ -238,6 +240,7 @@ point the way it flows (they follow the screen rotation).
 | **QC 2.0** | 5, 9, 12 and 20 V and `OFF`, the voltages the charger ignored greyed out, the status on its row; under a PD contract only `PD MODE` | OK tests the charger, then opens at 5 V with the choice open (under a PD contract it first switches the charger out of PD); Left/Right choose, OK requests and closes the choice, Back closes it; the request stays in force on other screens until `OFF` |
 | **QC 3.0** | the step range, the set voltage, VBUS, D+ and D−; under a PD contract only `PD MODE` | OK tests the charger, then starts continuous mode at 5 V (under a PD contract it first switches the charger out of PD); Left/Right move it by 0.2 V (repeats held); OK or Back closes it; the steps stay in force on other screens until `OFF` on QC 2.0 |
 | **SCP** | identification, then the set voltage and current limit, the live output; `ACTIVE`, `SETTING`, `STOPPING` or `FAILED` | OK tests adapter-type registers; after a detection with ratings, OK, Left/Right voltage (20 mV, 100 mV held), OK, current limit (50 mA, 250 mA held), OK applies; Back cancels an edit, then leaves the page with the output still in force; hold OK: stop the output, or rescan when none runs; PD must stop first |
+| **FCP** | identification, then the voltages the charger lists and `OFF`, the status on the requested row (`WAIT`, `SETTING`, `ACTIVE`, `STOPPING`); under a PD contract only `PD MODE` | OK tests the charger, then opens the choice at the voltage in force, else the first; Left/Right choose, OK requests and closes the choice, Back closes it; the request stays in force on other screens until `OFF`; hold OK: stop the output, or rescan when none runs; PD must stop first |
 | **PD Session** | sink: session state, CC levels and the charger's offer as received. Passthrough: CC pin, Rp level and the latest PD messages | OK to scroll |
 | **Charger** | the offer (`*` = needs a 5 A cable), the charger's identity, maker and peak ratings, power status and source info, a power bank's battery, QC and SCP results | OK to scroll; hold OK: full scan (Quick Charge, SCP identification, PD, EPR, and the 5 A cable test with the plug in the charger) |
 | **Cable** | the cable's e-marker: a readable summary (type, speed, rating, length, alt modes, maker), identity, ratings, status and modes | OK to scroll; hold OK to read the e-marker (drops to fixed 5 V first) |
@@ -384,7 +387,8 @@ use in the `PROTOCOL` strip along the bottom. The meter starts on it.
     registers and VBUS is at the default 5 V (`detected, 5V`). It is
     evidence of support, not an SCP output contract. Once this meter's SCP
     output is applied and followed, `SCP` shows its setpoint and current
-    limit instead (e.g. `9.00V 2.00A`).
+    limit instead (e.g. `9.00V 2.00A`), and once this meter's FCP request
+    is followed, `FCP` shows its voltage (e.g. `9V`).
   - `TYPE-C`: Type-C current advertisement without PD (1.5 A or 3 A).
   - `DIVIDER`: a port telling its current by fixed D+/D- voltages (TI
     TPS2514 datasheet, section 8.3.3): D+ 2 V and D- 2.7 V for a 5 W adapter
@@ -1195,6 +1199,33 @@ The portable detector lives in `scp-protocol` in the charging-protocols
 workspace. This branch uses a local sibling path dependency pending a
 published, reviewed Git revision; a standalone checkout/CI needs that repo.
 Nothing is flashed automatically.
+
+## FCP
+
+<img src="pictures/fcp_screen.webp" width="480" alt="FCP screen">
+
+Open **Trigger → FCP** and press OK. Under PD, the first OK switches to a
+PD-silent boot; press OK on FCP again to test. The probe uses the same entry
+and line checks as SCP, then reads the charger's FCP capability (0x21), each
+output voltage it lists (0x30 onwards) and its rated power (0x22). A charger
+that rejects those registers or lists voltages out of order shows `NO FCP`
+with `NO FCP VOLTAGES`. Back stops the probe.
+
+Once a charger is found, the page lists its voltages and `OFF`. OK opens the
+choice and a second OK requests the previewed voltage. The meter re-enters
+FCP, clears the charger's latched fault flags (0x28), writes the voltage
+(0x2C), reads it back and applies it (0x2B), then checks the flags every
+500 ms and before each change. The lowest voltage is usually 5.2 V, the
+draft standard's default. The
+output counts as `ACTIVE` once VBUS is within 5% of the voltage; it must get
+there within 2 s and stay there. A fault flag, readback mismatch, missed
+voltage or failed transaction ends the request and releases the lines; the
+reason shows at the bottom. `OFF` or hold OK sets the lowest voltage again
+and releases the lines, which pass to Quick Charge only once VBUS is back at
+5 V or 4 s have passed.
+
+Registers and sequencing follow Huawei's public FCP driver, cited in
+`scp-protocol`. Not yet tried on hardware.
 
 ## Quick Charge
 

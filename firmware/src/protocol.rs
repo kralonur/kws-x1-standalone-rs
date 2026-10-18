@@ -1,9 +1,9 @@
 //! The charging protocol the overview names, from every source the meter
-//! has. The first that applies wins: this meter's own Quick Charge (a PD
-//! contract would have stopped it), PD, Quick Charge or FCP/SCP data another
-//! device drives, register-verified SCP at the default output, a Type-C
-//! current above default, a D+/D− signature, the BC1.2 short the Quick
-//! Charge test found, then the Type-C default.
+//! has. The first that applies wins: this meter's own Quick Charge, SCP or
+//! FCP output (a PD contract would have stopped it), PD, Quick Charge or
+//! FCP/SCP data another device drives, register-verified SCP at the default
+//! output, a Type-C current above default, a D+/D− signature, the BC1.2
+//! short the Quick Charge test found, then the Type-C default.
 
 use crate::line_adc::LineVoltages;
 use crate::pd::{self, Observation};
@@ -91,6 +91,15 @@ fn own_quick_charge(qc: Status) -> Option<Protocol> {
         ) => Some(Protocol::Scp {
             mv: output.millivolts(),
             ma: output.milliamps(),
+        }),
+        Status::Fcp(
+            _,
+            crate::scp_drive::FcpStatus::Output {
+                output,
+                applied: true,
+            },
+        ) => Some(Protocol::Fcp {
+            mv: Some(output.millivolts()),
         }),
         Status::Active(_, Some(Outcome::Ignored)) => None,
         Status::Active(voltage, _) => Some(Protocol::Qc2 {

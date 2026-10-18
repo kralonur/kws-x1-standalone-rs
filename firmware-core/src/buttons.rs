@@ -155,7 +155,7 @@ pub enum Group {
 }
 
 /// The most tabs a group has.
-pub const MAX_TABS: usize = 6;
+pub const MAX_TABS: usize = 7;
 
 impl Group {
     pub const ALL: [Self; 3] = [Self::Monitor, Self::Trigger, Self::Info];
@@ -169,8 +169,15 @@ impl Group {
             Tab::Graph,
             Tab::Ripple,
         ];
-        const TRIGGER: [Tab; MAX_TABS] =
-            [Tab::Fixed, Tab::Pps, Tab::Avs, Tab::Qc2, Tab::Qc3, Tab::Scp];
+        const TRIGGER: [Tab; MAX_TABS] = [
+            Tab::Fixed,
+            Tab::Pps,
+            Tab::Avs,
+            Tab::Qc2,
+            Tab::Qc3,
+            Tab::Scp,
+            Tab::Fcp,
+        ];
         const INFO: [Tab; 4] = [
             Tab::detail(Detail::Pd),
             Tab::detail(Detail::Charger),
@@ -228,6 +235,8 @@ pub enum Tab {
     Qc3,
     /// SCP adapter identification and explicit output control.
     Scp,
+    /// FCP adapter identification and its fixed output voltages.
+    Fcp,
     /// A detail list shown from row `top`.
     Detail { page: Detail, top: u16 },
 }
@@ -248,6 +257,7 @@ impl From<Tab> for Screen {
             Tab::Qc2 => Self::Qc2,
             Tab::Qc3 => Self::Qc3,
             Tab::Scp => Self::Scp,
+            Tab::Fcp => Self::Fcp,
             Tab::Detail { page, .. } => match page {
                 Detail::Pd => Self::PdDetails,
                 Detail::Charger => Self::Charger,
@@ -271,6 +281,7 @@ impl From<Screen> for Tab {
             Screen::Qc2 => Self::Qc2,
             Screen::Qc3 => Self::Qc3,
             Screen::Scp => Self::Scp,
+            Screen::Fcp => Self::Fcp,
             Screen::PdDetails => Self::detail(Detail::Pd),
             Screen::Charger => Self::detail(Detail::Charger),
             Screen::Cable => Self::detail(Detail::Cable),
@@ -290,7 +301,7 @@ impl Tab {
             Self::Overview | Self::Graph | Self::Lines | Self::Energy | Self::Ripple => {
                 Group::Monitor
             }
-            Self::Fixed | Self::Pps | Self::Avs | Self::Qc2 | Self::Qc3 | Self::Scp => {
+            Self::Fixed | Self::Pps | Self::Avs | Self::Qc2 | Self::Qc3 | Self::Scp | Self::Fcp => {
                 Group::Trigger
             }
             Self::Detail { .. } => Group::Info,
@@ -354,6 +365,11 @@ pub enum Open {
     Scp,
     /// Preview SCP voltage, then current; a final OK applies the request.
     ScpSet(PpsFocus),
+    /// The read-only FCP probe runs until a result or Back.
+    Fcp,
+    /// Left/Right preview the adapter's FCP voltages by index, then off;
+    /// OK requests one.
+    FcpSet(usize),
     /// Left/Right scroll the list, shown from row `top`.
     Detail { page: Detail, top: u16 },
     /// Left/Right change what the graph plots, or its window.
@@ -373,6 +389,7 @@ impl Open {
             Self::Qc2(_) => Tab::Qc2,
             Self::Qc3 => Tab::Qc3,
             Self::Scp | Self::ScpSet(_) => Tab::Scp,
+            Self::Fcp | Self::FcpSet(_) => Tab::Fcp,
             Self::Detail { page, top } => Tab::Detail { page, top },
             Self::Graph(_) => Tab::Graph,
             Self::Ripple(_) => Tab::Ripple,
@@ -411,6 +428,11 @@ pub enum View {
     Scp {
         probing: bool,
     },
+    /// Whether the probe runs, and the previewed row while choosing.
+    Fcp {
+        probing: bool,
+        preview: Option<usize>,
+    },
     /// The Quick Charge probe runs, on either Quick Charge tab.
     Probe,
     /// Whether Left/Right move the target.
@@ -430,7 +452,7 @@ impl View {
     pub const fn quick_charge(self) -> bool {
         matches!(
             self,
-            Self::Qc2(_) | Self::Qc3 { .. } | Self::Probe | Self::Scp { .. }
+            Self::Qc2(_) | Self::Qc3 { .. } | Self::Probe | Self::Scp { .. } | Self::Fcp { .. }
         )
     }
 
@@ -590,6 +612,13 @@ pub enum QcTarget {
         mv: u16,
         ma: u16,
     },
+    /// Read-only FCP identification, as for SCP.
+    Fcp(u8),
+    /// One of the adapter's FCP voltages, in mV; explicit, as for SCP.
+    FcpOutput {
+        attempt: u8,
+        mv: u16,
+    },
     /// Quick Charge 3.0 continuous mode, stepping toward this output in mV.
     Steps(u16),
     /// Try each request in turn and report which the charger followed.
@@ -740,6 +769,10 @@ impl Page {
                 Tab::Qc2 => View::Qc2(None),
                 Tab::Qc3 => View::Qc3 { adjusting: false },
                 Tab::Scp => View::Scp { probing: false },
+                Tab::Fcp => View::Fcp {
+                    probing: false,
+                    preview: None,
+                },
                 Tab::Detail { page, top } => View::Detail {
                     page,
                     top,
@@ -755,6 +788,14 @@ impl Page {
                 Open::Qc3 => View::Qc3 { adjusting: true },
                 Open::Scp => View::Scp { probing: true },
                 Open::ScpSet(_) => View::Scp { probing: false },
+                Open::Fcp => View::Fcp {
+                    probing: true,
+                    preview: None,
+                },
+                Open::FcpSet(row) => View::Fcp {
+                    probing: false,
+                    preview: Some(row),
+                },
                 Open::Detail { page, top } => View::Detail {
                     page,
                     top,
@@ -793,6 +834,7 @@ impl Page {
                     | Open::Avs
                     | Open::Qc2(_)
                     | Open::Qc3
+                    | Open::FcpSet(_)
                     | Open::Detail { .. }
                     | Open::Graph(_)
                     | Open::Ripple(_)
@@ -858,6 +900,11 @@ pub struct Input {
     pub scp_attempt: u8,
     /// This attachment's volatile output preview; never restored from settings.
     pub scp_selection: Option<crate::scp::Selection>,
+    /// FCP probe or output generation, as for SCP, and the adapter the
+    /// probe found; this boot only, since the settings word has no room for
+    /// FCP findings.
+    pub fcp_attempt: u8,
+    pub fcp_adapter: Option<scp_protocol::fcp::Adapter>,
     /// What the graph plots and how far back it reaches; this boot only.
     pub graph_trace: GraphTrace,
     pub graph_window: GraphWindow,
@@ -878,6 +925,7 @@ impl Input {
         match self.page {
             Page::Open(Open::Probe(_)) => Some(QcTarget::Detect),
             Page::Open(Open::Scp) => Some(QcTarget::Scp(self.scp_attempt)),
+            Page::Open(Open::Fcp) => Some(QcTarget::Fcp(self.fcp_attempt)),
             _ => self.trigger,
         }
     }
@@ -949,8 +997,11 @@ impl Navigation {
     pub fn set_selectable(&mut self, selectable: bool) {
         self.selectable = selectable;
         self.input.pd_active = selectable;
-        if selectable && matches!(self.input.page, Page::Open(Open::Scp | Open::ScpSet(_))) {
-            self.input.page = Page::Tabs(Tab::Scp);
+        if selectable
+            && let Page::Open(open @ (Open::Scp | Open::ScpSet(_) | Open::Fcp | Open::FcpSet(_))) =
+                self.input.page
+        {
+            self.input.page = Page::Tabs(open.tab());
         }
         if selectable {
             self.input.trigger = None;
@@ -1065,6 +1116,24 @@ impl Navigation {
     /// new one, never an automatic retry.
     pub fn fail_scp_output(&mut self, attempt: u8) {
         if matches!(self.input.trigger, Some(QcTarget::ScpOutput { attempt: current, .. }) if current == attempt)
+        {
+            self.input.trigger = None;
+        }
+    }
+
+    /// Accept an FCP adapter only from the current probe, which then ends.
+    /// A failed probe ends too, keeping no adapter.
+    pub fn finish_fcp(&mut self, attempt: u8, adapter: Option<scp_protocol::fcp::Adapter>) {
+        if attempt == self.input.fcp_attempt && self.input.page == Page::Open(Open::Fcp) {
+            self.input.fcp_adapter = adapter;
+            self.input.trigger = None;
+            self.input.page = Page::Tabs(Tab::Fcp);
+        }
+    }
+
+    /// A failed FCP output ends its request, as for SCP.
+    pub fn fail_fcp_output(&mut self, attempt: u8) {
+        if matches!(self.input.trigger, Some(QcTarget::FcpOutput { attempt: current, .. }) if current == attempt)
         {
             self.input.trigger = None;
         }
@@ -1266,6 +1335,20 @@ impl Navigation {
             self.input.page = Page::Open(Open::Scp);
             return Some(None);
         }
+        // The same for FCP.
+        if self.input.page == Page::Tabs(Tab::Fcp)
+            && matches!(self.input.trigger, Some(QcTarget::FcpOutput { .. }))
+        {
+            self.input.trigger = None;
+            return Some(None);
+        }
+        if self.input.page == Page::Tabs(Tab::Fcp) && !self.selectable && !self.input.passthrough {
+            self.input.trigger = None;
+            self.input.fcp_adapter = None;
+            self.input.fcp_attempt = self.input.fcp_attempt.wrapping_add(1);
+            self.input.page = Page::Open(Open::Fcp);
+            return Some(None);
+        }
         let Some(Tab::Detail { page, .. }) = self.input.page.tab() else {
             return None;
         };
@@ -1313,6 +1396,10 @@ impl Navigation {
                     selection.reset_to(mv, ma);
                 }
                 Page::Tabs(Tab::Scp)
+            }
+            Page::Open(Open::Fcp) => {
+                self.input.trigger = None;
+                Page::Tabs(Tab::Fcp)
             }
             Page::Open(Open::Probe(QcPage::Charger)) => {
                 self.input.trigger = None;
@@ -1381,8 +1468,20 @@ impl Navigation {
                     selection.step(voltage, forward, amount.unsigned_abs());
                 }
             }
+            // The rows are the adapter's voltages, then off.
+            Page::Open(Open::FcpSet(row)) => {
+                let rows = input
+                    .fcp_adapter
+                    .map_or(0, |adapter| adapter.levels().len())
+                    + 1;
+                *row = if forward {
+                    (*row + 1) % rows
+                } else {
+                    (*row + rows - 1) % rows
+                };
+            }
             // Probes run until a result or Back.
-            Page::Open(Open::Probe(_) | Open::Scp) => {}
+            Page::Open(Open::Probe(_) | Open::Scp | Open::Fcp) => {}
             // A held capture cannot be re-timed: a new timebase runs live.
             Page::Open(Open::Ripple(RippleFocus::Time)) => {
                 let all = RippleTimebase::ALL;
@@ -1471,9 +1570,25 @@ impl Navigation {
                     (Page::Open(Open::Scp), None)
                 }
             }
+            // FCP opens its choice at the voltage in force, else the first.
+            Page::Tabs(Tab::Fcp) if !self.selectable => match input.fcp_adapter {
+                Some(adapter) => {
+                    let row = match input.trigger {
+                        Some(QcTarget::FcpOutput { mv, .. }) => {
+                            adapter.levels().iter().position(|level| *level == mv)
+                        }
+                        _ => None,
+                    };
+                    (Page::Open(Open::FcpSet(row.unwrap_or(0))), None)
+                }
+                None => {
+                    input.fcp_attempt = input.fcp_attempt.wrapping_add(1);
+                    (Page::Open(Open::Fcp), None)
+                }
+            },
             // A PD contract hides Quick Charge: restart into a silent boot,
             // back on this tab.
-            page @ Page::Tabs(tab @ (Tab::Qc2 | Tab::Qc3 | Tab::Scp)) => {
+            page @ Page::Tabs(tab @ (Tab::Qc2 | Tab::Qc3 | Tab::Scp | Tab::Fcp)) => {
                 input
                     .settings
                     .set_next_boot(NextBoot::QuickCharge, Some(tab.into()));
@@ -1506,7 +1621,24 @@ impl Navigation {
                 }
                 (Page::Tabs(Tab::Scp), None)
             }
-            page @ Page::Open(Open::Probe(_) | Open::Scp) => (page, None),
+            // Off is the row past the voltages. A change keeps the running
+            // output; a new one is a new attempt, so a failed run still
+            // stopping cannot end it.
+            Page::Open(Open::FcpSet(row)) => {
+                let attempt = match input.trigger {
+                    Some(QcTarget::FcpOutput { attempt, .. }) => attempt,
+                    _ => input.fcp_attempt.wrapping_add(1),
+                };
+                input.trigger = input
+                    .fcp_adapter
+                    .and_then(|adapter| adapter.levels().get(row).copied())
+                    .map(|mv| {
+                        input.fcp_attempt = attempt;
+                        QcTarget::FcpOutput { attempt, mv }
+                    });
+                (Page::Tabs(Tab::Fcp), None)
+            }
+            page @ Page::Open(Open::Probe(_) | Open::Scp | Open::Fcp) => (page, None),
             Page::Open(open @ (Open::Qc3 | Open::Detail { .. } | Open::Graph(_))) => {
                 (Page::Tabs(open.tab()), None)
             }
