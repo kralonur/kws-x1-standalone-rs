@@ -8,7 +8,7 @@
 use crate::calibration::{Calibration, Mean, Wizard};
 use crate::power_history::{GraphTrace, GraphWindow};
 use crate::ripple::{Scale as RippleScale, Timebase as RippleTimebase};
-use crate::settings::{Item, NextBoot, QcFindings, ScpFindings, Screen, Settings};
+use crate::settings::{FcpFindings, Item, NextBoot, QcFindings, ScpFindings, Screen, Settings};
 use qc_protocol::detect::Report;
 use qc_protocol::qc2::Voltage;
 use qc_protocol::qc3::{MIN_MV, STEP_MV};
@@ -935,6 +935,12 @@ impl Input {
             && self.settings.resume == Some(Screen::Scp)
     }
 
+    /// The scan's last no-PD stage, after SCP.
+    pub fn fcp_scanning(self) -> bool {
+        matches!(self.settings.next_boot, NextBoot::ScanQuickCharge { .. })
+            && self.settings.resume == Some(Screen::Fcp)
+    }
+
     /// The reset request counter a completed OK hold on the shown tab
     /// advances, if the tab has one.
     fn reset_counter(&mut self) -> Option<&mut u8> {
@@ -1087,7 +1093,7 @@ impl Navigation {
     /// full scan's findings and restart into its PD part.
     pub fn finish_scan(&mut self, findings: QcFindings) -> Option<PdCommand> {
         let local = self.input.page == Page::Open(Open::Probe(QcPage::Charger));
-        if self.input.scp_scanning() || (!local && !self.scanning()) {
+        if self.input.scp_scanning() || self.input.fcp_scanning() || (!local && !self.scanning()) {
             return None;
         }
         if local {
@@ -1097,6 +1103,7 @@ impl Navigation {
         }
         self.input.settings.qc_findings = Some(findings);
         self.input.settings.scp_findings = None;
+        self.input.settings.fcp_findings = None;
         self.input.scp_selection = None;
         self.input.settings.resume = Some(Screen::Scp);
         self.input.scp_attempt = self.input.scp_attempt.wrapping_add(1);
@@ -1121,14 +1128,25 @@ impl Navigation {
         }
     }
 
-    /// Accept an FCP adapter only from the current probe, which then ends.
-    /// A failed probe ends too, keeping no adapter.
-    pub fn finish_fcp(&mut self, attempt: u8, adapter: Option<scp_protocol::fcp::Adapter>) {
-        if attempt == self.input.fcp_attempt && self.input.page == Page::Open(Open::Fcp) {
-            self.input.fcp_adapter = adapter;
-            self.input.trigger = None;
-            self.input.page = Page::Tabs(Tab::Fcp);
+    /// Keep the current FCP probe's result, as for SCP, and the adapter it
+    /// found. In the scan this is the last no-PD stage, which then ends.
+    pub fn finish_fcp(
+        &mut self,
+        attempt: u8,
+        findings: FcpFindings,
+        adapter: Option<scp_protocol::fcp::Adapter>,
+    ) -> Option<PdCommand> {
+        if attempt != self.input.fcp_attempt || self.input.page != Page::Open(Open::Fcp) {
+            return None;
         }
+        self.input.settings.fcp_findings = Some(findings);
+        self.input.fcp_adapter = adapter;
+        self.input.trigger = None;
+        if !self.input.fcp_scanning() {
+            self.input.page = Page::Tabs(Tab::Fcp);
+            return None;
+        }
+        self.end_scan_without_pd()
     }
 
     /// A failed FCP output ends its request, as for SCP.
@@ -1151,6 +1169,18 @@ impl Navigation {
             self.input.page = Page::Tabs(Tab::Scp);
             return None;
         }
+        // The scan goes on to FCP in this boot.
+        self.input.settings.fcp_findings = None;
+        self.input.fcp_adapter = None;
+        self.input.settings.resume = Some(Screen::Fcp);
+        self.input.fcp_attempt = self.input.fcp_attempt.wrapping_add(1);
+        self.input.page = Page::Open(Open::Fcp);
+        None
+    }
+
+    /// The scan's no-PD stages are done: show the charger page, restarting
+    /// into the PD part when this boot kept PD silent.
+    fn end_scan_without_pd(&mut self) -> Option<PdCommand> {
         let NextBoot::ScanQuickCharge { then_cable_test } = self.input.settings.next_boot else {
             return None;
         };
@@ -1270,6 +1300,8 @@ impl Navigation {
         // The scan's Quick Charge part keeps its probe on screen.
         if self.input.scp_scanning() {
             self.input.page = Page::Open(Open::Scp);
+        } else if self.input.fcp_scanning() {
+            self.input.page = Page::Open(Open::Fcp);
         } else if self.scanning() {
             self.input.page = Page::Open(Open::Probe(QcPage::Qc2));
         }

@@ -698,12 +698,16 @@ fn scp(canvas: &mut Canvas) -> Result<()> {
     Ok(())
 }
 
-/// FCP layout fixture, not a hardware measurement: 9 V requested and
-/// applied on an 18 W adapter.
+/// FCP layout fixture, not a hardware measurement: an 18 W adapter with
+/// the draft standard's 5.2 V default.
+fn fcp_fixture_adapter() -> Result<scp_protocol::fcp::Adapter> {
+    scp_protocol::fcp::Adapter::new(&[5_200, 9_000, 12_000], Some(18_000)).context("FCP fixture")
+}
+
+/// FCP photo: 9 V requested and applied.
 fn fcp(canvas: &mut Canvas) -> Result<()> {
     let mut strip = Vec::new();
-    let adapter = scp_protocol::fcp::Adapter::new(&[5_200, 9_000, 12_000], Some(18_000))
-        .context("FCP fixture")?;
+    let adapter = fcp_fixture_adapter()?;
     ui::draw_fcp(
         canvas,
         &tabs(Tab::Fcp, Level::Tabs, false, &mut strip),
@@ -728,10 +732,19 @@ fn charger_scp(canvas: &mut Canvas) -> Result<()> {
         canvas,
         Detail::Charger,
         false,
-        [ui::scp_charger_lines(
-            Some(firmware_core::settings::ScpFindings::Confirmed),
-            Some(scp_drive::Status::Detected(scp_fixture_adapter())),
-        )],
+        [
+            ui::scp_charger_lines(
+                Some(firmware_core::settings::ScpFindings::Confirmed),
+                Some(scp_drive::Status::Detected(scp_fixture_adapter())),
+            ),
+            ui::fcp_charger_lines(
+                Some(firmware_core::settings::FcpFindings::detected(
+                    fcp_fixture_adapter()?,
+                )),
+                Some(fcp_fixture_adapter()?),
+                None,
+            ),
+        ],
         0,
     );
     Ok(())
@@ -829,6 +842,7 @@ fn charger(canvas: &mut Canvas) -> Result<()> {
                     .map(|section| ui::qc_charger_lines(None, QcMode::Pd, section)),
             )
             .chain(core::iter::once(ui::scp_charger_lines(None, None)))
+            .chain(core::iter::once(ui::fcp_charger_lines(None, None, None)))
             .chain((offer..partner).map(|section| pd::partner_lines(observation, section))),
         0,
     );

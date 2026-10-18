@@ -300,8 +300,8 @@ fn capability_rows(observation: Observation) -> [[u8; 24]; 16] {
         (_, true) => b"BACK ENDS 5A CABLE TEST",
         (true, false) if observation.cable_test_skipped => b"HOLD OK TO TRY AGAIN",
         _ if scanned => b"",
-        (true, false) => b"QC/SCP, 5A; RESTARTS",
-        (false, false) => b"QC/SCP SCAN; RESTARTS",
+        (true, false) => b"QC/SCP/FCP, 5A; RESTARTS",
+        (false, false) => b"QC/SCP/FCP; RESTARTS",
     };
     let follow_row = next + usize::from(!note.is_empty());
     put(&mut rows[follow_row], follow);

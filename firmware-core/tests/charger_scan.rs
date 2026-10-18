@@ -4,7 +4,7 @@ use firmware_core::buttons::{
     BACK, DEFAULT_THRESHOLD, Detail, Input, Navigation, OK, Open, POLL_MS, Page, PdCommand, QcPage,
     QcTarget, Tab,
 };
-use firmware_core::settings::{NextBoot, QcFindings, ScpFindings, Screen, Settings};
+use firmware_core::settings::{FcpFindings, NextBoot, QcFindings, ScpFindings, Screen, Settings};
 use qc_protocol::detect::Report;
 use qc_protocol::qc2::Failure;
 
@@ -52,11 +52,20 @@ fn non_pd_success_returns_to_charger_without_a_restart_or_voltage_selection() {
         nav.finish_scp(input.scp_attempt, ScpFindings::Confirmed),
         None
     );
+    // FCP follows SCP in the same boot.
+    let input = nav.update(0).0;
+    assert_eq!(input.page, Page::Open(Open::Fcp));
+    assert_eq!(input.qc_request(), Some(QcTarget::Fcp(input.fcp_attempt)));
+    assert_eq!(
+        nav.finish_fcp(input.fcp_attempt, FcpFindings::Absent, None),
+        None
+    );
     let (input, command) = nav.update(0);
     assert_eq!(command, None);
     assert_eq!(input.page, CHARGER);
     assert_eq!(input.qc_request(), None);
     assert_eq!(input.qc.report(), Some(REPORT));
+    assert_eq!(input.settings.fcp_findings, Some(FcpFindings::Absent));
     // The next plug-in opens on the default page, not back on Charger.
     assert_eq!(input.settings.next_boot, NextBoot::Normal);
     assert_eq!(input.settings.resume, None);
@@ -71,6 +80,11 @@ fn non_pd_failure_also_returns_to_charger_and_releases_the_probe() {
         let input = nav.update(0).0;
         assert_eq!(
             nav.finish_scp(input.scp_attempt, ScpFindings::Unverified),
+            None
+        );
+        let input = nav.update(0).0;
+        assert_eq!(
+            nav.finish_fcp(input.fcp_attempt, FcpFindings::Unverified, None),
             None
         );
         let (input, command) = nav.update(0);
@@ -114,9 +128,22 @@ fn pd_full_scan_still_restarts_into_its_pd_stage() {
     assert_eq!(input.page, Page::Open(Open::Scp));
     assert_eq!(
         resumed.finish_scp(input.scp_attempt, ScpFindings::Confirmed),
+        None
+    );
+    let input = resumed.update(0).0;
+    assert_eq!(input.page, Page::Open(Open::Fcp));
+    // A source restart during the FCP stage resumes it.
+    assert_eq!(input.settings.resume, Some(Screen::Fcp));
+    let found = FcpFindings::Detected {
+        max_mv: 12_000,
+        max_power_mw: Some(18_000),
+    };
+    assert_eq!(
+        resumed.finish_fcp(input.fcp_attempt, found, None),
         Some(PdCommand::Restart)
     );
     let (input, _) = resumed.update(0);
+    assert_eq!(input.settings.fcp_findings, Some(found));
     assert_eq!(input.settings.next_boot, NextBoot::ScanPd);
     assert_eq!(input.settings.resume, Some(Screen::Charger));
     assert_eq!(

@@ -17,7 +17,8 @@ use firmware_core::dcp::Dcp;
 use firmware_core::energy::Totals;
 use firmware_core::power_history::{GraphTrace, GraphWindow, History, Sample};
 use firmware_core::settings::{
-    BRIGHTNESS_PERCENT, EnergyMemory, Item, QcFindings, Rotation, ScpFindings, Settings,
+    BRIGHTNESS_PERCENT, EnergyMemory, FcpFindings, Item, QcFindings, Rotation, ScpFindings,
+    Settings,
 };
 use u8g2_fonts::FontRenderer;
 use u8g2_fonts::fonts;
@@ -1905,6 +1906,76 @@ pub fn scp_charger_lines(
             line(b"NOT TESTED YET");
         }
     }
+    rows
+}
+
+/// The charger page's FCP section, after SCP's and laid out the same: the
+/// test's findings, with the voltages and the reason when this boot ran it.
+pub fn fcp_charger_lines(
+    findings: Option<FcpFindings>,
+    adapter: Option<scp_protocol::fcp::Adapter>,
+    status: Option<crate::scp_drive::FcpStatus>,
+) -> Lines {
+    let mut rows = [[b' '; 24]; 8];
+    let mut row = 0;
+    let mut line = |text: &[u8]| {
+        if let Some(target) = rows.get_mut(row) {
+            for (cell, &byte) in target.iter_mut().zip(text) {
+                *cell = byte;
+            }
+            row += 1;
+        }
+    };
+    line(b"FAST CHARGE (FCP)");
+    let failure = match status {
+        Some(crate::scp_drive::FcpStatus::Failed(error)) => Some(scp_error(error)),
+        _ => None,
+    };
+    match findings {
+        Some(FcpFindings::Detected {
+            max_mv,
+            max_power_mw,
+        }) => {
+            line(b"FCP DETECTED");
+            let vout = match adapter {
+                Some(adapter) => adapter
+                    .levels()
+                    .iter()
+                    .enumerate()
+                    .fold(Label::new().push(b"VOUT: "), |label, (index, &mv)| {
+                        let label = if index > 0 { label.push(b" / ") } else { label };
+                        label.fixed(u32::from(mv) / 100, 1)
+                    })
+                    .push(b"V"),
+                None => Label::new()
+                    .push(b"VOUT: UP TO ")
+                    .fixed(u32::from(max_mv) / 100, 1)
+                    .push(b"V"),
+            };
+            line(vout.as_str().as_bytes());
+            if let Some(mw) = max_power_mw {
+                let power = Label::new()
+                    .push(b"MAX POWER: ")
+                    .fixed(mw / 100, 1)
+                    .push(b"W");
+                line(power.as_str().as_bytes());
+            }
+        }
+        Some(FcpFindings::Unverified) => {
+            line(b"FCP NOT VERIFIED");
+            if let Some(failure) = failure {
+                line(failure.as_bytes());
+            }
+            line(b"SUPPORT NOT DETERMINED");
+        }
+        Some(FcpFindings::Absent) => {
+            line(b"NO FCP");
+            if let Some(failure) = failure {
+                line(failure.as_bytes());
+            }
+        }
+        None => line(b"NOT TESTED YET"),
+    }
     line(b"HOLD OK: FULL RESCAN");
     rows
 }
@@ -2496,12 +2567,12 @@ pub fn qc_charger_lines(findings: Option<QcFindings>, mode: QcMode, section: u32
             line(b"QUICK CHARGE");
             line(b"NOT SCANNED YET");
             line(b"HOLD OK: FULL RESCAN");
-            line(b"(QC, SCP AND PD)");
+            line(b"(QC, SCP, FCP AND PD)");
         }
         None => {
             line(b"QUICK CHARGE");
             line(b"NOT TESTED YET");
-            line(b"HOLD OK: SCAN QC/SCP");
+            line(b"HOLD OK: SCAN QC/SCP/FCP");
         }
     }
     rows

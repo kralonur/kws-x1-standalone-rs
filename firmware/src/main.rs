@@ -60,7 +60,7 @@ use firmware_core::buttons as button_logic;
 use firmware_core::calibration::{Average, Calibration, Mean};
 use firmware_core::energy::{Totals, Tracker};
 use firmware_core::power_history::{self, History};
-use firmware_core::settings::{NextBoot, QcFindings, Rotation, ScpFindings, Screen};
+use firmware_core::settings::{FcpFindings, NextBoot, QcFindings, Rotation, ScpFindings, Screen};
 use hc32f460_pac::interrupt;
 use panel::Orientation;
 #[cfg(not(any(feature = "pd-boot-diagnostic", feature = "cable-log")))]
@@ -807,13 +807,19 @@ async fn button_task(
                 navigation.finish_scp(attempt, ScpFindings::Confirmed)
             }
             Some(qc_drive::Status::Fcp(attempt, scp_drive::FcpStatus::Detected(adapter))) => {
-                navigation.finish_fcp(attempt, Some(adapter));
-                None
+                navigation.finish_fcp(attempt, FcpFindings::detected(adapter), Some(adapter))
             }
-            Some(qc_drive::Status::Fcp(attempt, scp_drive::FcpStatus::Failed(_))) => {
+            Some(qc_drive::Status::Fcp(attempt, scp_drive::FcpStatus::Failed(failure))) => {
                 navigation.fail_fcp_output(attempt);
-                navigation.finish_fcp(attempt, None);
-                None
+                navigation.finish_fcp(
+                    attempt,
+                    if failure.absent() {
+                        FcpFindings::Absent
+                    } else {
+                        FcpFindings::Unverified
+                    },
+                    None,
+                )
             }
             Some(qc_drive::Status::Scp(attempt, scp_drive::Status::Failed(failure))) => {
                 navigation.fail_scp_output(attempt);
@@ -976,7 +982,7 @@ const UPPER_MISSING_IDLE_S: u64 = 3600;
 async fn meter_task(
     mut backlight: embassy_hc32::pwm::TimerA4Pwm,
     // Legacy results carried into the full scan's PD/cable part.
-    findings: (Option<QcFindings>, Option<ScpFindings>),
+    findings: (Option<QcFindings>, Option<ScpFindings>, Option<FcpFindings>),
     upper_installed: bool,
     saved: firmware_core::settings::Settings,
     mut energy_store: Option<energy_store::Store>,
@@ -984,7 +990,7 @@ async fn meter_task(
     // ADC1's clock in Hz for the nominal ripple timebase; `None` without a capture.
     ripple_clock_hz: Option<u32>,
 ) {
-    let (mut qc_findings, carried_scp) = findings;
+    let (mut qc_findings, carried_scp, carried_fcp) = findings;
     let fb = framebuffer();
     let mut input_updates = BUTTON_STATE.anon_receiver();
     let mut input = button_logic::Input {
@@ -1513,19 +1519,27 @@ async fn meter_task(
                             let partner = pd::partner_sections(observation);
                             let offer = partner.min(pd::CAPABILITY_SECTIONS);
                             let mode = qc_mode(observation);
-                            let scp = if input.scp_scanning() {
+                            // A running scan shows only what it found so far.
+                            let scanning = input.scp_scanning() || input.fcp_scanning();
+                            let scp = if scanning {
                                 input.settings.scp_findings
                             } else {
                                 input.settings.scp_findings.or(carried_scp)
                             };
+                            let fcp = if scanning {
+                                input.settings.fcp_findings
+                            } else {
+                                input.settings.fcp_findings.or(carried_fcp)
+                            };
                             let qc = input.settings.qc_findings.or(qc_findings);
                             let qc_sections = ui::qc_charger_sections(qc);
                             let scp_section = offer + qc_sections;
+                            let fcp_section = scp_section + 1;
                             ui::draw_detail(
                                 canvas,
                                 &header,
                                 detail,
-                                (0..partner + qc_sections + 1).map(|section| {
+                                (0..partner + qc_sections + 2).map(|section| {
                                     if section < offer {
                                         pd::partner_lines(observation, section)
                                     } else if section < scp_section {
@@ -1539,8 +1553,18 @@ async fn meter_task(
                                                 })
                                                 .map(|(_, status)| status),
                                         )
+                                    } else if section == fcp_section {
+                                        ui::fcp_charger_lines(
+                                            fcp,
+                                            input.fcp_adapter,
+                                            fcp_status
+                                                .filter(|(attempt, _)| {
+                                                    *attempt == input.fcp_attempt
+                                                })
+                                                .map(|(_, status)| status),
+                                        )
                                     } else {
-                                        pd::partner_lines(observation, section - qc_sections - 1)
+                                        pd::partner_lines(observation, section - qc_sections - 2)
                                     }
                                 }),
                                 top,
@@ -1699,19 +1723,21 @@ async fn main(spawner: Spawner) {
     let requested = settings.next_boot;
     let resume = settings.resume;
     let qc_findings = settings.qc_findings;
-    // A normal new attachment must not inherit another charger's SCP proof.
-    // Carry evidence only through the explicitly requested scan continuation.
-    let scp_findings = settings.scp_findings.filter(|_| {
-        matches!(
-            requested,
-            NextBoot::ScanQuickCharge { .. } | NextBoot::ScanPd | NextBoot::CableTest
-        )
-    });
-    // Retain QC across source restarts during the SCP stage. The final
-    // PD/cable boot consumes the results and displays them from RAM.
+    // A normal new attachment must not inherit another charger's SCP or FCP
+    // proof. Carry evidence only through the explicitly requested scan
+    // continuation.
+    let scan = matches!(
+        requested,
+        NextBoot::ScanQuickCharge { .. } | NextBoot::ScanPd | NextBoot::CableTest
+    );
+    let scp_findings = settings.scp_findings.filter(|_| scan);
+    let fcp_findings = settings.fcp_findings.filter(|_| scan);
+    // Retain QC across source restarts during the SCP and FCP stages. The
+    // final PD/cable boot consumes the results and displays them from RAM.
     if !matches!(requested, NextBoot::ScanQuickCharge { .. }) {
         settings.qc_findings = None;
         settings.scp_findings = None;
+        settings.fcp_findings = None;
     }
     settings.finish_boot();
     let cleared = store.save(settings);
@@ -1887,7 +1913,7 @@ async fn main(spawner: Spawner) {
     spawner.spawn(
         meter_task(
             backlight_pwm,
-            (qc_findings, scp_findings),
+            (qc_findings, scp_findings, fcp_findings),
             upper_installed,
             settings,
             energy_store,

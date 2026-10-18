@@ -100,8 +100,9 @@ This is **kws-x1-standalone-rs**.
   Charger-info results, and an explicit SCP page that can set the output
   voltage and current limit within the charger's reported ratings.
 - FCP: the voltages the charger lists (such as 5.2, 9 and 12 V) and its rated
-  power, and an explicit FCP page that requests one of them.
-- A full charger scan (hold OK on the charger page): Quick Charge, SCP, the PD
+  power, retained Charger-info results, and an explicit FCP page that
+  requests one of them.
+- A full charger scan (hold OK on the charger page): Quick Charge, SCP, FCP, the PD
   offer, the EPR offer and, with the plug in the charger, the 5 A offer, on
   one page.
 - Everything the charger says about itself: its full offer (EPR included),
@@ -121,8 +122,7 @@ This is **kws-x1-standalone-rs**.
 What this firmware does **not** do, for now:
 
 - **No SCP authentication.** SCP and FCP output control is only an explicit
-  request on their pages, never automatic. FCP results last until the next
-  restart and are not part of the full charger scan or the Charger page.
+  request on their pages, never automatic.
   AFC and other protocols are not triggered. Beyond PD, QC and verified
   SCP detection, the overview names the Type-C current
   advertisement, the fixed D+/D- voltages some ports use to tell their
@@ -242,7 +242,7 @@ point the way it flows (they follow the screen rotation).
 | **SCP** | identification, then the set voltage and current limit, the live output; `ACTIVE`, `SETTING`, `STOPPING` or `FAILED` | OK tests adapter-type registers; after a detection with ratings, OK, Left/Right voltage (20 mV, 100 mV held), OK, current limit (50 mA, 250 mA held), OK applies; Back cancels an edit, then leaves the page with the output still in force; hold OK: stop the output, or rescan when none runs; PD must stop first |
 | **FCP** | identification, then the voltages the charger lists and `OFF`, the status on the requested row (`WAIT`, `SETTING`, `ACTIVE`, `STOPPING`); under a PD contract only `PD MODE` | OK tests the charger, then opens the choice at the voltage in force, else the first; Left/Right choose, OK requests and closes the choice, Back closes it; the request stays in force on other screens until `OFF`; hold OK: stop the output, or rescan when none runs; PD must stop first |
 | **PD Session** | sink: session state, CC levels and the charger's offer as received. Passthrough: CC pin, Rp level and the latest PD messages | OK to scroll |
-| **Charger** | the offer (`*` = needs a 5 A cable), the charger's identity, maker and peak ratings, power status and source info, a power bank's battery, QC and SCP results | OK to scroll; hold OK: full scan (Quick Charge, SCP identification, PD, EPR, and the 5 A cable test with the plug in the charger) |
+| **Charger** | the offer (`*` = needs a 5 A cable), the charger's identity, maker and peak ratings, power status and source info, a power bank's battery, QC, SCP and FCP results | OK to scroll; hold OK: full scan (Quick Charge, SCP and FCP identification, PD, EPR, and the 5 A cable test with the plug in the charger) |
 | **Cable** | the cable's e-marker: a readable summary (type, speed, rating, length, alt modes, maker), identity, ratings, status and modes | OK to scroll; hold OK to read the e-marker (drops to fixed 5 V first) |
 | **System** | I2C bus state and counters, frame and button timing, stack use, `LAST RESET:` cause | OK to scroll |
 | **Settings** | `BRIGHTNESS` (5 levels, 60% at first), `ROTATION` (`AUTO` follows the tilt sensor, `NORMAL`, `FLIPPED`), `ENERGY MEMORY`, `CALIBRATION`, `VERSION` (shown only) | Left/Right row, OK change it, Left/Right value, OK or Back done |
@@ -796,7 +796,7 @@ scrolls (OK) through the parts; a long offer takes two screens.
 - **`*`** after a row: offered at that current only with a 5 A cable. Then
   the note `* ONLY WITH 5A CABLE`.
 - **Notes**:
-  - `HOLD OK: FULL RESCAN` / `QC/SCP SCAN; RESTARTS` (`QC/SCP, 5A; RESTARTS`
+  - `HOLD OK: FULL RESCAN` / `QC/SCP/FCP; RESTARTS` (`QC/SCP/FCP, 5A; RESTARTS`
     with the plug in the charger): hold OK for the
     [full scan](#full-charger-offer-and-5-a-without-a-cable).
   - The EPR (28 V and up) request: `ASKING CHARGER`,
@@ -825,7 +825,8 @@ scan or the last Quick Charge test, measured on VBUS:
 A failed handshake shows one `QUICK CHARGE` section with `NOT A CHARGING
 PORT` or `NO QUICK CHARGE`. Before any result it shows `NOT SCANNED YET`
 with `HOLD OK: FULL RESCAN`, or without a PD contract `NOT TESTED YET` with
-`HOLD OK: SCAN QC/SCP`, which runs QC then read-only SCP identification and
+`HOLD OK: SCAN QC/SCP/FCP`, which runs QC then read-only SCP and FCP
+identification and
 returns to Charger info on success or failure, without opening QC controls.
 
 **`SUPERCHARGE (SCP)`**
@@ -841,6 +842,15 @@ wrong (a damaged reply, timing, or a VBUS or line check); it includes the
 live failure reason and does not mean unsupported. `NOT TESTED YET`
 means no result. The compact result survives scan restarts alongside QC,
 but a new normal attachment does not inherit a previous charger's SCP proof.
+
+**`FAST CHARGE (FCP)`**
+
+Always present, after SCP. `FCP DETECTED` lists the charger's voltages
+(`VOUT: 5.2 / 9.0 / 12.0V`) and `MAX POWER` when it reports one; after the
+full scan's restart only the highest voltage survives (`VOUT: UP TO
+12.0V`). `NO FCP`, `FCP NOT VERIFIED` and `NOT TESTED YET` mean what they
+do for SCP. The result is kept in its own flash record beside the settings
+and carried through the scan like SCP's.
 
 **`IDENTITY`**
 
@@ -1209,7 +1219,8 @@ PD-silent boot; press OK on FCP again to test. The probe uses the same entry
 and line checks as SCP, then reads the charger's FCP capability (0x21), each
 output voltage it lists (0x30 onwards) and its rated power (0x22). A charger
 that rejects those registers or lists voltages out of order shows `NO FCP`
-with `NO FCP VOLTAGES`. Back stops the probe.
+with `NO FCP VOLTAGES`. Back stops the probe. The result also shows on the
+Charger page, and the full scan runs this probe after SCP.
 
 Once a charger is found, the page lists its voltages and `OFF`. OK opens the
 choice and a second OK requests the previewed voltage. The meter re-enters
@@ -1282,14 +1293,15 @@ charger ignores Quick Charge under a PD contract, so the meter:
 1. Restarts the charger with a Hard Reset into a boot with PD silent, and
    runs the Quick Charge test on the QC 2.0 screen (it may restart once or
    twice more first; it carries on). Back abandons the scan.
-2. Keeps the QC result, performs read-only SCP identification, releases the
-   data lines and checks VBUS at 5 V. Source restarts resume this stage.
-3. Saves both results, restarts the charger into PD, asks for the EPR offer by
+2. Keeps the QC result, performs read-only SCP and then FCP identification,
+   releasing the data lines and checking VBUS at 5 V after each. Source
+   restarts resume the stage they interrupt.
+3. Saves the results, restarts the charger into PD, asks for the EPR offer by
    itself, and opens the Charger screen with the offer, the EPR offer, the
-   QC/SCP sections and the charger's answers. With the plug in the charger
+   QC, SCP and FCP sections and the charger's answers. With the plug in the charger
    that boot is the 5 A cable test below.
 
-Without PD, QC and SCP identification run directly and finish on Charger
+Without PD, QC, SCP and FCP identification run directly and finish on Charger
 info, without a PD restart.
 
 The output goes up to 20 V during the scan.

@@ -3,7 +3,7 @@
 use firmware_core::buttons::{
     BACK, DEFAULT_THRESHOLD, Input, Navigation, OK, Open, Page, QcTarget, Tab,
 };
-use firmware_core::settings::{NextBoot, QcFindings, ScpFindings, Screen, Settings};
+use firmware_core::settings::{FcpFindings, NextBoot, QcFindings, ScpFindings, Screen, Settings};
 use qc_protocol::qc2::Failure;
 
 fn hold_ok(nav: &mut Navigation) -> Input {
@@ -194,6 +194,10 @@ fn full_scan_scp_completion_cannot_enable_output() {
     let input = nav.update(0).0;
     nav.set_scp_adapter(input.scp_attempt, output_adapter());
     nav.finish_scp(input.scp_attempt, ScpFindings::Confirmed);
+    // Only the read-only FCP stage follows, and then nothing.
+    let input = nav.update(0).0;
+    assert_eq!(input.qc_request(), Some(QcTarget::Fcp(input.fcp_attempt)));
+    nav.finish_fcp(input.fcp_attempt, FcpFindings::Absent, None);
     assert_eq!(nav.update(0).0.qc_request(), None);
 }
 

@@ -283,6 +283,73 @@ impl ScpFindings {
     }
 }
 
+/// What the FCP test found. The settings word has no free bits, so this
+/// is kept in a record of its own beside it ([`Self::record`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FcpFindings {
+    Unverified,
+    /// The adapter showed it has no FCP.
+    Absent,
+    /// The highest voltage the adapter lists in mV, and its rated power in
+    /// mW when it reports one.
+    Detected {
+        max_mv: u16,
+        max_power_mw: Option<u32>,
+    },
+}
+
+/// FCP findings record: tag in the top byte, the kind in bits 17..16 (0 for
+/// none), then for a detection the top voltage in 100 mV and the rated power
+/// in 500 mW (0 for none) in bits 15..8 and 7..0, the units the adapter
+/// reports them in (`scp_protocol::fcp`).
+const FCP_RECORD_TAG: u32 = 0xfc;
+const FCP_KIND_SHIFT: u32 = 16;
+const FCP_STEP_MV: u16 = 100;
+const FCP_POWER_STEP_MW: u32 = 500;
+
+impl FcpFindings {
+    /// What detecting `adapter` found.
+    pub fn detected(adapter: scp_protocol::fcp::Adapter) -> Self {
+        Self::Detected {
+            max_mv: adapter.levels().last().copied().unwrap_or(0),
+            max_power_mw: adapter.max_power_mw,
+        }
+    }
+
+    /// The flash record keeping `findings`.
+    pub fn record(findings: Option<Self>) -> u32 {
+        let (kind, mv, mw) = match findings {
+            None => (0, 0, None),
+            Some(Self::Unverified) => (1, 0, None),
+            Some(Self::Absent) => (2, 0, None),
+            Some(Self::Detected {
+                max_mv,
+                max_power_mw,
+            }) => (3, max_mv, max_power_mw),
+        };
+        let mv = u32::from(mv / FCP_STEP_MV).min(0xff);
+        let power = mw.map_or(0, |mw| (mw / FCP_POWER_STEP_MW).min(0xff));
+        FCP_RECORD_TAG << 24 | kind << FCP_KIND_SHIFT | mv << 8 | power
+    }
+
+    /// Unpack [`Self::record`]: `None` unless `word` is one.
+    pub fn read(word: u32) -> Option<Option<Self>> {
+        if word >> 24 != FCP_RECORD_TAG || word >> (FCP_KIND_SHIFT + 2) & 0x3f != 0 {
+            return None;
+        }
+        let (mv, power) = ((word >> 8 & 0xff) as u16, word & 0xff);
+        Some(match word >> FCP_KIND_SHIFT & 0b11 {
+            0 => None,
+            1 => Some(Self::Unverified),
+            2 => Some(Self::Absent),
+            _ => Some(Self::Detected {
+                max_mv: mv * FCP_STEP_MV,
+                max_power_mw: (power > 0).then_some(power * FCP_POWER_STEP_MW),
+            }),
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Settings {
     /// Index into [`BRIGHTNESS_PERCENT`].
@@ -295,6 +362,9 @@ pub struct Settings {
     pub qc_findings: Option<QcFindings>,
     /// Read-only SCP adapter identification, carried into the PD/cable boot.
     pub scp_findings: Option<ScpFindings>,
+    /// FCP identification, carried as SCP's is; kept in its own record
+    /// ([`FcpFindings::record`]), which [`Self::encode`] leaves out.
+    pub fcp_findings: Option<FcpFindings>,
     /// The screen the next boot opens on; it lasts as long as `next_boot`
     /// (see [`Self::finish_boot`]).
     pub resume: Option<Screen>,
@@ -312,6 +382,7 @@ impl Default for Settings {
             next_boot: NextBoot::Normal,
             qc_findings: None,
             scp_findings: None,
+            fcp_findings: None,
             resume: None,
             calibration: Calibration::default(),
         }
@@ -434,6 +505,7 @@ impl Settings {
             next_boot,
             qc_findings,
             scp_findings,
+            fcp_findings: None,
             resume,
             calibration: Calibration::default(),
         })
@@ -478,6 +550,7 @@ mod tests {
                     resume: Some(Screen::Energy),
                     qc_findings: Some(QcFindings::Failed(Failure::NoEntry)),
                     scp_findings: None,
+                    fcp_findings: None,
                     calibration: Calibration::default(),
                 };
                 assert_eq!(Settings::decode(settings.encode()), Some(settings));
@@ -490,6 +563,35 @@ mod tests {
             Settings::decode(0x5f00_0042).map(|s| s.scp_findings),
             Some(Some(ScpFindings::Unverified))
         );
+    }
+
+    // The record shares the flash area with the settings word and the
+    // calibration: it must read back exactly, and no other word as it.
+    #[test]
+    fn fcp_findings_record_round_trips_and_rejects_other_words() {
+        for findings in [
+            None,
+            Some(FcpFindings::Unverified),
+            Some(FcpFindings::Absent),
+            Some(FcpFindings::Detected {
+                max_mv: 12_000,
+                max_power_mw: Some(22_500),
+            }),
+            Some(FcpFindings::Detected {
+                max_mv: 9_000,
+                max_power_mw: None,
+            }),
+        ] {
+            assert_eq!(
+                FcpFindings::read(FcpFindings::record(findings)),
+                Some(findings)
+            );
+        }
+        let settings = Settings::default().encode();
+        for word in [settings, 0, u32::MAX, 0xca00_0000, 0xfc04_0000] {
+            assert_eq!(FcpFindings::read(word), None);
+        }
+        assert_eq!(Settings::decode(FcpFindings::record(None)), None);
     }
 
     #[test]
