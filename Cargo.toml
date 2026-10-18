@@ -1,26 +1,18 @@
 [workspace]
 resolver = "3"
-members = ["firmware", "firmware-core", "firmware-image", "firmware-pack", "flasher", "fusb302-pd"]
+members = [
+    "firmware",
+    "firmware-core",
+    "firmware-image",
+    "firmware-pack",
+    "flasher",
+    "fusb302-pd",
+]
 default-members = ["firmware-core", "fusb302-pd"]
 
 [workspace.dependencies]
-lzma-rust2 = "0.22.0"
-# Local detection work; use a reviewed Git revision once published.
-scp-protocol = { path = "../embedded-charging-protocols-rs/scp-protocol" }
 anyhow = "1.0.104"
 clap = "4.6.7"
-hidapi = "2.6.7"
-image-webp = "0.2.4"
-libm = "0.2.16"
-# Only the 1024-point FFT tables: members enable `size-1024`.
-microfft = { version = "0.6.0", default-features = false }
-object = "0.40.0"
-serde = "1.0.229"
-serde_json = "1.0.154"
-sha2 = "0.11.1"
-tempfile = "3.27.0"
-tracing = "0.1.44"
-tracing-subscriber = "0.3.23"
 cortex-m = "0.7.9"
 cortex-m-rt = "0.7.7"
 embassy-executor = "0.10.0"
@@ -33,9 +25,24 @@ firmware-core = { path = "firmware-core" }
 firmware-image = { path = "firmware-image" }
 fusb302-pd = { path = "fusb302-pd" }
 hc32f460-pac = { git = "https://github.com/kralonur/hc32f460-embassy-rs", rev = "08a2603185d5acd05fda156e9cef468d47526be1" }
+hidapi = "2.6.7"
+image-webp = "0.2.4"
+libm = "0.2.16"
+lzma-rust2 = "0.22.0"
+# Only the 1024-point FFT tables: members enable `size-1024`.
+microfft = { version = "0.6.0", default-features = false }
+object = "0.40.0"
 panic-halt = "1.0.0"
 pd-protocol = { git = "https://github.com/kralonur/embedded-charging-protocols-rs", rev = "25f80d398c6a3cc0340c1d05ca23865dabc632ba" }
 qc-protocol = { git = "https://github.com/kralonur/embedded-charging-protocols-rs", rev = "25f80d398c6a3cc0340c1d05ca23865dabc632ba" }
+# Local detection work; use a reviewed Git revision once published.
+scp-protocol = { path = "../embedded-charging-protocols-rs/scp-protocol" }
+serde = "1.0.229"
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+tempfile = "3.27.0"
+tracing = "0.1.44"
+tracing-subscriber = "0.3.23"
 u8g2-fonts = "0.8.0"
 usbpd = { git = "https://github.com/kralonur/usbpd", rev = "99bf0229450fa807e225c9b2f6b85f655c2842f4" }
 usbpd-traits = { git = "https://github.com/kralonur/usbpd", rev = "99bf0229450fa807e225c9b2f6b85f655c2842f4" }
