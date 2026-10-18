@@ -1243,9 +1243,7 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
         if self.sink_alert_until.is_some_and(|until| now < until) && !soft_reset && !reset_accept {
             return Err(Error::Request); // PE_SNK_Wait_for_Get_Status is not Ready
         }
-        let answer_window_open = self.query_until.is_some_and(|(until, _)| now < until)
-            || self.pps_status_until.is_some_and(|until| now < until)
-            || self.epr_until.is_some_and(|until| now < until);
+        let answer_window_open = self.answer_window_open(now);
         let query_ready = sop == Sop::Partner
             && self.tx_revision == header::REVISION_3
             && self.config.persistent
@@ -1703,6 +1701,13 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
     /// A Soft Reset step is due or capabilities are awaited after one.
     fn reset_in_progress(&self) -> bool {
         self.reset.is_some()
+    }
+    /// The engine awaits the answer to our information, PPS_Status or EPR
+    /// request: its window has not ended (an ended one stays recorded).
+    fn answer_window_open(&self, now: u64) -> bool {
+        self.query_until.is_some_and(|(until, _)| now < until)
+            || self.pps_status_until.is_some_and(|until| now < until)
+            || self.epr_until.is_some_and(|until| now < until)
     }
     /// Abandon the AMS in progress for a Soft Reset (sections 7.1.1, 9.2.5.2).
     fn begin_reset(&mut self) {
@@ -2330,11 +2335,15 @@ impl<'a, B: GatedBus, D: Waiter, C: Clock, P: Platform> Session<'a, B, D, C, P> 
                 self.lifecycle = Lifecycle::Running;
                 selection.set_rx_idle(true);
                 P::set_rx_idle(true);
-                if selection.has_pending()
-                    || selection.refresh_due()
-                    || selection.pps_status_due()
-                    || selection.query_due()
-                    || selection.sink_alert_due()
+                // Park for that select only from Ready. While an answer window is
+                // open the engine awaits the answer, not the next due work (a
+                // request stays due until its outcome), and must still read it.
+                if !self.answer_window_open(self.clock.now_ms())
+                    && (selection.has_pending()
+                        || selection.refresh_due()
+                        || selection.pps_status_due()
+                        || selection.query_due()
+                        || selection.sink_alert_due())
                 {
                     core::future::pending::<()>().await;
                 }

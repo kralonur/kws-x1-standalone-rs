@@ -841,7 +841,7 @@ certification.
 `NOT DRP` (sink PDOs not asked), `NAK`, `BUSY`, `NO REPLY`, `NOT SUPPORTED`,
 `BLOCKED` and `RESET` are distinct outcomes. `NO REPLY` for identity means the
 request was acknowledged but no answer arrived within 50 ms, the longest the
-specification lets the meter wait; some phones answer after about 30 ms.
+specification lets the meter wait.
 `BLOCKED` means the request was never sent, for example with VBUS outside
 4.75–5.5 V. There is no automatic retry; a later hold starts a new scan. Power
 changes and cable inspection wait while the scan runs. The scan is disabled in

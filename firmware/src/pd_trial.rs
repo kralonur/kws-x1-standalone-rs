@@ -216,12 +216,17 @@ impl pd_spr::Timer for Clock {
     async fn after_timer(timer: pd_spr::TimerType, ms: u64) {
         use pd_spr::TimerType;
         embassy_time::Timer::after_millis(ms).await;
-        // These Ready selects must not cancel an active native I2C receive
+        // These Ready selects, and the answer waits whose receive keeps polling
+        // during the window, must not cancel an active native I2C receive
         // future. A whole display frame cannot starve the interrupt executor,
         // but a bus transaction must still finish before the timer takes control.
         if matches!(
             timer,
-            TimerType::SinkPPSPeriodic | TimerType::SinkEPRKeepAlive | TimerType::SinkEPREnter
+            TimerType::SinkPPSPeriodic
+                | TimerType::SinkEPRKeepAlive
+                | TimerType::SinkEPREnter
+                | TimerType::SenderResponse
+                | TimerType::VDMResponse
         ) {
             pd_spr_phy::wait_for_rx_idle(&mut embassy_time::Delay).await;
         }
