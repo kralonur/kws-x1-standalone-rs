@@ -116,7 +116,11 @@ pub fn port_lines(observation: Observation, section: u32) -> Rows {
                     status(&mut rows[2], b"SINK PDOS:", &port.sink);
                     status(&mut rows[3], b"IDENTITY:", &port.identity);
                 }
-                None => put(&mut rows[2], b"HOLD OK: SCAN AT 5V"),
+                // The session scans PD 3.0 partners only (`pd_trial::control`).
+                None if observation.spr.and_then(|spr| spr.peer_revision) == Some(3) => {
+                    put(&mut rows[2], b"HOLD OK: SCAN AT 5V")
+                }
+                None => put(&mut rows[2], b"SCAN:PD2 N/A"),
             }
         }
         Section::Sink => {

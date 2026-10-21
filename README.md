@@ -822,7 +822,8 @@ Scroll to `PORT CHECK` for the outcomes, then `SINK PDOS (ACCEPTS)`,
 
 - `PORT CHECK`: `PARTNER:DRP` or `PARTNER:SOURCE ONLY` (from the dual-role
   power flag), then the `SINK PDOS:` and `IDENTITY:` outcomes, or
-  `HOLD OK: SCAN AT 5V` before a scan.
+  `HOLD OK: SCAN AT 5V` before a scan. A PD 2.0 partner shows `SCAN:PD2 N/A`
+  instead: it cannot be scanned, so holding OK does nothing.
 - `PDO 1 FLAGS` lists the capability bits set in the first source PDO (shown
   before a scan too) and, after a scan, the first sink PDO: `DRP` dual-role
   power, `USB SUSPEND`, `UNCONSTRAINED` power, `USB DATA` communication
