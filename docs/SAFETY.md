@@ -178,8 +178,15 @@ SinkTxOK. **The board explicitly retains a nonstandard stale-SinkTxNG override**
 (USB PD R3.2 section 7.2): after a quiet 100 ms window, a final atomic quiet-line
 and empty-FIFO sample permits sending. It is not a compliance claim or a default
 for other callers. Missing GoodCRC still follows the gated protocol-error path. With the meter's plug in the
-charger (Rp on both CCs) a quiet Rp default level is treated the same way: the
+charger (Rp on both CCs) a quiet BC_LVL 1 is treated the same way: the
 talking CC was measured at BC_LVL 1 for a whole PD3 contract.
+
+The override exists because the board's powered Rd measures about 2.9 kΩ
+instead of 5.1 kΩ, so BC_LVL reads every Rp level one band low: SinkTxOK
+shows as the SinkTxNG band (BC_LVL 2), and SinkTxNG as BC_LVL 1. At BC_LVL 2
+the override therefore sends under what is really SinkTxOK, only 100 ms late.
+At BC_LVL 1 it may send under a real SinkTxNG, which is the remaining
+deviation.
 
 Cable inspection retains explicit CC2 VCONN routing and bounded SOP'/SOP''
 queries in the reviewed fixed-5 V scope, not general VCONN role negotiation. It never

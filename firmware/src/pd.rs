@@ -11,6 +11,7 @@ use firmware_core::pd_cable::CableStatus;
 use firmware_core::pd_sniff::Supply;
 use firmware_core::pd_spr::{Advertised, Supply as SessionSupply};
 
+use crate::line_adc::LineVoltages;
 use crate::ui::{self, Protocol};
 pub use fusb302_pd::observation::{Phase, SprObservation};
 pub use fusb302_pd::snapshot::{Snapshot, snapshot};
@@ -266,19 +267,22 @@ pub fn protocol(observation: &Observation) -> Option<Protocol> {
     observation.capabilities.map(|_| Protocol::PdOffer)
 }
 
-/// The Type-C current advertisement on the attached CC, as the passthrough
-/// sniffer or this meter's own CC check saw it.
-pub fn type_c_current(observation: &Observation) -> Option<Protocol> {
-    observation
-        .sniff
-        .and_then(|sniff| sniff.rp)
-        .or_else(|| {
-            attached_cc(observation)
-                .zip(observation.cc_status)
-                .and_then(|(cc, status)| status.get(usize::from(cc).checked_sub(1)?).copied())
-                .and_then(firmware_core::pd_sniff::rp)
-        })
-        .map(type_c)
+/// The Type-C current advertisement on the attached CC: in passthrough the
+/// sniffer's BC_LVL reading (this meter's Rd is off there), else this meter's
+/// own CC voltage, which BC_LVL would read one level low (`own_rp`).
+pub fn type_c_current(observation: &Observation, lines: Option<LineVoltages>) -> Option<Protocol> {
+    match observation.sniff {
+        Some(sniff) => sniff.rp,
+        None => {
+            let lines = lines?;
+            match attached_cc(observation)? {
+                1 => own_rp(lines.cc1_mv),
+                2 => own_rp(lines.cc2_mv),
+                _ => None,
+            }
+        }
+    }
+    .map(type_c)
 }
 
 /// The charger's offer and this meter's preview and contract, for the
@@ -432,6 +436,33 @@ fn header_revision(header: u16) -> Option<u8> {
     match ((header & fusb302_pd::header::SPEC_REVISION) >> 6) as u8 {
         fusb302_pd::header::REVISION_2 => Some(2),
         fusb302_pd::header::REVISION_3 => Some(3),
+        _ => None,
+    }
+}
+
+/// Type-C Rd, in ohms, that the BC_LVL thresholds (`pd_sniff::rp`) assume.
+const STANDARD_RD_OHMS: u32 = 5_100;
+/// This meter's own CC termination while powered, in ohms. Measured on two
+/// units: a fixed 56 kΩ Rp read 0.27 V on it against 0.46 V on a 5.1 kΩ Rd,
+/// and 3 A current-source Rp read 0.92 V against 1.68 V.
+const OWN_RD_OHMS: u32 = 2_900;
+/// A BC_LVL threshold in mV, scaled from the standard Rd to this meter's.
+const fn own_mv(standard_mv: u32) -> u16 {
+    (standard_mv * OWN_RD_OHMS / STANDARD_RD_OHMS) as u16
+}
+/// BC_LVL thresholds (FUSB302 STATUS0): Rp present above 0.2 V, 1.5 A above
+/// 0.66 V, 3 A above 1.23 V.
+const OWN_RP_MIN_MV: u16 = own_mv(200);
+const OWN_RP_1A5_MIN_MV: u16 = own_mv(660);
+const OWN_RP_3A0_MIN_MV: u16 = own_mv(1_230);
+
+/// Rp level from this meter's own CC voltage in sink mode, its Rd on.
+fn own_rp(mv: u16) -> Option<firmware_core::pd_sniff::Rp> {
+    use firmware_core::pd_sniff::Rp;
+    match mv {
+        OWN_RP_3A0_MIN_MV.. => Some(Rp::Current3A0),
+        OWN_RP_1A5_MIN_MV.. => Some(Rp::Current1A5),
+        OWN_RP_MIN_MV.. => Some(Rp::Default),
         _ => None,
     }
 }

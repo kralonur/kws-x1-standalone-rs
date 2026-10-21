@@ -173,10 +173,12 @@ pub fn sink_tx_allowed(status0: u8, status1: u8, rp_required: bool) -> bool {
 /// Shall Not initiate an AMS" while Rp is SinkTxNG). This requires explicit
 /// caller policy; see `docs/SAFETY.md`.
 ///
-/// Why: a tested PD3 charger holds SinkTxNG for the whole 5 V/100 mA
-/// contract (measured BC_LVL 2 with Rd on one or both CCs, so not a board
-/// artefact), while it shows SinkTxOK to a phone. Obeying it strictly blocks
-/// every voltage change, which commercial testers do not do.
+/// Why: the board's powered Rd measures about 2.9 kΩ instead of 5.1 kΩ, so
+/// BC_LVL reads every Rp level one band low. A Source showing SinkTxOK (3 A)
+/// reads BC_LVL 2, this SinkTxNG band, for the whole contract (with Rd on one
+/// or both CCs), while the same CC reads SinkTxOK on a 5.1 kΩ Rd. Obeying
+/// BC_LVL strictly blocks every voltage change, which commercial testers do
+/// not do.
 ///
 /// Why it is safe enough: SinkTxNG exists so a Source can start its own AMS
 /// without a collision, and the Source sends within tSinkTx (16-20 ms, Table
@@ -190,10 +192,12 @@ pub fn stale_sink_tx_ng(status0: u8, status1: u8) -> bool {
     quiet(status0) && status1 & status1::RX_EMPTY != 0 && rp(status0) == Some(Rp::Current1A5)
 }
 
-/// The same quiet refusal at the Rp default level, which is neither SinkTxOK
-/// nor SinkTxNG. Measured with the port's plug in the Source's receptacle (Rp
-/// on both CCs, Rd kept on both): the talking CC read BC_LVL 1 (STATUS0 11h)
-/// for a whole PD3 contract, so no AMS start was ever allowed.
+/// The same quiet refusal at BC_LVL 1. On the board's 2.9 kΩ Rd (see
+/// `stale_sink_tx_ng`) that band holds both the Rp default level and the
+/// 1.5 A level, so this may be a real SinkTxNG. Measured with the port's plug
+/// in the Source's receptacle (Rp on both CCs, Rd kept on both): the talking
+/// CC read BC_LVL 1 (STATUS0 11h) for a whole PD3 contract, so no AMS start
+/// was ever allowed.
 pub fn stale_rp_default(status0: u8, status1: u8) -> bool {
     use crate::pd_sniff::{Rp, quiet, rp};
     quiet(status0) && status1 & status1::RX_EMPTY != 0 && rp(status0) == Some(Rp::Default)

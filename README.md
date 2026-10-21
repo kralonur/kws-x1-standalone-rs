@@ -164,6 +164,23 @@ What this firmware does **not** do, for now:
   (1100 mV, RM 16.3.2). A multimeter check on one unit matched it (D+ and D−
   within 5 mV from 0.55 to 3.23 V), but the manual gives no tolerance, so
   another unit may read a few percent off. CC1 and CC2 were not checked.
+- **The meter's own CC pull-down is stronger than standard.** In sink mode
+  it measures about 2.9 kΩ instead of 5.1 kΩ, so the CC pin in use sits at a
+  bit over half the usual voltage: 0.92 V instead of 1.68 V on a 3 A
+  charger. Chargers work with it. The overview's `TYPE-C` current corrects
+  for it; the PD chip's own level reading does not, so the startup
+  `CC1`/`CC2` status reads one level low (see [PD Session](#13-pd-session)).
+  Passthrough is not affected. How the value was found:
+  - A USB-A port with an A-to-C cable pulls CC up to VBUS through a fixed
+    56 kΩ resistor, so a pull-down R gives CC = VBUS × R / (56 kΩ + R). On
+    the same port and cable, a phone's standard 5.1 kΩ read 0.46 V
+    (passthrough) and the meter's own pull-down 0.27 V (sink mode). VBUS
+    cancels out in the ratio: 0.27 / 0.46 = [R / (56 kΩ + R)] / [5.1 kΩ /
+    61.1 kΩ], so R ≈ 2.9 kΩ.
+  - Cross-check: a 3 A charger drives a fixed 330 µA current instead, so
+    CC = 330 µA × R. Six 3 A sources read 0.90–0.93 V on two meters and
+    1.66–1.70 V on a tester with a 5.1 kΩ pull-down: 5.1 kΩ × 0.92 / 1.68 ≈
+    2.8 kΩ.
 - **The chosen profile is not remembered:** every boot starts at 5 V.
 - **About 4000 settings saves** in the device's lifetime (see
   [What is saved](#what-is-saved)).
@@ -429,7 +446,8 @@ screen shows, or while Quick Charge runs.
   their levels here.
 - **`CC1`** / **`CC2`**: the Type-C configuration channels, in volts. The pin
   in use carries the Type-C pull-up/pull-down level; a cable's VCONN shows on
-  the other one.
+  the other one. In sink mode that level is a bit over half of what another
+  tester shows (see [Limitations](#limitations)).
 - `-.--`: no reading yet, or the last ADC scan failed.
 - **Hint row**: `< > tabs  approximate`. The internal reference was
   measured on one unit, and another unit's may differ by a few percent (see
@@ -792,7 +810,10 @@ check sections.
 
 **Startup section**
 
-- **`CC1:-- CC2:--`**: both CC pins' status at startup.
+- **`CC1:-- CC2:--`**: both CC pins' status at startup (the PD chip's
+  STATUS0; its low two bits are the CC level). Because of the meter's
+  stronger pull-down (see [Limitations](#limitations)) the level reads one
+  step low: `01` is a default or 1.5 A port, `02` a 3 A port.
 - `ONE CC WITH RP`: a normal attach through a cable.
 - `BOTH RP: VCONN ON CC1/CC2`, `BOTH RP: TRAFFIC ON CC1/CC2`,
   `BOTH RP: LEVEL ON CC1/CC2` or `BOTH RP: NO SINGLE LINE`: the meter's plug
