@@ -1,6 +1,6 @@
 [package]
 name = "firmware"
-version = "0.9.1-test.1"
+version = "0.9.1-test.2"
 edition = "2024"
 description = "Async meter and USB PD firmware."
 license = "MIT OR Apache-2.0"
