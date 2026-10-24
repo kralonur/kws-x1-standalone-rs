@@ -62,10 +62,25 @@ const MAGENTA: Rgb565 = Rgb565::new(31, 24, 30);
 const ORANGE: Rgb565 = Rgb565::new(31, 40, 4);
 const MUTED: Rgb565 = Rgb565::new(21, 43, 22);
 const RULE: Rgb565 = Rgb565::new(5, 14, 7);
-/// Dark card fills matching the accents above.
-const YELLOW_TINT: Rgb565 = Rgb565::new(5, 10, 0);
-const CYAN_TINT: Rgb565 = Rgb565::new(1, 9, 6);
-const GREEN_TINT: Rgb565 = Rgb565::new(1, 10, 1);
+/// Voltage, current and power in the same colour on every page; charge
+/// takes current's and energy power's.
+const VOLTS: Rgb565 = YELLOW;
+const AMPS: Rgb565 = CYAN;
+const WATTS: Rgb565 = GREEN;
+/// Dark fills under the graph's trace, matching the colours above.
+const VOLTS_TINT: Rgb565 = Rgb565::new(5, 10, 0);
+const AMPS_TINT: Rgb565 = Rgb565::new(1, 9, 6);
+const WATTS_TINT: Rgb565 = Rgb565::new(1, 10, 1);
+/// Each charging protocol's colour: its tab, its page's cards and its
+/// overview badge. Every tab in a group has a colour of its own; a family
+/// (PD, Quick Charge, FCP and SCP) shares a hue in different tones.
+const PD_ACCENT: Rgb565 = GREEN;
+const PPS_ACCENT: Rgb565 = Rgb565::new(20, 63, 20);
+const AVS_ACCENT: Rgb565 = Rgb565::new(2, 46, 10);
+const QC2_ACCENT: Rgb565 = ORANGE;
+const QC3_ACCENT: Rgb565 = Rgb565::new(31, 50, 18);
+const SCP_ACCENT: Rgb565 = MAGENTA;
+const FCP_ACCENT: Rgb565 = Rgb565::new(31, 44, 31);
 /// Ripple spectrum bars, dim purple behind the cyan trace, and their peak
 /// labels.
 const SPECTRUM: Rgb565 = Rgb565::new(12, 6, 14);
@@ -326,21 +341,22 @@ pub enum Header<'a> {
     Settings,
 }
 
-/// A tab's label and colour.
+/// A tab's label and colour, each different from the rest of its group's,
+/// so the folded bars can be told apart.
 fn tab_style(tab: Tab, passthrough: bool) -> (&'static str, Rgb565) {
     match tab {
         Tab::Overview => ("OVERVIEW", CYAN),
-        Tab::Graph => ("GRAPH", CYAN),
-        Tab::Ripple => ("RIPPLE", CYAN),
+        Tab::Graph => ("GRAPH", ORANGE),
+        Tab::Ripple => ("RIPPLE", MAGENTA),
         Tab::Lines => ("LINES", YELLOW),
         Tab::Energy => ("ENERGY", GREEN),
-        Tab::Fixed => ("PD PROFILES", GREEN),
-        Tab::Pps => ("PPS", MAGENTA),
-        Tab::Avs => ("AVS", YELLOW),
-        Tab::Qc2 => ("QC 2.0", ORANGE),
-        Tab::Qc3 => ("QC 3.0", CYAN),
-        Tab::Scp => ("SCP", ORANGE),
-        Tab::Fcp => ("FCP", ORANGE),
+        Tab::Fixed => ("PD PROFILES", PD_ACCENT),
+        Tab::Pps => ("PPS", PPS_ACCENT),
+        Tab::Avs => ("AVS", AVS_ACCENT),
+        Tab::Qc2 => ("QC 2.0", QC2_ACCENT),
+        Tab::Qc3 => ("QC 3.0", QC3_ACCENT),
+        Tab::Scp => ("SCP", SCP_ACCENT),
+        Tab::Fcp => ("FCP", FCP_ACCENT),
         Tab::Detail { page, .. } => match page {
             Detail::Pd if passthrough => ("PD SNIFF", GREEN),
             Detail::Pd => ("PD SESSION", GREEN),
@@ -668,20 +684,20 @@ fn protocol_badge(protocol: Protocol) -> (&'static str, Rgb565) {
         Protocol::Unknown => ("NONE", MUTED),
         Protocol::TypeC { ma: 0 } => ("USB", WHITE),
         Protocol::TypeC { .. } => ("TYPE-C", WHITE),
-        Protocol::PdOffer | Protocol::Pd { revision: None, .. } => ("PD", GREEN),
+        Protocol::PdOffer | Protocol::Pd { revision: None, .. } => ("PD", PD_ACCENT),
         Protocol::Pd {
             revision: Some(3), ..
-        } => ("PD 3.0", GREEN),
+        } => ("PD 3.0", PD_ACCENT),
         Protocol::Pd { .. } => ("PD 2.0", CYAN),
-        Protocol::Pps { .. } => ("PPS", MAGENTA),
-        Protocol::Avs { .. } => ("AVS", YELLOW),
-        Protocol::Qc2 { .. } => ("QC 2.0", ORANGE),
-        Protocol::Qc3 { .. } => ("QC 3.0", ORANGE),
+        Protocol::Pps { .. } => ("PPS", PPS_ACCENT),
+        Protocol::Avs { .. } => ("AVS", AVS_ACCENT),
+        Protocol::Qc2 { .. } => ("QC 2.0", QC2_ACCENT),
+        Protocol::Qc3 { .. } => ("QC 3.0", QC3_ACCENT),
         Protocol::ScpDetected | Protocol::Scp { .. } | Protocol::DrivenScp { .. } => {
-            ("SCP", ORANGE)
+            ("SCP", SCP_ACCENT)
         }
-        Protocol::Fcp { .. } => ("FCP", ORANGE),
-        Protocol::SingleWire => ("FCP/SCP", ORANGE),
+        Protocol::Fcp { .. } => ("FCP", FCP_ACCENT),
+        Protocol::SingleWire => ("FCP/SCP", SCP_ACCENT),
         Protocol::Dcp(Dcp::Bias1V2) => ("1.2V DCP", YELLOW),
         Protocol::Dcp(_) => ("DIVIDER", YELLOW),
         Protocol::Bc12 => ("BC1.2", WHITE),
@@ -764,10 +780,18 @@ const AMPS_CARD: Rectangle = Rectangle::new(
 const POWER_TOP: i32 = outlined_top(1, OVERVIEW_HEIGHT);
 const POWER_VALUE: i32 = overview_value(POWER_INK);
 const POWER_HEIGHT: u32 = overview_height(POWER_INK);
-const POWER_CARD: Rectangle =
-    Rectangle::new(Point::new(4, POWER_TOP), Size::new(150, POWER_HEIGHT));
-const PEAKS_CARD: Rectangle =
-    Rectangle::new(Point::new(158, POWER_TOP), Size::new(78, POWER_HEIGHT));
+/// The peaks card's width: its longest row, six `PLAIN` characters 6 px
+/// wide ("20.00V", "100.0W"), its padding and a little room; the power
+/// card takes the rest of the row.
+const PEAKS_WIDTH: u32 = 52;
+const PEAKS_CARD: Rectangle = Rectangle::new(
+    Point::new(236 - PEAKS_WIDTH as i32, POWER_TOP),
+    Size::new(PEAKS_WIDTH, POWER_HEIGHT),
+);
+const POWER_CARD: Rectangle = Rectangle::new(
+    Point::new(4, POWER_TOP),
+    Size::new(PEAKS_CARD.top_left.x as u32 - 8, POWER_HEIGHT),
+);
 /// The peaks' pitch, and their first baseline with the three rows centred
 /// in the card (they sit right, clear of the label).
 const PEAKS_PITCH: i32 = 9;
@@ -878,8 +902,8 @@ pub fn draw_meter<D: DrawTarget<Color = Rgb565>>(
         ),
     };
     let cards = [
-        (VOLTS_CARD, YELLOW, "VOLTAGE", volts, "V"),
-        (AMPS_CARD, CYAN, "CURRENT", amps, "A"),
+        (VOLTS_CARD, VOLTS, "VOLTAGE", volts, "V"),
+        (AMPS_CARD, AMPS, "CURRENT", amps, "A"),
     ];
     for (area, color, label, value, unit) in &cards {
         outlined_card(target, *area, label, *color, 0);
@@ -892,21 +916,21 @@ pub fn draw_meter<D: DrawTarget<Color = Rgb565>>(
             *color,
         );
     }
-    outlined_card(target, POWER_CARD, "POWER", GREEN, 0);
+    outlined_card(target, POWER_CARD, "POWER", WATTS, 0);
     value_with_unit(
         target,
         &POWER,
         &power,
         "W",
         POWER_CARD.top_left + Point::new(PAD, POWER_VALUE),
-        GREEN,
+        WATTS,
     );
 
     outlined_card(target, PEAKS_CARD, "MAX", MAGENTA, meter.reset_hold);
     let peaks = [
-        (Label::new().hundredths(meter.peaks.mv).push(b"V"), YELLOW),
-        (Label::new().hundredths(meter.peaks.ma).push(b"A"), CYAN),
-        (Label::new().watts(meter.peaks.mw).push(b"W"), GREEN),
+        (Label::new().hundredths(meter.peaks.mv).push(b"V"), VOLTS),
+        (Label::new().hundredths(meter.peaks.ma).push(b"A"), AMPS),
+        (Label::new().watts(meter.peaks.mw).push(b"W"), WATTS),
     ];
     for (index, (peak, color)) in peaks.iter().enumerate() {
         text(
@@ -1044,7 +1068,7 @@ fn graph_row<D: DrawTarget<Color = Rgb565>>(
         .map(|value| width(&GRAPH_VALUES, value.as_str()));
     let gap = (right - left - widths.iter().sum::<i32>()) / (widths.len() as i32 - 1);
     let mut x = left;
-    for ((value, width), color) in values.iter().zip(widths).zip([YELLOW, CYAN, GREEN]) {
+    for ((value, width), color) in values.iter().zip(widths).zip([VOLTS, AMPS, WATTS]) {
         text(
             target,
             &GRAPH_VALUES,
@@ -1094,9 +1118,9 @@ pub fn draw_graph<D: DrawTarget<Color = Rgb565>>(
     }
     // The overview's colours for each quantity.
     let (color, tint) = match trace {
-        GraphTrace::Power => (GREEN, GREEN_TINT),
-        GraphTrace::Voltage => (YELLOW, YELLOW_TINT),
-        GraphTrace::Current => (CYAN, CYAN_TINT),
+        GraphTrace::Power => (WATTS, WATTS_TINT),
+        GraphTrace::Voltage => (VOLTS, VOLTS_TINT),
+        GraphTrace::Current => (AMPS, AMPS_TINT),
     };
     let scale = graph_scale(max.map_or(0, |max| trace.value(max)));
     let label_baseline = top + GRAPH_SCALE_LABEL_BELOW_TOP;
@@ -1227,15 +1251,15 @@ pub fn draw_energy<D: DrawTarget<Color = Rgb565>>(
             "CHARGE",
             Label::new().fixed_u64(totals.milliamp_hours(), 3),
             "Ah",
-            CYAN,
+            AMPS,
         ),
         (
             "ENERGY",
             Label::new().fixed_u64(totals.milliwatt_hours(), 3),
             "Wh",
-            GREEN,
+            WATTS,
         ),
-        ("TIME", Label::new().duration(totals.elapsed_ms), "", YELLOW),
+        ("TIME", Label::new().duration(totals.elapsed_ms), "", WHITE),
     ];
     for (index, (label, value, unit, color)) in cards.iter().enumerate() {
         let top = outlined_top(index as i32, ENERGY_CARD_HEIGHT);
@@ -1477,7 +1501,7 @@ pub fn draw_ripple<D: DrawTarget<Color = Rgb565>>(
         &value,
         "mV p-p",
         Point::new(LEFT, VALUE_Y),
-        CYAN,
+        VOLTS,
     );
     let rms = match rms {
         Some(rms) => Label::new()
@@ -1606,13 +1630,13 @@ pub fn draw_ripple<D: DrawTarget<Color = Rgb565>>(
             let low = y(bin.min);
             let high = y(bin.max);
             Line::new(Point::new(x, low), Point::new(x, high))
-                .into_styled(PrimitiveStyle::with_stroke(CYAN, 1))
+                .into_styled(PrimitiveStyle::with_stroke(VOLTS, 1))
                 .draw(target)
                 .ok();
             let centre = Point::new(x, (low + high) / 2);
             if let Some(previous) = previous {
                 Line::new(previous, centre)
-                    .into_styled(PrimitiveStyle::with_stroke(CYAN, 1))
+                    .into_styled(PrimitiveStyle::with_stroke(VOLTS, 1))
                     .draw(target)
                     .ok();
             }
@@ -2013,14 +2037,14 @@ pub fn draw_scp<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'
     if !probing && let Some(selection) = scp.selection {
         let output = selection.output();
         let cap = selection.adapter().capabilities;
-        let (volts_box, amps_box) = range_card(target, "SCP RANGE", ORANGE, cap.map(scp_range));
+        let (volts_box, amps_box) = range_card(target, "SCP RANGE", SCP_ACCENT, cap.map(scp_range));
         value_box(
             target,
             volts_box,
             "SET VOLTAGE",
             Label::new().hundredths(u32::from(output.millivolts())),
             "V",
-            YELLOW,
+            VOLTS,
             scp.focus == Some(PpsFocus::Voltage),
         );
         value_box(
@@ -2029,7 +2053,7 @@ pub fn draw_scp<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'
             "CURRENT LIMIT",
             Label::new().hundredths(u32::from(output.milliamps())),
             "A",
-            CYAN,
+            AMPS,
             scp.focus == Some(PpsFocus::Current),
         );
         let live = scp.reading.map(|reading| {
@@ -2077,7 +2101,7 @@ pub fn draw_scp<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'
             Some(cap) => scp_range(cap),
             None => Label::new().push(b"ratings not reported"),
         };
-        let (volts_box, amps_box) = range_card(target, "SCP RANGE", ORANGE, [lines]);
+        let (volts_box, amps_box) = range_card(target, "SCP RANGE", SCP_ACCENT, [lines]);
         let (volts, amps) = match adapter.capabilities {
             Some(cap) => (
                 Label::new().hundredths(u32::from(cap.max_mv)),
@@ -2085,8 +2109,8 @@ pub fn draw_scp<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'
             ),
             None => (Label::new().push(b"--.--"), Label::new().push(b"-.--")),
         };
-        value_box(target, volts_box, "MAX VOLTAGE", volts, "V", YELLOW, false);
-        value_box(target, amps_box, "MAX CURRENT", amps, "A", CYAN, false);
+        value_box(target, volts_box, "MAX VOLTAGE", volts, "V", VOLTS, false);
+        value_box(target, amps_box, "MAX CURRENT", amps, "A", AMPS, false);
         let mode_text = match adapter.modes {
             scp_protocol::Modes::LowVoltage => "LVC",
             scp_protocol::Modes::HighVoltage => "HVC",
@@ -2112,7 +2136,7 @@ pub fn draw_scp<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'
             } else {
                 "no output requested"
             },
-            ORANGE,
+            SCP_ACCENT,
         );
     }
     hint(
@@ -2181,7 +2205,7 @@ pub fn draw_fcp<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'
                 None => "FCP NOT TESTED",
             },
             failure.map_or("no output requested", scp_error),
-            ORANGE,
+            FCP_ACCENT,
         );
         hint(target, header, "< > tabs  OK test FCP");
         return;
@@ -2377,7 +2401,12 @@ pub fn draw_qc3<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'
         return;
     }
     if !qc.steps() {
-        notice(target, "NO QC 3.0", "the charger ignored the steps", CYAN);
+        notice(
+            target,
+            "NO QC 3.0",
+            "the charger ignored the steps",
+            QC3_ACCENT,
+        );
         hint(target, header, "< > tabs");
         return;
     }
@@ -2398,28 +2427,21 @@ pub fn draw_qc3<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'
             Some(class_range(Voltage::V20, b"  Class B")),
         ],
     };
-    let (volts_box, amps_box) = range_card(target, "STEPS", CYAN, ranges.into_iter().flatten());
+    let (volts_box, amps_box) =
+        range_card(target, "STEPS", QC3_ACCENT, ranges.into_iter().flatten());
 
     let set = match target_mv {
         Some(mv) => Label::new().hundredths(u32::from(mv)),
         None => Label::new().push(b"--.--"),
     };
-    value_box(
-        target,
-        volts_box,
-        "SET VOLTAGE",
-        set,
-        "V",
-        YELLOW,
-        adjusting,
-    );
+    value_box(target, volts_box, "SET VOLTAGE", set, "V", VOLTS, adjusting);
     value_box(
         target,
         amps_box,
         "VBUS",
         volts_or_blank(reading.map(|r| r.mv)),
         "V",
-        CYAN,
+        VOLTS,
         false,
     );
 
@@ -2685,7 +2707,7 @@ pub fn draw_fixed<D: DrawTarget<Color = Rgb565>>(
     }
     let profiles = offer.fixed();
     if profiles.is_empty() {
-        notice(target, "NO PD CHARGER", "plug in a PD source", GREEN);
+        notice(target, "NO PD CHARGER", "plug in a PD source", PD_ACCENT);
         return;
     }
     let preview = offer
@@ -2847,14 +2869,14 @@ pub fn draw_pps<D: DrawTarget<Color = Rgb565>>(
             target,
             "NO PPS",
             "this charger offers no PPS range",
-            MAGENTA,
+            PPS_ACCENT,
         );
         return;
     }
     let (volts_box, amps_box) = range_card(
         target,
         "PPS RANGE",
-        MAGENTA,
+        PPS_ACCENT,
         ranges.iter().map(|range| {
             Label::new()
                 .hundredths(u32::from(range.min_mv))
@@ -2874,7 +2896,7 @@ pub fn draw_pps<D: DrawTarget<Color = Rgb565>>(
         "SET VOLTAGE",
         volts,
         "V",
-        YELLOW,
+        VOLTS,
         focus == Some(PpsFocus::Voltage),
     );
     value_box(
@@ -2883,7 +2905,7 @@ pub fn draw_pps<D: DrawTarget<Color = Rgb565>>(
         "CURRENT LIMIT",
         amps,
         "A",
-        CYAN,
+        AMPS,
         focus == Some(PpsFocus::Current),
     );
     supply_status(target, offer, set, live);
@@ -2916,7 +2938,12 @@ pub fn draw_avs<D: DrawTarget<Color = Rgb565>>(
     }
     let ranges = offer.avs();
     if ranges.is_empty() {
-        notice(target, "NO AVS", "this charger offers no AVS range", YELLOW);
+        notice(
+            target,
+            "NO AVS",
+            "this charger offers no AVS range",
+            AVS_ACCENT,
+        );
         return;
     }
     let line = |range: &AvsRange| {
@@ -2944,7 +2971,8 @@ pub fn draw_avs<D: DrawTarget<Color = Rgb565>>(
                 .push(b"A")
         }
     };
-    let (volts_box, amps_box) = range_card(target, "AVS RANGE", YELLOW, ranges.iter().map(line));
+    let (volts_box, amps_box) =
+        range_card(target, "AVS RANGE", AVS_ACCENT, ranges.iter().map(line));
     let set = offer.preview.filter(|preview| preview.kind == Kind::Avs);
     let (volts, amps) = set_values(set);
     value_box(
@@ -2953,10 +2981,10 @@ pub fn draw_avs<D: DrawTarget<Color = Rgb565>>(
         "SET VOLTAGE",
         volts,
         "V",
-        YELLOW,
+        VOLTS,
         adjusting,
     );
-    value_box(target, amps_box, "CURRENT", amps, "A", CYAN, false);
+    value_box(target, amps_box, "CURRENT", amps, "A", AMPS, false);
     supply_status(target, offer, set, live);
     hint(
         target,
@@ -3259,11 +3287,11 @@ pub fn draw_calibration<D: DrawTarget<Color = Rgb565>>(
     live: Option<Reading>,
 ) {
     draw_header(target, header);
-    let (title, detail, unit, hint_text) = match wizard.step {
+    let (title, detail, (unit, color), hint_text) = match wizard.step {
         Step::Zero => (
             "1/3  ZERO CURRENT",
             "Unplug the load, keep the power on",
-            "A",
+            ("A", AMPS),
             "hold OK zero  OK skip  BACK cancel",
         ),
         Step::Entry {
@@ -3272,7 +3300,7 @@ pub fn draw_calibration<D: DrawTarget<Color = Rgb565>>(
         } => (
             "2/3  CURRENT",
             "Steady load: enter your meter's amps",
-            "A",
+            ("A", AMPS),
             "< > adjust  OK next  BACK cancel",
         ),
         Step::Entry {
@@ -3281,7 +3309,7 @@ pub fn draw_calibration<D: DrawTarget<Color = Rgb565>>(
         } => (
             "3/3  VOLTAGE",
             "Enter your meter's volts",
-            "V",
+            ("V", VOLTS),
             "< > adjust  OK save  BACK cancel",
         ),
     };
@@ -3323,7 +3351,7 @@ pub fn draw_calibration<D: DrawTarget<Color = Rgb565>>(
         if editing { "YOUR METER" } else { "THIS METER" },
         entered,
         unit,
-        CYAN,
+        color,
         editing,
     );
     if editing {
