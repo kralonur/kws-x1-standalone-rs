@@ -35,7 +35,7 @@ pub struct Sources<'a> {
 /// The protocol the overview names, in the order the module docs give.
 pub fn identify(sources: &Sources<'_>) -> Protocol {
     let observation = sources.observation;
-    let type_c = pd::type_c_current(observation);
+    let type_c = pd::type_c_current(observation, sources.lines);
     // With this meter's trigger off, the lines show the port and any device.
     let lines = sources.lines.filter(|_| sources.qc == Status::Off);
     own_quick_charge(sources.qc)
