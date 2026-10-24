@@ -821,8 +821,10 @@ fn pd_session(canvas: &mut Canvas) -> Result<()> {
 /// as captured on the wire.
 const PHONE: [u32; 1] = [0x3601_9032];
 
-/// A port check of that phone as captured on the wire: its Sink_Capabilities
-/// and Discover Identity ACK.
+/// A port check of that phone (a Galaxy S24 Ultra): its Sink_Capabilities and
+/// Discover Identity ACK as the port check photos show them. The UFP VDO is
+/// built from the rows they show: v1.3, Billboard only, USB 3.2 Gen 1,
+/// reconfigurable alternate modes, VBUS not required, VCONN 1.5 W required.
 fn scanned_port() -> Result<Observation> {
     use pd_protocol::{
         pd_partner::{Answer, PortInfo},
@@ -838,8 +840,14 @@ fn scanned_port() -> Result<Observation> {
         0xc0dc_212c,
     ]))
     .context("bounded sink PDO fixture")?;
-    let identity = Identity::decode(&bytes(&[0xff00_a041, 0xd040_04e8, 0, 0x6860_0000]))
-        .context("identity fixture")?;
+    let identity = Identity::decode(&bytes(&[
+        0xff00_a041,
+        0xd040_04e8,
+        0,
+        0x6860_0201,
+        0x6200_01d1,
+    ]))
+    .context("identity fixture")?;
     observation
         .spr
         .as_mut()
@@ -852,16 +860,33 @@ fn scanned_port() -> Result<Observation> {
     Ok(observation)
 }
 
-fn pd_input(canvas: &mut Canvas) -> Result<()> {
+/// The port check photos' list, shown from the first row starting with
+/// `heading`.
+fn port_check(canvas: &mut Canvas, heading: &str) -> Result<()> {
     let observation = scanned_port()?;
-    detail(
-        canvas,
-        Detail::Pd,
-        false,
-        (0..pd::port_sections(observation)).map(|section| pd::port_lines(observation, section)),
-        4,
-    );
+    let sections: Vec<_> = (0..pd::port_sections(observation))
+        .map(|section| pd::port_lines(observation, section))
+        .collect();
+    let top = shown_rows(&sections)
+        .position(|row| row.starts_with(heading))
+        .with_context(|| format!("no {heading} row in the port check"))?;
+    detail(canvas, Detail::Pd, false, sections, top as u16);
     Ok(())
+}
+
+/// First port check photo: the outcomes and what the phone accepts.
+fn pd_input(canvas: &mut Canvas) -> Result<()> {
+    port_check(canvas, "PORT CHECK")
+}
+
+/// Second port check photo: the phone's identity.
+fn pd_input_identity(canvas: &mut Canvas) -> Result<()> {
+    port_check(canvas, "DISCOVER IDENTITY")
+}
+
+/// Third port check photo: scrolled to the end, the UFP VDO.
+fn pd_input_ufp(canvas: &mut Canvas) -> Result<()> {
+    port_check(canvas, "USB DEVICE")
 }
 
 /// PD Sniff photo.
@@ -881,23 +906,71 @@ fn charger(canvas: &mut Canvas) -> Result<()> {
         objects[SPR_OBJECTS] = EPR_28V;
         spr.epr_offer = EprOffer::Received(objects);
     }
-    let partner = pd::partner_sections(observation);
-    let offer = partner.min(pd::CAPABILITY_SECTIONS);
     detail(
         canvas,
         Detail::Charger,
         false,
-        (0..offer)
-            .map(|section| pd::partner_lines(observation, section))
-            .chain(
-                (0..ui::qc_charger_sections(None))
-                    .map(|section| ui::qc_charger_lines(None, QcMode::Pd, section)),
-            )
-            .chain(core::iter::once(ui::scp_charger_lines(None, None)))
-            .chain(core::iter::once(ui::fcp_charger_lines(None, None, None)))
-            .chain((offer..partner).map(|section| pd::partner_lines(observation, section))),
+        charger_sections(observation),
         0,
     );
+    Ok(())
+}
+
+/// The Charger page's sections, as the firmware lists them, with nothing
+/// from the Quick Charge, SCP and FCP tests yet.
+fn charger_sections(observation: Observation) -> Vec<[[u8; 24]; 8]> {
+    let partner = pd::partner_sections(observation);
+    let offer = partner.min(pd::CAPABILITY_SECTIONS);
+    (0..offer)
+        .map(|section| pd::partner_lines(observation, section))
+        .chain(
+            (0..ui::qc_charger_sections(None))
+                .map(|section| ui::qc_charger_lines(None, QcMode::Pd, section)),
+        )
+        .chain(core::iter::once(ui::scp_charger_lines(None, None)))
+        .chain(core::iter::once(ui::fcp_charger_lines(None, None, None)))
+        .chain((offer..partner).map(|section| pd::partner_lines(observation, section)))
+        .collect()
+}
+
+/// Battery photo: a phone powering the meter, the Charger page scrolled to
+/// its battery (Apple's VID, 18.0 Wh design and last full capacity, 8.1 Wh
+/// charge, charging). The sections above it were not photographed.
+fn charger_battery(canvas: &mut Canvas) -> Result<()> {
+    use pd_protocol::pd_partner::{
+        Answer, BatteryCapabilities, BatteryStatus, Capacity, Charging, SourceExtended,
+    };
+    /// Source Capabilities Extended Data Block length, and its byte holding
+    /// the fixed Battery count (low nibble; USB PD 3.2 Table 6.50).
+    const SCEDB_LEN: usize = 24;
+    const BATTERIES: usize = 22;
+    let mut scedb = [0; SCEDB_LEN];
+    scedb[BATTERIES] = 1;
+    let mut observation = five_volt_session();
+    let partner = &mut observation
+        .spr
+        .as_mut()
+        .context("sink session fixture")?
+        .partner;
+    partner.source_extended =
+        Answer::Value(SourceExtended::decode(&scedb).context("SCEDB fixture")?);
+    partner.battery_capabilities = Answer::Value(BatteryCapabilities {
+        vid: 0x05ac,
+        pid: 0,
+        design: Some(Capacity::DeciWattHours(180)),
+        last_full: Some(Capacity::DeciWattHours(180)),
+        invalid_reference: false,
+    });
+    partner.battery_status = Answer::Value(BatteryStatus {
+        present: Capacity::DeciWattHours(81),
+        battery: Some(Some(Charging::Charging)),
+        invalid_reference: false,
+    });
+    let sections = charger_sections(observation);
+    let top = shown_rows(&sections)
+        .position(|row| row == "BATTERY")
+        .context("no BATTERY row on the Charger page")?;
+    detail(canvas, Detail::Charger, false, sections, top as u16);
     Ok(())
 }
 
@@ -1063,7 +1136,7 @@ fn main() -> Result<()> {
             .nth(1)
             .context("usage: screens <output directory>")?,
     );
-    let pages: [(&str, Draw); 23] = [
+    let pages: [(&str, Draw); 26] = [
         ("overview_screen", overview),
         ("lines_screen", lines),
         ("energy_screen", energy),
@@ -1079,7 +1152,10 @@ fn main() -> Result<()> {
         ("fcp_screen", fcp),
         ("pd_session_screen", pd_session),
         ("pd_input_screen", pd_input),
+        ("pd_input_identity_screen", pd_input_identity),
+        ("pd_input_ufp_screen", pd_input_ufp),
         ("charger_screen", charger),
+        ("charger_battery_screen", charger_battery),
         ("cable_screen", cable),
         ("cable_details_screen", cable_details),
         ("system_screen", system),
@@ -1133,7 +1209,7 @@ mod tests {
             "3 VAR 5.0-9.0V 2.00A (18W)",
             "4 PPS 3.3-11.0V 2.20A (24.2W)",
             "VID:04E8 PID:6860",
-            "BCD:0000 XID:00000000",
+            "BCD:0201 XID:00000000",
             "UFP:PERIPHERAL",
             "USB DEVICE:Y HOST:Y",
             "MODAL:N CONN:RECEPTACLE",
@@ -1141,12 +1217,18 @@ mod tests {
             "SOURCE: DRP USB SUSPEND USB DATA",
             "SINK: DRP HIGHER CAP USB DATA DRD",
             "FRS:NONE",
+            "DFP:NONE",
+            "SPEED:USB3.2 GEN1",
+            "USB2:N BB:Y 3.2:N 4:N",
+            "ALT MODES: RECONFIG",
+            "VBUS REQ:N VCONN:Y",
+            "VCONN POWER:1.5W",
         ] {
             assert!(text.contains(expected), "missing: {expected}");
         }
-        assert_eq!(pd::port_sections(observation), 4);
+        assert_eq!(pd::port_sections(observation), 5);
         for (objects, sections, ufp) in [
-            (vec![0xff00_a041, 0xd040_04e8, 0, 0x6860_0000], 4, false),
+            (vec![0xff00_a041, 0xd040_04e8, 0, 0x6860_0201], 4, false),
             (
                 vec![0xff00_a041, 0x5100_0000, 0, 0, 0x6d00_0003, 0, 0x4700_0005],
                 5,

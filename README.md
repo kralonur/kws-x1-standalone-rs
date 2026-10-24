@@ -108,8 +108,8 @@ This is **kws-x1-standalone-rs**.
   offer, the EPR offer and, with the plug in the charger, the 5 A offer, on
   one page.
 - Everything the charger says about itself: its full offer (EPR included),
-  identity, ratings and status, and for a battery-powered charger (a power
-  bank) its battery's capacity and charge.
+  identity, ratings and status, and for a battery-powered source (a power
+  bank, or a phone powering the meter) its battery's capacity and charge.
 - Cable e-marker reading, and a 5 A cable test for the meter's plug.
 - Passthrough mode: listens to the PD messages between a charger and a device
   without taking part.
@@ -134,15 +134,6 @@ What this firmware does **not** do, for now:
   with a real EPR cable and was tested on hardware. EPR AVS up to 30 V can be
   selected the same way but has not been tried on a charger. Fixed 36/48 V
   remain informational only. The fake marker remains 20 V/non-EPR.
-- **The battery readout is untested.** It is built from the USB PD 3.2
-  specification and checked in the library tests, but no battery-reporting
-  power bank has been tried yet.
-- **Quick Charge partly tested.** Tested on one Quick Charge 3.0 Class A
-  charger, on a USB-A port and on USB-C switched out of PD: fixed 9 and
-  12 V, the 0.2 V steps and the probe. 20 V and Class B chargers are
-  untested. The trigger drives D+/D− only once a Quick Charge screen
-  started it, and keeps them driven while other screens show, until `OFF`
-  on the QC 2.0 screen, the switch back to PD, a PD contract or a restart.
 - **Sink only.** The meter never acts as a source: no power role swap, no
   data role swap, no VCONN swap, no Cable_Reset.
 - **Passthrough only listens.** It cannot change or inject anything between
@@ -164,6 +155,26 @@ What this firmware does **not** do, for now:
   (1100 mV, RM 16.3.2). A multimeter check on one unit matched it (D+ and D−
   within 5 mV from 0.55 to 3.23 V), but the manual gives no tolerance, so
   another unit may read a few percent off. CC1 and CC2 were not checked.
+- **The meter's own CC pull-down acts stronger than standard.** In sink
+  mode the CC pin in use sits at a bit over half the usual voltage: 0.92 V
+  instead of 1.68 V on a 3 A charger, as if the pull-down were about 2.9 kΩ
+  instead of 5.1 kΩ. Why is not known yet: a multimeter on the unused CC pin
+  reads 4.2 kΩ, and still 6.4 kΩ with the pull-down switched off, which does
+  not explain the voltage. The chargers tried so far work with it. The
+  overview's `TYPE-C` current corrects for it; the PD chip's own level
+  reading does not, so the startup `CC1`/`CC2` status reads one level low
+  (see [PD Session](#13-pd-session)). Passthrough is not affected. How the
+  value was found:
+  - A USB-A port with an A-to-C cable pulls CC up to VBUS through a fixed
+    56 kΩ resistor, so a pull-down R gives CC = VBUS × R / (56 kΩ + R). On
+    the same port and cable, a phone's standard 5.1 kΩ read 0.46 V
+    (passthrough) and the meter's own pull-down 0.27 V (sink mode). VBUS
+    cancels out in the ratio: 0.27 / 0.46 = [R / (56 kΩ + R)] / [5.1 kΩ /
+    61.1 kΩ], so R ≈ 2.9 kΩ.
+  - Cross-check: six 3 A sources read 0.90–0.93 V on two meters and
+    1.66–1.70 V on a tester with a 5.1 kΩ pull-down. With a current-source
+    pull-up (330 µA for 3 A), CC = 330 µA × R, so R ≈ 5.1 kΩ × 0.92 / 1.68 ≈
+    2.8 kΩ.
 - **The chosen profile is not remembered:** every boot starts at 5 V.
 - **About 4000 settings saves** in the device's lifetime (see
   [What is saved](#what-is-saved)).
@@ -182,12 +193,20 @@ What this firmware does **not** do, for now:
 
 The pages sit in three groups: **Monitor** (Overview, Lines, Energy, Graph, Ripple), **Trigger**
 (PD Profiles, PPS, AVS, QC 2.0, QC 3.0, SCP, FCP) and **Info** (PD Session, Charger, Cable,
-System). The header shows the group's tabs as a strip, each in its own
-colour: the shown tab is named, the others fold to thin bars. A dot per group
-sits on the right. The shown tab marks what Left/Right move: a bar beside its
-name and lit dots for groups (the hint row reads `< > groups  OK tabs`), an
-underline for tabs, and a filled tab once the page itself has them (choosing,
-editing or scrolling). A group comes back on the tab it last showed.
+System). The header shows the group's tabs as a strip, each in a colour no
+other tab in its group has; a protocol family (PD, PPS and AVS; QC 2.0 and
+QC 3.0; SCP and FCP) shares a hue in different tones, which the protocol's
+cards and overview badge use too. The shown tab is named, the others fold to
+thin bars. A dot per group sits on the right. The shown tab marks what
+Left/Right move: a bar beside its name and lit dots for groups (the hint row
+reads `< > groups  OK tabs`), an underline for tabs, and a filled tab once the
+page itself has them (choosing, editing or scrolling). A group comes back on
+the tab it last showed.
+
+Wherever a voltage, current or power has its own card or trace, it is
+yellow, cyan or green on every page; charge (Ah) is cyan and energy (Wh)
+green. Two exceptions: Lines gives each line its own colour, and the voltage
+lists (PD Profiles, QC 2.0, FCP) colour each voltage from cool to warm.
 
 Holding **Back** and **OK** while plugging into a computer starts the
 bootloader instead (see [Flashing](#flashing)).
@@ -244,7 +263,7 @@ point the way it flows (they follow the screen rotation).
 | **SCP** | identification, then the set voltage and current limit, the live output; `ACTIVE`, `SETTING`, `STOPPING` or `FAILED` | OK tests adapter-type registers; after a detection with ratings, OK, Left/Right voltage (20 mV, 100 mV held), OK, current limit (50 mA, 250 mA held), OK applies; Back cancels an edit, then leaves the page with the output still in force; hold OK: stop the output, or rescan when none runs; PD must stop first |
 | **FCP** | identification, then the voltages the charger lists and `OFF`, the status on the requested row (`WAIT`, `SETTING`, `ACTIVE`, `STOPPING`); under a PD contract only `PD MODE` | OK tests the charger, then opens the choice at the voltage in force, else the first; Left/Right choose, OK requests and closes the choice, Back closes it; the request stays in force on other screens until `OFF`; hold OK: stop the output, or rescan when none runs; PD must stop first |
 | **PD Session** | sink: session state, CC levels, the source's offer and the port check (a dual-role device's sink PDOs and identity). Passthrough: CC pin, Rp level and the latest PD messages | OK to scroll; hold OK: port check (drops to fixed 5 V first, PD 3.0 only) |
-| **Charger** | the offer (`*` = needs a 5 A cable), the charger's identity, maker and peak ratings, power status and source info, a power bank's battery, QC, SCP and FCP results | OK to scroll; hold OK: full scan (Quick Charge, SCP and FCP identification, PD, EPR, and the 5 A cable test with the plug in the charger) |
+| **Charger** | the offer (`*` = needs a 5 A cable), the charger's identity, maker and peak ratings, power status and source info, the battery of a power bank or a phone powering the meter, QC, SCP and FCP results | OK to scroll; hold OK: full scan (Quick Charge, SCP and FCP identification, PD, EPR, and the 5 A cable test with the plug in the charger) |
 | **Cable** | the cable's e-marker: a readable summary (type, speed, rating, length, alt modes, maker), identity, ratings, status and modes | OK to scroll; hold OK to read the e-marker (drops to fixed 5 V first) |
 | **System** | I2C bus state and counters, frame and button timing, stack use, `LAST RESET:` cause | OK to scroll |
 | **Settings** | `BRIGHTNESS` (5 levels, 60% at first), `ROTATION` (`AUTO` follows the tilt sensor, `NORMAL`, `FLIPPED`), `ENERGY MEMORY`, `CALIBRATION`, `VERSION` (shown only) | Left/Right row, OK change it, Left/Right value, OK or Back done |
@@ -429,7 +448,8 @@ screen shows, or while Quick Charge runs.
   their levels here.
 - **`CC1`** / **`CC2`**: the Type-C configuration channels, in volts. The pin
   in use carries the Type-C pull-up/pull-down level; a cable's VCONN shows on
-  the other one.
+  the other one. In sink mode that level is a bit over half of what another
+  tester shows (see [Limitations](#limitations)).
 - `-.--`: no reading yet, or the last ADC scan failed.
 - **Hint row**: `< > tabs  approximate`. The internal reference was
   measured on one unit, and another unit's may differ by a few percent (see
@@ -734,8 +754,8 @@ screen; [FCP](#fcp) explains the test and the requests.
 <img src="pictures/pd_session_screen.webp" width="480" alt="PD Session screen">
 
 This is the **PD Session** screen (tab `PD SESSION` in Info): the meter's
-own PD negotiation. It scrolls (OK) through the session, startup, source offer
-and port check sections.
+own PD negotiation. It scrolls (OK) through the session, startup and port
+check sections.
 
 **Session section**
 
@@ -748,8 +768,8 @@ and port check sections.
 - **`TRY ACK ACC RDY`**: request written, acknowledged with GoodCRC (`G`:
   GoodCRC seen without the send-done flag), `Accept` received, `PS_RDY`
   received. `Y` yes, `-` not yet.
-- **`MS: AK AC RD`**: milliseconds from sending the request to its GoodCRC,
-  to `Accept`, and to `PS_RDY`.
+- **`MS: AK AC RD`**: milliseconds for each step: the request sent to its
+  GoodCRC, GoodCRC to `Accept`, and `Accept` to `PS_RDY`.
 - **`VBUS:05.13V MEASURED`**: the live bus voltage. Before a live reading the
   row is `V:G--.-- RD--.-- RT--.--`: VBUS before the request, at `PS_RDY`, and
   after the session ended.
@@ -771,7 +791,8 @@ and port check sections.
   - `SEL:09V`: the fixed profile being prepared.
   - `HOLD BACK TO STOP`, `POST S1:---- C3:----` (controller registers after
     the session), `RESTORE NOT VERIFIED`, `VCONN STATE UNVERIFIED`,
-    `VALUE:----` (an unexpected register value), or a cable `VID`/`PID`.
+    `VALUE:----` (an unexpected register value), `WAIT - NO RETRY` (a cable
+    query is running) or a cable `VID`/`PID`.
 - **Last row**, the session state:
   - `05V CONTRACT LIVE` / `PPS07.02V 05.00A LIVE` (`AVS…` likewise): a
     contract is in force.
@@ -782,13 +803,19 @@ and port check sections.
   - `WAIT CC TEST`, `MEAS RX POWER`, `RX LISTEN TX OFF`,
     `CAPS RESTORED TX OFF`: startup steps.
   - `SKIP BUS LATCHED`: the session never started; the bus was closed.
+  - `QUICK CHARGE PD OFF`: PD stays off for a Quick Charge boot.
+  - The `EPR: …` states listed under the [PD Profiles](#6-pd-profiles) hint
+    row, while EPR mode is entered or left, or after it failed.
   - `FAIL REG:----`, `SKIP REG:----`, `DIFF REG:----`: stopped on a
     register error, an unexpected start state, or a value that did not read
     back.
 
 **Startup section**
 
-- **`CC1:-- CC2:--`**: both CC pins' status at startup.
+- **`CC1:-- CC2:--`**: both CC pins' status at startup (the PD chip's
+  STATUS0; its low two bits are the CC level). Because of the meter's
+  stronger pull-down (see [Limitations](#limitations)) the level reads one
+  step low: `01` is a default or 1.5 A port, `02` a 3 A port.
 - `ONE CC WITH RP`: a normal attach through a cable.
 - `BOTH RP: VCONN ON CC1/CC2`, `BOTH RP: TRAFFIC ON CC1/CC2`,
   `BOTH RP: LEVEL ON CC1/CC2` or `BOTH RP: NO SINGLE LINE`: the meter's plug
@@ -816,6 +843,10 @@ device that only charges cannot be checked: it never powers the meter.
 Scroll to `PORT CHECK` for the outcomes, then `SINK PDOS (ACCEPTS)`,
 `PDO 1 FLAGS`, `DISCOVER IDENTITY` and `UFP VDO`:
 
+- `PORT CHECK`: `PARTNER:DRP` or `PARTNER:SOURCE ONLY` (from the dual-role
+  power flag), then the `SINK PDOS:` and `IDENTITY:` outcomes, or
+  `HOLD OK: SCAN AT 5V` before a scan. A PD 2.0 partner shows `SCAN:PD2 N/A`
+  instead: it cannot be scanned, so holding OK does nothing.
 - `PDO 1 FLAGS` lists the capability bits set in the first source PDO (shown
   before a scan too) and, after a scan, the first sink PDO: `DRP` dual-role
   power, `USB SUSPEND`, `UNCONSTRAINED` power, `USB DATA` communication
@@ -832,7 +863,11 @@ Scroll to `PORT CHECK` for the outcomes, then `SINK PDOS (ACCEPTS)`,
   signals, such as DisplayPort) and `NO RECONFIG` (modes that do not), with
   the VBUS and VCONN needs of those modes.
 
-The device's own offer to the meter is in the session's source-offer section.
+<img src="pictures/pd_input_identity_screen.webp" width="480" alt="Port check scrolled to the phone's identity">
+
+<img src="pictures/pd_input_ufp_screen.webp" width="480" alt="Port check scrolled to the phone's UFP VDO">
+
+The device's own offer to the meter is on the [Charger](#14-charger) page.
 Watts in parentheses are calculated from each PDO (the top voltage for
 variable and PPS ranges), not a measured charging rate. QC, AFC and SCP input
 support cannot be inferred from PD results. The XID is not proof of
@@ -899,9 +934,12 @@ scrolls (OK) through the parts; a long offer takes two screens.
 - **One row per offered object**, numbered by its position:
   - `FIX 9.00V 3.00A`: a fixed voltage.
   - `PPS 3.3-21.0V 5.00A`: a PPS range.
-  - `AVS …A/…A`, `EAVS 15.0-48.0V 140W`: adjustable voltage (AVS) ranges,
-    shown when the charger offers them. Selectable EPR AVS ranges are capped
-    at 30 V; the partner page can still show the full advertised range.
+  - `AVS 9-20V 3.00A/2.25A`: an SPR AVS range. Its object has no voltage
+    field, only a current for 9-15 V and one for 15-20 V, which is zero on a
+    15 V charger: `AVS 9-15V 3.00A`. One current means both ranges share it
+    (`AVS 9-20V 3.00A`).
+  - `EAVS 15.0-48.0V 140W`: an EPR AVS range. Selectable EPR AVS ranges are
+    capped at 30 V; the partner page can still show the full advertised range.
   - `RAW xxxxxxxx`: an object type the meter does not decode.
 - **`*`** after a row: offered at that current only with a 5 A cable. Then
   the note `* ONLY WITH 5A CABLE`.
@@ -999,15 +1037,17 @@ SUPPORT PD` in each.
 - `TEMP:` `NORMAL`, `WARNING`, `OVERTEMP` or `N/A`; `LIM:CPXET` power
   limited by Cable, other Ports, eXternal power, Events, Temperature.
 
-**`BATTERY`**, only when the charger reports a battery (a power bank): its
-first battery, as the charger describes it.
+**`BATTERY`**, only when the charger reports a battery (a power bank, or a
+phone powering the meter): its first battery, as the charger describes it.
+
+<img src="pictures/charger_battery_screen.webp" width="480" alt="Charger screen scrolled to a phone's battery">
 
 - `CAPS:` the outcome of asking for its capabilities, then `VID:---- PID:----`,
   `DESIGN:` the design capacity and `FULL:` the last full-charge capacity,
   in Wh (`UNKNOWN`, or `NONE` with no battery in place).
 - `STATUS:` the outcome of asking for its status, then `CHARGE:` the energy
   it holds now, in Wh, and `CHARGING`, `DISCHARGING`, `IDLE`, `PRESENT` or
-  `NOT PRESENT`.
+  `NOT PRESENT`, as the charger reports it.
 - `NO SUCH BATTERY`: the charger did not know the battery the meter asked
   about.
 
