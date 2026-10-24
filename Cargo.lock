@@ -998,7 +998,7 @@ checksum = "a513e167849a384b7f9b746e517604398518590a9142f4846a32e3c2a4de7b11"
 [[package]]
 name = "pd-protocol"
 version = "0.1.0"
-source = "git+https://github.com/kralonur/embedded-charging-protocols-rs?rev=e85905dc21a0c6063c7aca7cfa3ee46683dde74d#e85905dc21a0c6063c7aca7cfa3ee46683dde74d"
+source = "git+https://github.com/kralonur/embedded-charging-protocols-rs?rev=2c3d511cb7214f1db9f5e3528900e1fd9d1bc323#2c3d511cb7214f1db9f5e3528900e1fd9d1bc323"
 dependencies = [
  "usbpd",
  "usbpd-traits",
@@ -1049,7 +1049,7 @@ dependencies = [
 [[package]]
 name = "qc-protocol"
 version = "0.1.0"
-source = "git+https://github.com/kralonur/embedded-charging-protocols-rs?rev=e85905dc21a0c6063c7aca7cfa3ee46683dde74d#e85905dc21a0c6063c7aca7cfa3ee46683dde74d"
+source = "git+https://github.com/kralonur/embedded-charging-protocols-rs?rev=2c3d511cb7214f1db9f5e3528900e1fd9d1bc323#2c3d511cb7214f1db9f5e3528900e1fd9d1bc323"
 
 [[package]]
 name = "quick-error"
@@ -1135,7 +1135,7 @@ checksum = "e1cf6437eb19a8f4a6cc0f7dca544973b0b78843adbfeb3683d1a94a0024a294"
 [[package]]
 name = "scp-protocol"
 version = "0.1.0"
-source = "git+https://github.com/kralonur/embedded-charging-protocols-rs?rev=e85905dc21a0c6063c7aca7cfa3ee46683dde74d#e85905dc21a0c6063c7aca7cfa3ee46683dde74d"
+source = "git+https://github.com/kralonur/embedded-charging-protocols-rs?rev=2c3d511cb7214f1db9f5e3528900e1fd9d1bc323#2c3d511cb7214f1db9f5e3528900e1fd9d1bc323"
 dependencies = [
  "crc",
  "thiserror",
