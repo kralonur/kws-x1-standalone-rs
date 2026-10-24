@@ -13,7 +13,7 @@ default-members = ["firmware-core", "fusb302-pd"]
 [workspace.dependencies]
 anyhow = "1.0.104"
 clap = "4.6.7"
-cortex-m = "0.7.9"
+cortex-m = "0.7.10"
 cortex-m-rt = "0.7.7"
 embassy-executor = "0.10.0"
 embassy-hc32 = { git = "https://github.com/kralonur/hc32f460-embassy-rs", rev = "08a2603185d5acd05fda156e9cef468d47526be1" }
