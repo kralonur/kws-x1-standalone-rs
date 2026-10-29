@@ -40,11 +40,20 @@ pub const LOG_CLAIM: u32 = 0x4b57_4c47;
 pub const ENERGY_SECTORS: [usize; 2] = [0x78000, 0x7a000];
 /// An erased flash word.
 pub const BLANK: u32 = !0;
+/// The original firmware's serial number word, in the sector `memory.x`
+/// keeps out of every erase; its About page prints it (stock image
+/// disassembly).
+const SERIAL: usize = 0x6e000;
 
 /// Read one flash word.
 pub fn read(address: usize) -> u32 {
     // SAFETY: callers pass word-aligned addresses inside on-chip flash.
     unsafe { (address as *const u32).read_volatile() }
+}
+
+/// This meter's serial number word, or `None` if it was erased.
+pub fn serial() -> Option<u32> {
+    Some(read(SERIAL)).filter(|&word| word != BLANK)
 }
 
 /// Every word of the sector at `base` is erased.

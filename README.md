@@ -266,7 +266,7 @@ point the way it flows (they follow the screen rotation).
 | **Charger** | the offer (`*` = needs a 5 A cable), the charger's identity, maker and peak ratings, power status and source info, the battery of a power bank or a phone powering the meter, QC, SCP and FCP results | OK to scroll; hold OK: full scan (Quick Charge, SCP and FCP identification, PD, EPR, and the 5 A cable test with the plug in the charger) |
 | **Cable** | the cable's e-marker: a readable summary (type, speed, rating, length, alt modes, maker), identity, ratings, status and modes | OK to scroll; hold OK to read the e-marker (drops to fixed 5 V first) |
 | **System** | I2C bus state and counters, frame and button timing, stack use, `LAST RESET:` cause | OK to scroll |
-| **Settings** | `BRIGHTNESS` (5 levels, 60% at first), `ROTATION` (`AUTO` follows the tilt sensor, `NORMAL`, `FLIPPED`), `ENERGY MEMORY`, `CALIBRATION`, `VERSION` (shown only) | Left/Right row, OK change it, Left/Right value, OK or Back done |
+| **Settings** | `BRIGHTNESS` (5 levels, 60% at first), `ROTATION` (`AUTO` follows the tilt sensor, `NORMAL`, `FLIPPED`), `ENERGY MEMORY`, `CALIBRATION`, `SERIAL` and `VERSION` (shown only) | Left/Right row, OK change it, Left/Right value, OK or Back done |
 
 The selector pages only show the offer until a sink session has one. A
 profile is requested only after the final OK; Left/Right alone just preview.
@@ -1202,6 +1202,9 @@ energy persistence and calibration.
 - **`CALIBRATION`**: `FACTORY` or `CUSTOM`. OK starts the calibration steps
   below; holding OK sweeps the row and, once full, restores the factory
   values. Saved.
+- **`SERIAL`**: the meter's serial number, as the original firmware's About
+  page shows it, read from the flash data that every update leaves in place;
+  `-` if that data was erased. Shown only; the cursor skips it.
 - **`VERSION`**: the firmware version, shown only; the cursor skips it. A failed
   settings save replaces its label with a storage-full or write-failure warning.
 - **Hint row**: `< > choose  OK change  BACK exit`, then

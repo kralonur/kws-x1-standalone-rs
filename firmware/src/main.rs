@@ -1493,6 +1493,7 @@ async fn meter_task(
                         focus,
                         SETTINGS_SAVE.try_get().unwrap_or_default(),
                         input.reset_hold,
+                        flash::serial(),
                     );
                 }
                 View::Detail {

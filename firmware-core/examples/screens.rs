@@ -225,6 +225,8 @@ const VERSION_FONT: FontRenderer = FontRenderer::new::<fonts::u8g2_font_profont1
 const VERSION_COLOR: Rgb565 = Rgb565::new(21, 43, 22);
 const VERSION_RIGHT: i32 = 228;
 const VERSION_BASELINE: i32 = 117;
+/// An example serial number word, not a real meter's.
+const EXAMPLE_SERIAL: u32 = 12_345;
 const VERSION_AREA: Rectangle = Rectangle::new(Point::new(150, 105), Size::new(82, 14));
 
 /// One frame, as the panel shows it.
@@ -1080,6 +1082,7 @@ fn settings(canvas: &mut Canvas) -> Result<()> {
         SettingsFocus::EnergyMemory,
         settings_store::Status::Saved,
         0,
+        Some(EXAMPLE_SERIAL),
     );
     VERSION_AREA
         .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
