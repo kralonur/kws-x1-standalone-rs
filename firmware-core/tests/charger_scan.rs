@@ -4,7 +4,9 @@ use firmware_core::buttons::{
     BACK, DEFAULT_THRESHOLD, Detail, Input, Navigation, OK, Open, POLL_MS, Page, PdCommand, QcPage,
     QcTarget, Tab,
 };
-use firmware_core::settings::{FcpFindings, NextBoot, QcFindings, ScpFindings, Screen, Settings};
+use firmware_core::settings::{
+    AfcFindings, FcpFindings, NextBoot, QcFindings, ScpFindings, Screen, Settings,
+};
 use qc_protocol::detect::Report;
 use qc_protocol::qc2::Failure;
 
@@ -60,12 +62,21 @@ fn non_pd_success_returns_to_charger_without_a_restart_or_voltage_selection() {
         nav.finish_fcp(input.fcp_attempt, FcpFindings::Absent, None),
         None
     );
+    // AFC is the last stage.
+    let input = nav.update(0).0;
+    assert_eq!(input.page, Page::Open(Open::Afc));
+    assert_eq!(input.qc_request(), Some(QcTarget::Afc(input.afc_attempt)));
+    assert_eq!(
+        nav.finish_afc(input.afc_attempt, AfcFindings::Absent, None),
+        None
+    );
     let (input, command) = nav.update(0);
     assert_eq!(command, None);
     assert_eq!(input.page, CHARGER);
     assert_eq!(input.qc_request(), None);
     assert_eq!(input.qc.report(), Some(REPORT));
     assert_eq!(input.settings.fcp_findings, Some(FcpFindings::Absent));
+    assert_eq!(input.settings.afc_findings, Some(AfcFindings::Absent));
     // The next plug-in opens on the default page, not back on Charger.
     assert_eq!(input.settings.next_boot, NextBoot::Normal);
     assert_eq!(input.settings.resume, None);
@@ -87,6 +98,11 @@ fn non_pd_failure_also_returns_to_charger_and_releases_the_probe() {
             nav.finish_fcp(input.fcp_attempt, FcpFindings::Unverified, None),
             None
         );
+        let input = nav.update(0).0;
+        assert_eq!(
+            nav.finish_afc(input.afc_attempt, AfcFindings::Unverified, None),
+            None
+        );
         let (input, command) = nav.update(0);
         assert_eq!(command, None);
         assert_eq!(input.page, CHARGER);
@@ -104,6 +120,36 @@ fn back_cancels_the_local_probe_on_the_charger_page() {
     let (input, command) = nav.update(0);
     assert_eq!(command, None);
     assert_eq!(input.page, CHARGER);
+    assert_eq!(input.qc_request(), None);
+}
+
+// Canceling a rescan before AFC runs must not restore selectable adapter
+// evidence that the new scan already discarded.
+#[test]
+fn cancelled_rescan_discards_the_previous_afc_adapter() {
+    let mut nav = local_scan();
+    nav.finish_scan(QcFindings::Detected(REPORT));
+    let input = nav.update(0).0;
+    nav.finish_scp(input.scp_attempt, ScpFindings::Absent);
+    let input = nav.update(0).0;
+    nav.finish_fcp(input.fcp_attempt, FcpFindings::Absent, None);
+    let input = nav.update(0).0;
+    nav.finish_afc(
+        input.afc_attempt,
+        AfcFindings::Detected,
+        Some(single_wire_protocols::afc::Adapter),
+    );
+    assert!(nav.update(0).0.afc_adapter.is_some());
+
+    hold_ok(&mut nav);
+    nav.finish_scan(QcFindings::Detected(REPORT));
+    for _ in 0..DEFAULT_THRESHOLD {
+        nav.update(BACK);
+    }
+    let input = nav.update(0).0;
+    assert_eq!(input.page, CHARGER);
+    assert_eq!(input.settings.afc_findings, None);
+    assert_eq!(input.afc_adapter, None);
     assert_eq!(input.qc_request(), None);
 }
 
@@ -138,12 +184,19 @@ fn pd_full_scan_still_restarts_into_its_pd_stage() {
         max_mv: 12_000,
         max_power_mw: Some(18_000),
     };
+    assert_eq!(resumed.finish_fcp(input.fcp_attempt, found, None), None);
+    let input = resumed.update(0).0;
+    assert_eq!(input.page, Page::Open(Open::Afc));
+    // A source restart during the AFC stage resumes it.
+    assert_eq!(input.settings.resume, Some(Screen::Afc));
+    let afc = AfcFindings::Detected;
     assert_eq!(
-        resumed.finish_fcp(input.fcp_attempt, found, None),
+        resumed.finish_afc(input.afc_attempt, afc, None),
         Some(PdCommand::Restart)
     );
     let (input, _) = resumed.update(0);
     assert_eq!(input.settings.fcp_findings, Some(found));
+    assert_eq!(input.settings.afc_findings, Some(afc));
     assert_eq!(input.settings.next_boot, NextBoot::ScanPd);
     assert_eq!(input.settings.resume, Some(Screen::Charger));
     assert_eq!(

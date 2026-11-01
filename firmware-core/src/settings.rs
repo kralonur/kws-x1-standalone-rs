@@ -138,12 +138,13 @@ pub enum Screen {
     Ripple,
     Scp,
     Fcp,
+    Afc,
 }
 
 impl Screen {
     /// Record values, by position; new values go last, so older records
     /// still decode.
-    const ALL: [Self; 15] = [
+    const ALL: [Self; 16] = [
         Self::Overview,
         Self::Lines,
         Self::Fixed,
@@ -159,6 +160,7 @@ impl Screen {
         Self::Ripple,
         Self::Scp,
         Self::Fcp,
+        Self::Afc,
     ];
 
     /// 0 for none, else the position in [`Self::ALL`] plus one.
@@ -350,6 +352,48 @@ impl FcpFindings {
     }
 }
 
+/// What the AFC test found, in a record of its own as FCP's is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AfcFindings {
+    Unverified,
+    /// The charger showed it has no AFC.
+    Absent,
+    /// A complete 5 V AFC ping exchange, not a discovered voltage rating.
+    Detected,
+}
+
+/// AFC findings record: tag in the top byte and kind in bits 17..16 (0 for
+/// none). Earlier experimental records kept an undecoded reply in bits 7..0;
+/// it is ignored when reading them.
+const AFC_RECORD_TAG: u32 = 0xaf;
+const AFC_KIND_SHIFT: u32 = 16;
+
+impl AfcFindings {
+    /// The flash record keeping `findings`.
+    pub fn record(findings: Option<Self>) -> u32 {
+        let kind = match findings {
+            None => 0,
+            Some(Self::Unverified) => 1,
+            Some(Self::Absent) => 2,
+            Some(Self::Detected) => 3,
+        };
+        AFC_RECORD_TAG << 24 | kind << AFC_KIND_SHIFT
+    }
+
+    /// Unpack [`Self::record`]: `None` unless `word` is one.
+    pub fn read(word: u32) -> Option<Option<Self>> {
+        if word >> 24 != AFC_RECORD_TAG || word >> (AFC_KIND_SHIFT + 2) & 0x3f != 0 {
+            return None;
+        }
+        Some(match word >> AFC_KIND_SHIFT & 0b11 {
+            0 => None,
+            1 => Some(Self::Unverified),
+            2 => Some(Self::Absent),
+            _ => Some(Self::Detected),
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Settings {
     /// Index into [`BRIGHTNESS_PERCENT`].
@@ -365,6 +409,9 @@ pub struct Settings {
     /// FCP identification, carried as SCP's is; kept in its own record
     /// ([`FcpFindings::record`]), which [`Self::encode`] leaves out.
     pub fcp_findings: Option<FcpFindings>,
+    /// AFC identification, carried as FCP's is, in its own record
+    /// ([`AfcFindings::record`]).
+    pub afc_findings: Option<AfcFindings>,
     /// The screen the next boot opens on; it lasts as long as `next_boot`
     /// (see [`Self::finish_boot`]).
     pub resume: Option<Screen>,
@@ -383,6 +430,7 @@ impl Default for Settings {
             qc_findings: None,
             scp_findings: None,
             fcp_findings: None,
+            afc_findings: None,
             resume: None,
             calibration: Calibration::default(),
         }
@@ -506,6 +554,7 @@ impl Settings {
             qc_findings,
             scp_findings,
             fcp_findings: None,
+            afc_findings: None,
             resume,
             calibration: Calibration::default(),
         })
@@ -551,6 +600,7 @@ mod tests {
                     qc_findings: Some(QcFindings::Failed(Failure::NoEntry)),
                     scp_findings: None,
                     fcp_findings: None,
+                    afc_findings: None,
                     calibration: Calibration::default(),
                 };
                 assert_eq!(Settings::decode(settings.encode()), Some(settings));
@@ -592,6 +642,34 @@ mod tests {
             assert_eq!(FcpFindings::read(word), None);
         }
         assert_eq!(Settings::decode(FcpFindings::record(None)), None);
+    }
+
+    // As for FCP: AFC's record must read back exactly and be told apart
+    // from every other record sharing the flash area.
+    #[test]
+    fn afc_findings_record_round_trips_and_rejects_other_words() {
+        for findings in [
+            None,
+            Some(AfcFindings::Unverified),
+            Some(AfcFindings::Absent),
+            Some(AfcFindings::Detected),
+        ] {
+            assert_eq!(
+                AfcFindings::read(AfcFindings::record(findings)),
+                Some(findings)
+            );
+            assert_eq!(FcpFindings::read(AfcFindings::record(findings)), None);
+            assert_eq!(Settings::decode(AfcFindings::record(findings)), None);
+        }
+        // Legacy reply bytes must not be interpreted as voltage capabilities.
+        assert_eq!(
+            AfcFindings::read(0xaf03_0046),
+            Some(Some(AfcFindings::Detected))
+        );
+        let fcp = FcpFindings::record(Some(FcpFindings::Absent));
+        for word in [Settings::default().encode(), fcp, 0, u32::MAX, 0xaf04_0000] {
+            assert_eq!(AfcFindings::read(word), None);
+        }
     }
 
     #[test]

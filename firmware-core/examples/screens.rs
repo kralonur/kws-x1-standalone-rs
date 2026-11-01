@@ -70,9 +70,9 @@ mod line_adc {
         pub cc2_mv: u16,
     }
 }
-#[path = "../../firmware/src/scp_drive/status.rs"]
+#[path = "../../firmware/src/single_wire_drive/status.rs"]
 #[allow(dead_code)]
-mod scp_drive;
+mod single_wire_drive;
 mod qc_drive {
     use qc_protocol::detect::{Outcome, Report, Stage};
     use qc_protocol::qc2::{Failure, Voltage};
@@ -88,8 +88,9 @@ mod qc_drive {
         Stepping(u16),
         Detecting(Stage),
         Detected(Report),
-        Scp(u8, crate::scp_drive::Status),
-        Fcp(u8, crate::scp_drive::FcpStatus),
+        Scp(u8, crate::single_wire_drive::Status),
+        Fcp(u8, crate::single_wire_drive::Status),
+        Afc(u8, crate::single_wire_drive::Status),
     }
 }
 mod energy_store {
@@ -690,7 +691,9 @@ fn scp(canvas: &mut Canvas) -> Result<()> {
             probing: false,
             mode: QcMode::Plain,
             findings: Some(firmware_core::settings::ScpFindings::Confirmed),
-            status: Some(scp_drive::Status::Detected(scp_fixture_adapter())),
+            status: Some(single_wire_drive::Status::Detected(
+                single_wire_drive::Adapter::Scp(scp_fixture_adapter()),
+            )),
             selection: firmware_core::scp::Selection::new(scp_fixture_adapter()),
             focus: None,
             active: false,
@@ -720,9 +723,35 @@ fn fcp(canvas: &mut Canvas) -> Result<()> {
             preview: None,
             adapter: Some(adapter),
             request: Some(9_000),
-            status: Some(scp_drive::FcpStatus::Output {
-                output: single_wire_protocols::fcp::Output::new(adapter, 9_000)
-                    .context("FCP fixture output")?,
+            status: Some(single_wire_drive::Status::Output {
+                output: single_wire_drive::Output::Fcp(
+                    single_wire_protocols::fcp::Output::new(adapter, 9_000)
+                        .context("FCP fixture output")?,
+                ),
+                applied: true,
+            }),
+        },
+    );
+    Ok(())
+}
+
+/// AFC layout fixture, not a hardware capture or discovered voltage rating.
+const AFC_FIXTURE: single_wire_protocols::afc::Adapter = single_wire_protocols::afc::Adapter;
+
+/// AFC page: 9 V requested and applied.
+fn afc(canvas: &mut Canvas) -> Result<()> {
+    let mut strip = Vec::new();
+    ui::draw_afc(
+        canvas,
+        &tabs(Tab::Afc, Level::Tabs, false, &mut strip),
+        &ui::Afc {
+            mode: QcMode::Plain,
+            probing: false,
+            preview: None,
+            adapter: Some(AFC_FIXTURE),
+            request: Some(9_000),
+            status: Some(single_wire_drive::Status::Output {
+                output: single_wire_drive::Output::Afc(single_wire_protocols::afc::Voltage::V9),
                 applied: true,
             }),
         },
@@ -738,7 +767,9 @@ fn charger_scp(canvas: &mut Canvas) -> Result<()> {
         [
             ui::scp_charger_lines(
                 Some(firmware_core::settings::ScpFindings::Confirmed),
-                Some(scp_drive::Status::Detected(scp_fixture_adapter())),
+                Some(single_wire_drive::Status::Detected(
+                    single_wire_drive::Adapter::Scp(scp_fixture_adapter()),
+                )),
             ),
             ui::fcp_charger_lines(
                 Some(firmware_core::settings::FcpFindings::detected(
@@ -920,7 +951,7 @@ fn charger(canvas: &mut Canvas) -> Result<()> {
 }
 
 /// The Charger page's sections, as the firmware lists them, with nothing
-/// from the Quick Charge, SCP and FCP tests yet.
+/// from the Quick Charge, SCP, FCP and AFC tests yet.
 fn charger_sections(observation: Observation) -> Vec<[[u8; 24]; 8]> {
     let partner = pd::partner_sections(observation);
     let offer = partner.min(pd::CAPABILITY_SECTIONS);
@@ -932,6 +963,7 @@ fn charger_sections(observation: Observation) -> Vec<[[u8; 24]; 8]> {
         )
         .chain(core::iter::once(ui::scp_charger_lines(None, None)))
         .chain(core::iter::once(ui::fcp_charger_lines(None, None, None)))
+        .chain(core::iter::once(ui::afc_charger_lines(None, None)))
         .chain((offer..partner).map(|section| pd::partner_lines(observation, section)))
         .collect()
 }
@@ -1140,7 +1172,7 @@ fn main() -> Result<()> {
             .nth(1)
             .context("usage: screens <output directory>")?,
     );
-    let pages: [(&str, Draw); 26] = [
+    let pages: [(&str, Draw); 27] = [
         ("overview_screen", overview),
         ("lines_screen", lines),
         ("energy_screen", energy),
@@ -1154,6 +1186,7 @@ fn main() -> Result<()> {
         ("scp_screen", scp),
         ("charger_scp_screen", charger_scp),
         ("fcp_screen", fcp),
+        ("afc_screen", afc),
         ("pd_session_screen", pd_session),
         ("pd_input_screen", pd_input),
         ("pd_input_identity_screen", pd_input_identity),
@@ -1285,6 +1318,57 @@ mod tests {
         }
         // A real PD offer must still expose its identity/status sections.
         assert_eq!(pd::partner_sections(five_volt_session()), 5);
+    }
+
+    // A successful exchange is not an applied output: the overview must
+    // not display an AFC contract until the trigger verifies measured VBUS.
+    #[test]
+    fn afc_badge_requires_verified_output_and_charger_info_only_claims_detection() {
+        let observation = Observation::new();
+        let mut sources = Sources {
+            observation: &observation,
+            lines: None,
+            driven: None,
+            qc: QcStatus::Off,
+            findings: None,
+            scp: None,
+            vbus_mv: Some(5_000),
+        };
+        for voltage in single_wire_protocols::afc::Voltage::ALL {
+            for applied in [false, true] {
+                sources.qc = QcStatus::Afc(
+                    1,
+                    single_wire_drive::Status::Output {
+                        output: single_wire_drive::Output::Afc(voltage),
+                        applied,
+                    },
+                );
+                assert_eq!(
+                    identify(&sources)
+                        == ui::Protocol::Afc {
+                            mv: voltage.millivolts()
+                        },
+                    applied
+                );
+            }
+        }
+        for status in [
+            single_wire_drive::Status::Detected(single_wire_drive::Adapter::Afc(
+                single_wire_protocols::afc::Adapter,
+            )),
+            single_wire_drive::Status::Stopping,
+            single_wire_drive::Status::Failed(single_wire_drive::Failure::Vbus),
+        ] {
+            sources.qc = QcStatus::Afc(1, status);
+            assert!(!matches!(identify(&sources), ui::Protocol::Afc { .. }));
+        }
+        let rows =
+            ui::afc_charger_lines(Some(firmware_core::settings::AfcFindings::Detected), None);
+        let text = String::from_utf8(rows.into_iter().flatten().collect()).unwrap();
+        assert!(text.contains("AFC DETECTED"));
+        assert!(text.contains("5V EXCHANGE CHECKED"));
+        assert!(text.contains("REQUESTS: 5.0V / 9.0V"));
+        assert!(!text.contains("VOUT:"));
     }
 
     #[test]

@@ -3,7 +3,9 @@
 use firmware_core::buttons::{
     BACK, DEFAULT_THRESHOLD, Input, Navigation, OK, Open, Page, QcTarget, Tab,
 };
-use firmware_core::settings::{FcpFindings, NextBoot, QcFindings, ScpFindings, Screen, Settings};
+use firmware_core::settings::{
+    AfcFindings, FcpFindings, NextBoot, QcFindings, ScpFindings, Screen, Settings,
+};
 use qc_protocol::qc2::Failure;
 
 fn hold_ok(nav: &mut Navigation) -> Input {
@@ -194,10 +196,13 @@ fn full_scan_scp_completion_cannot_enable_output() {
     let input = nav.update(0).0;
     nav.set_scp_adapter(input.scp_attempt, output_adapter());
     nav.finish_scp(input.scp_attempt, ScpFindings::Confirmed);
-    // Only the read-only FCP stage follows, and then nothing.
+    // Only the read-only FCP and AFC stages follow, and then nothing.
     let input = nav.update(0).0;
     assert_eq!(input.qc_request(), Some(QcTarget::Fcp(input.fcp_attempt)));
     nav.finish_fcp(input.fcp_attempt, FcpFindings::Absent, None);
+    let input = nav.update(0).0;
+    assert_eq!(input.qc_request(), Some(QcTarget::Afc(input.afc_attempt)));
+    nav.finish_afc(input.afc_attempt, AfcFindings::Absent, None);
     assert_eq!(nav.update(0).0.qc_request(), None);
 }
 
@@ -205,7 +210,8 @@ fn full_scan_scp_completion_cannot_enable_output() {
 // selector through the power corner and ensure no preview bypasses limits.
 #[test]
 fn scp_selection_honors_steps_power_and_platform_envelope() {
-    use firmware_core::scp::{MAX_MA, MAX_MV, Selection, followed, request};
+    use firmware_core::scp::{Selection, request};
+    use firmware_core::single_wire::{MAX_MA, MAX_MV, followed};
     let adapter = output_adapter();
     let mut selection = Selection::new(adapter).unwrap();
     for _ in 0..100 {

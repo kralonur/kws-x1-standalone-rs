@@ -1,14 +1,14 @@
 //! The charging protocol the overview names, from every source the meter
-//! has. The first that applies wins: this meter's own Quick Charge, SCP or
-//! FCP output (a PD contract would have stopped it), PD, Quick Charge or
-//! FCP/SCP data another device drives, register-verified SCP at the default
-//! output, a Type-C current above default, a D+/D− signature, the BC1.2
-//! short the Quick Charge test found, then the Type-C default.
+//! has. The first that applies wins: this meter's own Quick Charge, SCP,
+//! FCP or AFC output (a PD contract would have stopped it), PD, Quick
+//! Charge or FCP/SCP data another device drives, register-verified SCP at
+//! the default output, a Type-C current above default, a D+/D− signature,
+//! the BC1.2 short the Quick Charge test found, then the Type-C default.
 
 use crate::line_adc::LineVoltages;
 use crate::pd::{self, Observation};
 use crate::qc_drive::Status;
-use crate::scp_drive::DEFAULT_VBUS_MV;
+use crate::single_wire_drive::DEFAULT_VBUS_MV;
 use crate::ui::Protocol;
 use firmware_core::dcp::{self, Driven};
 use firmware_core::settings::{QcFindings, ScpFindings};
@@ -82,25 +82,25 @@ pub fn identify(sources: &Sources<'_>) -> Protocol {
 /// is not.
 fn own_quick_charge(qc: Status) -> Option<Protocol> {
     match qc {
-        Status::Scp(
-            _,
-            crate::scp_drive::Status::Output {
-                output,
-                applied: true,
-            },
-        ) => Some(Protocol::Scp {
-            mv: output.millivolts(),
-            ma: output.milliamps(),
-        }),
-        Status::Fcp(
-            _,
-            crate::scp_drive::FcpStatus::Output {
-                output,
-                applied: true,
-            },
-        ) => Some(Protocol::Fcp {
-            mv: Some(output.millivolts()),
-        }),
+        Status::Scp(_, crate::single_wire_drive::Status::Output { output, applied })
+        | Status::Fcp(_, crate::single_wire_drive::Status::Output { output, applied })
+        | Status::Afc(_, crate::single_wire_drive::Status::Output { output, applied })
+            if applied =>
+        {
+            use crate::single_wire_drive::Output;
+            Some(match output {
+                Output::Scp(output) => Protocol::Scp {
+                    mv: output.millivolts(),
+                    ma: output.milliamps(),
+                },
+                Output::Fcp(output) => Protocol::Fcp {
+                    mv: Some(output.millivolts()),
+                },
+                Output::Afc(voltage) => Protocol::Afc {
+                    mv: voltage.millivolts(),
+                },
+            })
+        }
         Status::Active(_, Some(Outcome::Ignored)) => None,
         Status::Active(voltage, _) => Some(Protocol::Qc2 {
             mv: voltage.millivolts(),

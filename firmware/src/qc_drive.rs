@@ -15,7 +15,7 @@ use qc_protocol::detect::{Action, Follow, Outcome, Probe, Report, Stage};
 use qc_protocol::qc2::{Failure, Handshake, Level, Progress, REQUEST_SETTLE_MS, Session, Voltage};
 use qc_protocol::qc3::{Continuous, PULSE_US};
 
-use crate::scp_drive::{self, FcpStatus};
+use crate::single_wire_drive::{self, Protocol};
 
 /// What the Quick Charge trigger is doing, for the page.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -35,8 +35,20 @@ pub enum Status {
     Detecting(Stage),
     /// The probe's findings; 5 V is requested again.
     Detected(Report),
-    Scp(u8, scp_drive::Status),
-    Fcp(u8, FcpStatus),
+    Scp(u8, single_wire_drive::Status),
+    Fcp(u8, single_wire_drive::Status),
+    Afc(u8, single_wire_drive::Status),
+}
+
+impl Status {
+    /// `protocol`'s status for this attempt.
+    fn wire(protocol: Protocol, attempt: u8, status: single_wire_drive::Status) -> Self {
+        match protocol {
+            Protocol::Scp => Self::Scp(attempt, status),
+            Protocol::Fcp => Self::Fcp(attempt, status),
+            Protocol::Afc => Self::Afc(attempt, status),
+        }
+    }
 }
 
 /// Port B pins driving D+ and D−, each line through a pair, first then
@@ -56,6 +68,15 @@ fn encode(level: Level) -> [GpioLevel; 2] {
 /// through the undocumented network is unknown, so the SCP probe measures
 /// it against `VDP_SRC_SCP` (2.6–3.0 V) before transmitting anything.
 const SCP_DP: [GpioLevel; 2] = [GpioLevel::Low, GpioLevel::High];
+
+/// D+ while D− carries single-wire data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WireDp {
+    /// SCP's detection source ([`SCP_DP`]), which FCP shares.
+    Scp,
+    /// BC1.2's 0.6 V, which AFC keeps after entry.
+    Mid,
+}
 
 /// Owns PB3, PB4, PB8 and PB9.
 pub(crate) struct DataDrive {
@@ -81,12 +102,16 @@ impl DataDrive {
         self.pins.drive([dp1, dp2, dm1, dm2]);
     }
 
-    /// Hold D+ at the SCP detection level and drive D− as the digital data
-    /// line: low or high, or released (`None`) for the charger's replies.
-    pub(crate) fn scp(&mut self, high: Option<bool>) {
+    /// Hold D+ at `dp` and drive D− as the digital data line: low or high,
+    /// or released (`None`) for the charger's replies.
+    pub(crate) fn wire(&mut self, dp: WireDp, high: Option<bool>) {
         let dm = high.map(|high| if high { Level::High } else { Level::Low });
         let [dm1, dm2] = dm.map_or([None; 2], |level| encode(level).map(Some));
-        let [dp1, dp2] = SCP_DP.map(Some);
+        let [dp1, dp2] = match dp {
+            WireDp::Scp => SCP_DP,
+            WireDp::Mid => encode(Level::Mid),
+        }
+        .map(Some);
         self.pins.drive([dp1, dp2, dm1, dm2]);
     }
 
@@ -118,8 +143,8 @@ impl DataDrive {
 enum State {
     Off,
     Releasing(u64),
-    Scp(u8, scp_drive::Trigger<scp_drive::Scp>),
-    Fcp(u8, scp_drive::Trigger<scp_drive::Fcp>),
+    /// SCP, FCP or AFC, for this attempt.
+    Wire(u8, single_wire_drive::Trigger),
     Entering(Handshake),
     Failed(Failure),
     Active {
@@ -170,17 +195,16 @@ impl Trigger {
         }
     }
 
-    /// SCP or FCP shutdown keeps measuring VBUS even after its request is
-    /// cleared.
+    /// SCP, FCP or AFC shutdown keeps measuring VBUS even after its request
+    /// is cleared.
     pub fn single_wire_active(&self) -> bool {
-        matches!(self.state, State::Scp(..) | State::Fcp(..))
+        matches!(self.state, State::Wire(..))
     }
 
-    /// SCP or FCP has work a faster step rate finishes sooner.
+    /// SCP, FCP or AFC has work a faster step rate finishes sooner.
     pub fn single_wire_busy(&self) -> bool {
         match &self.state {
-            State::Scp(_, trigger) => trigger.busy(),
-            State::Fcp(_, trigger) => trigger.busy(),
+            State::Wire(_, trigger) => trigger.busy(),
             _ => false,
         }
     }
@@ -195,65 +219,48 @@ impl Trigger {
         vbus_mv: Option<u16>,
         adc: &mut crate::line_adc::LineAdc,
     ) -> Status {
-        let (scp_target, fcp_target) = match target {
-            Some(QcTarget::Scp(attempt)) => (Some((attempt, None)), None),
+        let wire = match target {
+            Some(QcTarget::Scp(attempt)) => Some((Protocol::Scp, attempt, None)),
             Some(QcTarget::ScpOutput { attempt, mv, ma }) => {
-                (Some((attempt, Some((mv, ma)))), None)
+                Some((Protocol::Scp, attempt, Some((mv, ma))))
             }
-            Some(QcTarget::Fcp(attempt)) => (None, Some((attempt, None))),
-            Some(QcTarget::FcpOutput { attempt, mv }) => (None, Some((attempt, Some(mv)))),
-            _ => (None, None),
-        };
-        // A stopping run finishes before the same attempt can start again.
-        let stopped = match &mut self.state {
-            State::Scp(attempt, scp)
-                if scp.stopping() || scp_target.is_none_or(|(current, _)| current != *attempt) =>
-            {
-                Some(Status::Scp(
-                    *attempt,
-                    scp.stop(now_ms, &mut self.drive, adc, vbus_mv),
-                ))
+            Some(QcTarget::Fcp(attempt)) => Some((Protocol::Fcp, attempt, None)),
+            Some(QcTarget::FcpOutput { attempt, mv }) => {
+                Some((Protocol::Fcp, attempt, Some((mv, 0))))
             }
-            State::Fcp(attempt, fcp)
-                if fcp.stopping() || fcp_target.is_none_or(|(current, _)| current != *attempt) =>
-            {
-                Some(Status::Fcp(
-                    *attempt,
-                    fcp.stop(now_ms, &mut self.drive, adc, vbus_mv),
-                ))
+            Some(QcTarget::Afc(attempt)) => Some((Protocol::Afc, attempt, None)),
+            Some(QcTarget::AfcOutput { attempt, mv }) => {
+                Some((Protocol::Afc, attempt, Some((mv, 0))))
             }
             _ => None,
         };
-        if let Some(status) = stopped {
-            if !matches!(
-                status,
-                Status::Scp(_, scp_drive::Status::Stopped) | Status::Fcp(_, FcpStatus::Stopped)
-            ) {
-                return status;
+        // A stopping run finishes before the same attempt can start again.
+        if let State::Wire(attempt, trigger) = &mut self.state
+            && (trigger.stopping()
+                || wire.is_none_or(|(protocol, current, _)| {
+                    protocol != trigger.protocol() || current != *attempt
+                }))
+        {
+            let status = trigger.stop(now_ms, &mut self.drive, adc, vbus_mv);
+            if status != single_wire_drive::Status::Stopped {
+                return Status::wire(trigger.protocol(), *attempt, status);
             }
             self.state = State::Releasing(now_ms);
         }
-        if let Some((attempt, request)) = scp_target {
-            if !matches!(self.state, State::Scp(current, _) if current == attempt) {
-                self.state =
-                    State::Scp(attempt, scp_drive::Trigger::start(now_ms, &mut self.drive));
-            }
-            if let State::Scp(_, scp) = &mut self.state {
-                return Status::Scp(
+        if let Some((protocol, attempt, request)) = wire {
+            if !matches!(&self.state, State::Wire(current, trigger)
+                if *current == attempt && trigger.protocol() == protocol)
+            {
+                self.state = State::Wire(
                     attempt,
-                    scp.update(&mut self.drive, adc, now_ms, lines, vbus_mv, request),
+                    single_wire_drive::Trigger::start(protocol, now_ms, &mut self.drive),
                 );
             }
-        }
-        if let Some((attempt, request)) = fcp_target {
-            if !matches!(self.state, State::Fcp(current, _) if current == attempt) {
-                self.state =
-                    State::Fcp(attempt, scp_drive::Trigger::start(now_ms, &mut self.drive));
-            }
-            if let State::Fcp(_, fcp) = &mut self.state {
-                return Status::Fcp(
+            if let State::Wire(_, trigger) = &mut self.state {
+                return Status::wire(
+                    protocol,
                     attempt,
-                    fcp.update(&mut self.drive, adc, now_ms, lines, vbus_mv, request),
+                    trigger.update(&mut self.drive, adc, now_ms, lines, vbus_mv, request),
                 );
             }
         }
@@ -268,11 +275,20 @@ impl Trigger {
                 State::Off
             }
             (State::Releasing(since), Some(_))
-                if now_ms.saturating_sub(since) < scp_drive::RELEASE_MS =>
+                if now_ms.saturating_sub(since) < single_wire_drive::RELEASE_MS =>
             {
                 State::Releasing(since)
             }
-            (State::Off | State::Releasing(_) | State::Scp(..) | State::Fcp(..), Some(_)) => {
+            // A bounded single-wire stop releases ownership even if reset
+            // failed. That timeout is not evidence of 5 V: never start QC
+            // on a still-raised or unmeasured output.
+            (State::Off | State::Releasing(_) | State::Wire(..), Some(_))
+                if !vbus_mv.is_some_and(|mv| single_wire_drive::DEFAULT_VBUS_MV.contains(&mv)) =>
+            {
+                self.drive.set(None, None);
+                State::Releasing(now_ms)
+            }
+            (State::Off | State::Releasing(_) | State::Wire(..), Some(_)) => {
                 self.drive.set(Some(Level::Mid), None);
                 State::Entering(Handshake::start(now_ms))
             }
@@ -379,8 +395,11 @@ impl Trigger {
         match &self.state {
             State::Off => Status::Off,
             State::Entering(_) | State::Releasing(_) => Status::Entering,
-            State::Scp(attempt, _) => Status::Scp(*attempt, scp_drive::Status::Entering),
-            State::Fcp(attempt, _) => Status::Fcp(*attempt, FcpStatus::Entering),
+            State::Wire(attempt, trigger) => Status::wire(
+                trigger.protocol(),
+                *attempt,
+                single_wire_drive::Status::Entering,
+            ),
             State::Failed(failure) => Status::Failed(*failure),
             State::Active {
                 voltage, outcome, ..
@@ -415,12 +434,15 @@ impl Trigger {
             }
             (QcTarget::Detect, None) => Voltage::V5,
             (QcTarget::Volts(voltage), _) => voltage,
-            // SCP and FCP are dispatched before the QC state machine is entered.
+            // SCP, FCP and AFC are dispatched before the QC state machine is
+            // entered.
             (
                 QcTarget::Scp(_)
                 | QcTarget::ScpOutput { .. }
                 | QcTarget::Fcp(_)
-                | QcTarget::FcpOutput { .. },
+                | QcTarget::FcpOutput { .. }
+                | QcTarget::Afc(_)
+                | QcTarget::AfcOutput { .. },
                 _,
             ) => return State::Off,
         };

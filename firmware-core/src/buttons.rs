@@ -8,7 +8,9 @@
 use crate::calibration::{Calibration, Mean, Wizard};
 use crate::power_history::{GraphTrace, GraphWindow};
 use crate::ripple::{Scale as RippleScale, Timebase as RippleTimebase};
-use crate::settings::{FcpFindings, Item, NextBoot, QcFindings, ScpFindings, Screen, Settings};
+use crate::settings::{
+    AfcFindings, FcpFindings, Item, NextBoot, QcFindings, ScpFindings, Screen, Settings,
+};
 use qc_protocol::detect::Report;
 use qc_protocol::qc2::Voltage;
 use qc_protocol::qc3::{MIN_MV, STEP_MV};
@@ -123,11 +125,12 @@ impl Default for Page {
 
 impl Page {
     /// Where a boot opens for its saved `screen`: that tab, or, for a Quick
-    /// Charge tab in a PD-silent boot, its probe, which runs at once.
+    /// Charge or AFC tab in a PD-silent boot, its probe, which runs at once.
     pub fn resume(screen: Screen, silent: bool) -> Self {
         match Tab::from(screen) {
             Tab::Qc2 if silent => Self::Open(Open::Probe(QcPage::Qc2)),
             Tab::Qc3 if silent => Self::Open(Open::Probe(QcPage::Qc3)),
+            Tab::Afc if silent => Self::Open(Open::Afc),
             tab => Self::Tabs(tab),
         }
     }
@@ -155,7 +158,7 @@ pub enum Group {
 }
 
 /// The most tabs a group has.
-pub const MAX_TABS: usize = 7;
+pub const MAX_TABS: usize = 8;
 
 impl Group {
     pub const ALL: [Self; 3] = [Self::Monitor, Self::Trigger, Self::Info];
@@ -177,6 +180,7 @@ impl Group {
             Tab::Qc3,
             Tab::Scp,
             Tab::Fcp,
+            Tab::Afc,
         ];
         const INFO: [Tab; 4] = [
             Tab::detail(Detail::Pd),
@@ -237,6 +241,8 @@ pub enum Tab {
     Scp,
     /// FCP adapter identification and its fixed output voltages.
     Fcp,
+    /// Samsung AFC identification and its 5 V / 9 V requests.
+    Afc,
     /// A detail list shown from row `top`.
     Detail { page: Detail, top: u16 },
 }
@@ -258,6 +264,7 @@ impl From<Tab> for Screen {
             Tab::Qc3 => Self::Qc3,
             Tab::Scp => Self::Scp,
             Tab::Fcp => Self::Fcp,
+            Tab::Afc => Self::Afc,
             Tab::Detail { page, .. } => match page {
                 Detail::Pd => Self::PdDetails,
                 Detail::Charger => Self::Charger,
@@ -282,6 +289,7 @@ impl From<Screen> for Tab {
             Screen::Qc3 => Self::Qc3,
             Screen::Scp => Self::Scp,
             Screen::Fcp => Self::Fcp,
+            Screen::Afc => Self::Afc,
             Screen::PdDetails => Self::detail(Detail::Pd),
             Screen::Charger => Self::detail(Detail::Charger),
             Screen::Cable => Self::detail(Detail::Cable),
@@ -301,9 +309,14 @@ impl Tab {
             Self::Overview | Self::Graph | Self::Lines | Self::Energy | Self::Ripple => {
                 Group::Monitor
             }
-            Self::Fixed | Self::Pps | Self::Avs | Self::Qc2 | Self::Qc3 | Self::Scp | Self::Fcp => {
-                Group::Trigger
-            }
+            Self::Fixed
+            | Self::Pps
+            | Self::Avs
+            | Self::Qc2
+            | Self::Qc3
+            | Self::Scp
+            | Self::Fcp
+            | Self::Afc => Group::Trigger,
             Self::Detail { .. } => Group::Info,
         }
     }
@@ -370,6 +383,10 @@ pub enum Open {
     /// Left/Right preview the adapter's FCP voltages by index, then off;
     /// OK requests one.
     FcpSet(usize),
+    /// The AFC probe, as FCP's.
+    Afc,
+    /// Left/Right preview AFC's voltages by index, then off, as for FCP.
+    AfcSet(usize),
     /// Left/Right scroll the list, shown from row `top`.
     Detail { page: Detail, top: u16 },
     /// Left/Right change what the graph plots, or its window.
@@ -390,6 +407,7 @@ impl Open {
             Self::Qc3 => Tab::Qc3,
             Self::Scp | Self::ScpSet(_) => Tab::Scp,
             Self::Fcp | Self::FcpSet(_) => Tab::Fcp,
+            Self::Afc | Self::AfcSet(_) => Tab::Afc,
             Self::Detail { page, top } => Tab::Detail { page, top },
             Self::Graph(_) => Tab::Graph,
             Self::Ripple(_) => Tab::Ripple,
@@ -433,6 +451,11 @@ pub enum View {
         probing: bool,
         preview: Option<usize>,
     },
+    /// As for FCP.
+    Afc {
+        probing: bool,
+        preview: Option<usize>,
+    },
     /// The Quick Charge probe runs, on either Quick Charge tab.
     Probe,
     /// Whether Left/Right move the target.
@@ -452,7 +475,12 @@ impl View {
     pub const fn quick_charge(self) -> bool {
         matches!(
             self,
-            Self::Qc2(_) | Self::Qc3 { .. } | Self::Probe | Self::Scp { .. } | Self::Fcp { .. }
+            Self::Qc2(_)
+                | Self::Qc3 { .. }
+                | Self::Probe
+                | Self::Scp { .. }
+                | Self::Fcp { .. }
+                | Self::Afc { .. }
         )
     }
 
@@ -619,6 +647,13 @@ pub enum QcTarget {
         attempt: u8,
         mv: u16,
     },
+    /// Read-only AFC identification, as for SCP.
+    Afc(u8),
+    /// An AFC voltage in mV; explicit, as for SCP.
+    AfcOutput {
+        attempt: u8,
+        mv: u16,
+    },
     /// Quick Charge 3.0 continuous mode, stepping toward this output in mV.
     Steps(u16),
     /// Try each request in turn and report which the charger followed.
@@ -773,6 +808,10 @@ impl Page {
                     probing: false,
                     preview: None,
                 },
+                Tab::Afc => View::Afc {
+                    probing: false,
+                    preview: None,
+                },
                 Tab::Detail { page, top } => View::Detail {
                     page,
                     top,
@@ -793,6 +832,14 @@ impl Page {
                     preview: None,
                 },
                 Open::FcpSet(row) => View::Fcp {
+                    probing: false,
+                    preview: Some(row),
+                },
+                Open::Afc => View::Afc {
+                    probing: true,
+                    preview: None,
+                },
+                Open::AfcSet(row) => View::Afc {
                     probing: false,
                     preview: Some(row),
                 },
@@ -835,6 +882,7 @@ impl Page {
                     | Open::Qc2(_)
                     | Open::Qc3
                     | Open::FcpSet(_)
+                    | Open::AfcSet(_)
                     | Open::Detail { .. }
                     | Open::Graph(_)
                     | Open::Ripple(_)
@@ -907,6 +955,9 @@ pub struct Input {
     /// FCP findings.
     pub fcp_attempt: u8,
     pub fcp_adapter: Option<single_wire_protocols::fcp::Adapter>,
+    /// The same for AFC.
+    pub afc_attempt: u8,
+    pub afc_adapter: Option<single_wire_protocols::afc::Adapter>,
     /// What the graph plots and how far back it reaches; this boot only.
     pub graph_trace: GraphTrace,
     pub graph_window: GraphWindow,
@@ -928,6 +979,7 @@ impl Input {
             Page::Open(Open::Probe(_)) => Some(QcTarget::Detect),
             Page::Open(Open::Scp) => Some(QcTarget::Scp(self.scp_attempt)),
             Page::Open(Open::Fcp) => Some(QcTarget::Fcp(self.fcp_attempt)),
+            Page::Open(Open::Afc) => Some(QcTarget::Afc(self.afc_attempt)),
             _ => self.trigger,
         }
     }
@@ -937,10 +989,21 @@ impl Input {
             && self.settings.resume == Some(Screen::Scp)
     }
 
-    /// The scan's last no-PD stage, after SCP.
+    /// The scan's FCP stage, after SCP.
     pub fn fcp_scanning(self) -> bool {
         matches!(self.settings.next_boot, NextBoot::ScanQuickCharge { .. })
             && self.settings.resume == Some(Screen::Fcp)
+    }
+
+    /// The scan's last no-PD stage, after FCP.
+    pub fn afc_scanning(self) -> bool {
+        matches!(self.settings.next_boot, NextBoot::ScanQuickCharge { .. })
+            && self.settings.resume == Some(Screen::Afc)
+    }
+
+    /// One of the single-wire stages (SCP, FCP, AFC) of the scan runs.
+    pub fn wire_scanning(self) -> bool {
+        self.scp_scanning() || self.fcp_scanning() || self.afc_scanning()
     }
 
     /// The reset request counter a completed OK hold on the shown tab
@@ -1006,8 +1069,14 @@ impl Navigation {
         self.selectable = selectable;
         self.input.pd_active = selectable;
         if selectable
-            && let Page::Open(open @ (Open::Scp | Open::ScpSet(_) | Open::Fcp | Open::FcpSet(_))) =
-                self.input.page
+            && let Page::Open(
+                open @ (Open::Scp
+                | Open::ScpSet(_)
+                | Open::Fcp
+                | Open::FcpSet(_)
+                | Open::Afc
+                | Open::AfcSet(_)),
+            ) = self.input.page
         {
             self.input.page = Page::Tabs(open.tab());
         }
@@ -1095,7 +1164,7 @@ impl Navigation {
     /// full scan's findings and restart into its PD part.
     pub fn finish_scan(&mut self, findings: QcFindings) -> Option<PdCommand> {
         let local = self.input.page == Page::Open(Open::Probe(QcPage::Charger));
-        if self.input.scp_scanning() || self.input.fcp_scanning() || (!local && !self.scanning()) {
+        if self.input.wire_scanning() || (!local && !self.scanning()) {
             return None;
         }
         if local {
@@ -1106,7 +1175,10 @@ impl Navigation {
         self.input.settings.qc_findings = Some(findings);
         self.input.settings.scp_findings = None;
         self.input.settings.fcp_findings = None;
+        self.input.settings.afc_findings = None;
         self.input.scp_selection = None;
+        self.input.fcp_adapter = None;
+        self.input.afc_adapter = None;
         self.input.settings.resume = Some(Screen::Scp);
         self.input.scp_attempt = self.input.scp_attempt.wrapping_add(1);
         self.input.trigger = None;
@@ -1131,7 +1203,7 @@ impl Navigation {
     }
 
     /// Keep the current FCP probe's result, as for SCP, and the adapter it
-    /// found. In the scan this is the last no-PD stage, which then ends.
+    /// found. In the scan AFC follows in this boot.
     pub fn finish_fcp(
         &mut self,
         attempt: u8,
@@ -1148,7 +1220,41 @@ impl Navigation {
             self.input.page = Page::Tabs(Tab::Fcp);
             return None;
         }
+        self.input.settings.afc_findings = None;
+        self.input.afc_adapter = None;
+        self.input.settings.resume = Some(Screen::Afc);
+        self.input.afc_attempt = self.input.afc_attempt.wrapping_add(1);
+        self.input.page = Page::Open(Open::Afc);
+        None
+    }
+
+    /// Keep the current AFC probe's result, as for FCP. In the scan this is
+    /// the last no-PD stage, which then ends.
+    pub fn finish_afc(
+        &mut self,
+        attempt: u8,
+        findings: AfcFindings,
+        adapter: Option<single_wire_protocols::afc::Adapter>,
+    ) -> Option<PdCommand> {
+        if attempt != self.input.afc_attempt || self.input.page != Page::Open(Open::Afc) {
+            return None;
+        }
+        self.input.settings.afc_findings = Some(findings);
+        self.input.afc_adapter = adapter;
+        self.input.trigger = None;
+        if !self.input.afc_scanning() {
+            self.input.page = Page::Tabs(Tab::Afc);
+            return None;
+        }
         self.end_scan_without_pd()
+    }
+
+    /// A failed AFC output ends its request, as for SCP.
+    pub fn fail_afc_output(&mut self, attempt: u8) {
+        if matches!(self.input.trigger, Some(QcTarget::AfcOutput { attempt: current, .. }) if current == attempt)
+        {
+            self.input.trigger = None;
+        }
     }
 
     /// A failed FCP output ends its request, as for SCP.
@@ -1304,6 +1410,8 @@ impl Navigation {
             self.input.page = Page::Open(Open::Scp);
         } else if self.input.fcp_scanning() {
             self.input.page = Page::Open(Open::Fcp);
+        } else if self.input.afc_scanning() {
+            self.input.page = Page::Open(Open::Afc);
         } else if self.scanning() {
             self.input.page = Page::Open(Open::Probe(QcPage::Qc2));
         }
@@ -1383,6 +1491,20 @@ impl Navigation {
             self.input.page = Page::Open(Open::Fcp);
             return Some(None);
         }
+        // And for AFC.
+        if self.input.page == Page::Tabs(Tab::Afc)
+            && matches!(self.input.trigger, Some(QcTarget::AfcOutput { .. }))
+        {
+            self.input.trigger = None;
+            return Some(None);
+        }
+        if self.input.page == Page::Tabs(Tab::Afc) && !self.selectable && !self.input.passthrough {
+            self.input.trigger = None;
+            self.input.afc_adapter = None;
+            self.input.afc_attempt = self.input.afc_attempt.wrapping_add(1);
+            self.input.page = Page::Open(Open::Afc);
+            return Some(None);
+        }
         let Some(Tab::Detail { page, .. }) = self.input.page.tab() else {
             return None;
         };
@@ -1437,6 +1559,10 @@ impl Navigation {
             Page::Open(Open::Fcp) => {
                 self.input.trigger = None;
                 Page::Tabs(Tab::Fcp)
+            }
+            Page::Open(Open::Afc) => {
+                self.input.trigger = None;
+                Page::Tabs(Tab::Afc)
             }
             Page::Open(Open::Probe(QcPage::Charger)) => {
                 self.input.trigger = None;
@@ -1517,8 +1643,16 @@ impl Navigation {
                     (*row + rows - 1) % rows
                 };
             }
+            Page::Open(Open::AfcSet(row)) => {
+                let rows = single_wire_protocols::afc::Voltage::ALL.len() + 1;
+                *row = if forward {
+                    (*row + 1) % rows
+                } else {
+                    (*row + rows - 1) % rows
+                };
+            }
             // Probes run until a result or Back.
-            Page::Open(Open::Probe(_) | Open::Scp | Open::Fcp) => {}
+            Page::Open(Open::Probe(_) | Open::Scp | Open::Fcp | Open::Afc) => {}
             // A held capture cannot be re-timed: a new timebase runs live.
             Page::Open(Open::Ripple(RippleFocus::Time)) => {
                 let all = RippleTimebase::ALL;
@@ -1623,9 +1757,27 @@ impl Navigation {
                     (Page::Open(Open::Fcp), None)
                 }
             },
+            // AFC opens its choice as FCP does.
+            Page::Tabs(Tab::Afc) if !self.selectable => match input.afc_adapter {
+                Some(_) => {
+                    let row = match input.trigger {
+                        Some(QcTarget::AfcOutput { mv, .. }) => {
+                            single_wire_protocols::afc::Voltage::ALL
+                                .iter()
+                                .position(|voltage| voltage.millivolts() == mv)
+                        }
+                        _ => None,
+                    };
+                    (Page::Open(Open::AfcSet(row.unwrap_or(0))), None)
+                }
+                None => {
+                    input.afc_attempt = input.afc_attempt.wrapping_add(1);
+                    (Page::Open(Open::Afc), None)
+                }
+            },
             // A PD contract hides Quick Charge: restart into a silent boot,
             // back on this tab.
-            page @ Page::Tabs(tab @ (Tab::Qc2 | Tab::Qc3 | Tab::Scp | Tab::Fcp)) => {
+            page @ Page::Tabs(tab @ (Tab::Qc2 | Tab::Qc3 | Tab::Scp | Tab::Fcp | Tab::Afc)) => {
                 input
                     .settings
                     .set_next_boot(NextBoot::QuickCharge, Some(tab.into()));
@@ -1675,7 +1827,24 @@ impl Navigation {
                     });
                 (Page::Tabs(Tab::Fcp), None)
             }
-            page @ Page::Open(Open::Probe(_) | Open::Scp | Open::Fcp) => (page, None),
+            Page::Open(Open::AfcSet(row)) => {
+                let attempt = match input.trigger {
+                    Some(QcTarget::AfcOutput { attempt, .. }) => attempt,
+                    _ => input.afc_attempt.wrapping_add(1),
+                };
+                input.trigger = single_wire_protocols::afc::Voltage::ALL
+                    .get(row)
+                    .filter(|_| input.afc_adapter.is_some())
+                    .map(|voltage| {
+                        input.afc_attempt = attempt;
+                        QcTarget::AfcOutput {
+                            attempt,
+                            mv: voltage.millivolts(),
+                        }
+                    });
+                (Page::Tabs(Tab::Afc), None)
+            }
+            page @ Page::Open(Open::Probe(_) | Open::Scp | Open::Fcp | Open::Afc) => (page, None),
             Page::Open(open @ (Open::Qc3 | Open::Detail { .. } | Open::Graph(_))) => {
                 (Page::Tabs(open.tab()), None)
             }

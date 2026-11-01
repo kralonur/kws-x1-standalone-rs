@@ -1,18 +1,10 @@
-//! Standalone SCP output selection and measured-voltage checks.
+//! Standalone SCP output selection and setpoint requests.
 
+use crate::single_wire::{MAX_MA, MAX_MV, MIN_MV};
 use single_wire_protocols::scp::{Adapter, control::Output};
 
-/// Application power-path envelope: 4–30 V input; negotiated current is
-/// limited to 5 A, as on the existing PD trigger. Adapter ratings can only
-/// narrow this envelope, never expand it.
-pub const MIN_MV: u16 = 4_000;
-pub const MAX_MV: u16 = 30_000;
-pub const MAX_MA: u16 = 5_000;
 /// Initial current-limit preview, in mA. This is a default, not a ceiling.
 const INITIAL_MA: u16 = 1_000;
-/// Application VBUS acceptance tolerance, ±5% of the requested voltage.
-/// Unlike QC's halfway heuristic, an SCP output must reach its setpoint.
-const VBUS_TOLERANCE_PERCENT: u32 = 5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Selection {
@@ -133,9 +125,4 @@ pub fn request(
         return Err(single_wire_protocols::control::RequestError::Range);
     }
     Output::new(adapter, mv, ma)
-}
-
-pub fn followed(mv: u16, vbus_mv: u16) -> bool {
-    u32::from(vbus_mv.abs_diff(mv)) * 100 <= u32::from(mv) * VBUS_TOLERANCE_PERCENT
-        && vbus_mv <= MAX_MV
 }

@@ -273,7 +273,7 @@ fn capability_rows(observation: Observation) -> [[u8; 24]; 16] {
         next += 1;
     }
     // A long OK runs the full scan (`NextBoot::ScanQuickCharge`): Quick
-    // Charge and read-only SCP detection, then this list with the EPR offer and, with the meter's
+    // Charge and read-only SCP, FCP and AFC detection, then this list with the EPR offer and, with the meter's
     // plug in the charger, as the 5 A cable test. Its PD part lists it all.
     let plug_in_charger = observation.listen.is_some();
     let scanned = observation.cable_test || observation.scan_pd;
@@ -300,8 +300,8 @@ fn capability_rows(observation: Observation) -> [[u8; 24]; 16] {
         (_, true) => b"BACK ENDS 5A CABLE TEST",
         (true, false) if observation.cable_test_skipped => b"HOLD OK TO TRY AGAIN",
         _ if scanned => b"",
-        (true, false) => b"QC/SCP/FCP, 5A; RESTARTS",
-        (false, false) => b"QC/SCP/FCP; RESTARTS",
+        (true, false) => b"ALL + 5A TEST; RESTARTS",
+        (false, false) => b"QC/SCP/FCP/AFC; RESTARTS",
     };
     let follow_row = next + usize::from(!note.is_empty());
     put(&mut rows[follow_row], follow);

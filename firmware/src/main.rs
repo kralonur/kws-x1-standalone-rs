@@ -28,7 +28,7 @@ mod pd_task;
 mod pd_trial;
 mod protocol;
 mod qc_drive;
-mod scp_drive;
+mod single_wire_drive;
 
 mod pd_service;
 mod pd_sniff;
@@ -60,7 +60,9 @@ use firmware_core::buttons as button_logic;
 use firmware_core::calibration::{Average, Calibration, Mean};
 use firmware_core::energy::{Totals, Tracker};
 use firmware_core::power_history::{self, History};
-use firmware_core::settings::{FcpFindings, NextBoot, QcFindings, Rotation, ScpFindings, Screen};
+use firmware_core::settings::{
+    AfcFindings, FcpFindings, NextBoot, QcFindings, Rotation, ScpFindings, Screen,
+};
 use hc32f460_pac::interrupt;
 use panel::Orientation;
 #[cfg(not(any(feature = "pd-boot-diagnostic", feature = "cable-log")))]
@@ -332,9 +334,14 @@ static ADC_REFERENCE: Watch<CriticalSectionRawMutex, Option<u16>, 1> = Watch::ne
 /// Quick Charge trigger state: `line_task` sends it, `meter_task` draws it.
 static QC_STATUS: Watch<CriticalSectionRawMutex, qc_drive::Status, 1> = Watch::new();
 // Terminal SCP evidence must survive a fast transition back to an idle driver.
-static SCP_RESULT: Watch<CriticalSectionRawMutex, (u8, scp_drive::Status), 1> = Watch::new();
+static SCP_RESULT: Watch<CriticalSectionRawMutex, (u8, single_wire_drive::Status), 1> =
+    Watch::new();
 /// Every FCP status, kept after the trigger goes idle so its result shows.
-static FCP_RESULT: Watch<CriticalSectionRawMutex, (u8, scp_drive::FcpStatus), 1> = Watch::new();
+static FCP_RESULT: Watch<CriticalSectionRawMutex, (u8, single_wire_drive::Status), 1> =
+    Watch::new();
+/// The same for AFC.
+static AFC_RESULT: Watch<CriticalSectionRawMutex, (u8, single_wire_drive::Status), 1> =
+    Watch::new();
 /// The meter's averaged raw reading: `meter_task` sends it, the button task
 /// hands it to the calibration steps.
 static METER_MEAN: Watch<CriticalSectionRawMutex, Option<Mean>, 1> = Watch::new();
@@ -699,7 +706,8 @@ async fn line_task(mut adc: line_adc::LineAdc, mut trigger: qc_drive::Trigger) {
         status = trigger.update(now_ms, request, lines, vbus_mv, &mut adc);
         if let qc_drive::Status::Scp(
             attempt,
-            terminal @ (scp_drive::Status::Detected(_) | scp_drive::Status::Failed(_)),
+            terminal @ (single_wire_drive::Status::Detected(_)
+            | single_wire_drive::Status::Failed(_)),
         ) = status
         {
             SCP_RESULT.sender().send((attempt, terminal));
@@ -708,6 +716,13 @@ async fn line_task(mut adc: line_adc::LineAdc, mut trigger: qc_drive::Trigger) {
             FCP_RESULT.sender().send_if_modified(|current| {
                 let changed = *current != Some((attempt, fcp));
                 *current = Some((attempt, fcp));
+                changed
+            });
+        }
+        if let qc_drive::Status::Afc(attempt, afc) = status {
+            AFC_RESULT.sender().send_if_modified(|current| {
+                let changed = *current != Some((attempt, afc));
+                *current = Some((attempt, afc));
                 changed
             });
         }
@@ -802,14 +817,18 @@ async fn button_task(
                 navigation.fail_probe();
                 navigation.finish_scan(QcFindings::Failed(failure))
             }
-            Some(qc_drive::Status::Scp(attempt, scp_drive::Status::Detected(adapter))) => {
+            Some(qc_drive::Status::Scp(
+                attempt,
+                single_wire_drive::Status::Detected(single_wire_drive::Adapter::Scp(adapter)),
+            )) => {
                 navigation.set_scp_adapter(attempt, adapter);
                 navigation.finish_scp(attempt, ScpFindings::Confirmed)
             }
-            Some(qc_drive::Status::Fcp(attempt, scp_drive::FcpStatus::Detected(adapter))) => {
-                navigation.finish_fcp(attempt, FcpFindings::detected(adapter), Some(adapter))
-            }
-            Some(qc_drive::Status::Fcp(attempt, scp_drive::FcpStatus::Failed(failure))) => {
+            Some(qc_drive::Status::Fcp(
+                attempt,
+                single_wire_drive::Status::Detected(single_wire_drive::Adapter::Fcp(adapter)),
+            )) => navigation.finish_fcp(attempt, FcpFindings::detected(adapter), Some(adapter)),
+            Some(qc_drive::Status::Fcp(attempt, single_wire_drive::Status::Failed(failure))) => {
                 navigation.fail_fcp_output(attempt);
                 navigation.finish_fcp(
                     attempt,
@@ -821,7 +840,23 @@ async fn button_task(
                     None,
                 )
             }
-            Some(qc_drive::Status::Scp(attempt, scp_drive::Status::Failed(failure))) => {
+            Some(qc_drive::Status::Afc(
+                attempt,
+                single_wire_drive::Status::Detected(single_wire_drive::Adapter::Afc(adapter)),
+            )) => navigation.finish_afc(attempt, AfcFindings::Detected, Some(adapter)),
+            Some(qc_drive::Status::Afc(attempt, single_wire_drive::Status::Failed(failure))) => {
+                navigation.fail_afc_output(attempt);
+                navigation.finish_afc(
+                    attempt,
+                    if failure.absent() {
+                        AfcFindings::Absent
+                    } else {
+                        AfcFindings::Unverified
+                    },
+                    None,
+                )
+            }
+            Some(qc_drive::Status::Scp(attempt, single_wire_drive::Status::Failed(failure))) => {
                 navigation.fail_scp_output(attempt);
                 navigation.finish_scp(
                     attempt,
@@ -854,7 +889,11 @@ async fn button_task(
         let command = if restart_pending {
             if matches!(
                 qc_updates.try_get(),
-                Some(qc_drive::Status::Scp(..) | qc_drive::Status::Fcp(..))
+                Some(
+                    qc_drive::Status::Scp(..)
+                        | qc_drive::Status::Fcp(..)
+                        | qc_drive::Status::Afc(..)
+                )
             ) {
                 None
             } else {
@@ -982,7 +1021,12 @@ const UPPER_MISSING_IDLE_S: u64 = 3600;
 async fn meter_task(
     mut backlight: embassy_hc32::pwm::TimerA4Pwm,
     // Legacy results carried into the full scan's PD/cable part.
-    findings: (Option<QcFindings>, Option<ScpFindings>, Option<FcpFindings>),
+    findings: (
+        Option<QcFindings>,
+        Option<ScpFindings>,
+        Option<FcpFindings>,
+        Option<AfcFindings>,
+    ),
     upper_installed: bool,
     saved: firmware_core::settings::Settings,
     mut energy_store: Option<energy_store::Store>,
@@ -990,7 +1034,7 @@ async fn meter_task(
     // ADC1's clock in Hz for the nominal ripple timebase; `None` without a capture.
     ripple_clock_hz: Option<u32>,
 ) {
-    let (mut qc_findings, carried_scp, carried_fcp) = findings;
+    let (mut qc_findings, mut carried_scp, mut carried_fcp, mut carried_afc) = findings;
     let fb = framebuffer();
     let mut input_updates = BUTTON_STATE.anon_receiver();
     let mut input = button_logic::Input {
@@ -1029,6 +1073,8 @@ async fn meter_task(
     let mut scp_status = None;
     let mut fcp_updates = FCP_RESULT.anon_receiver();
     let mut fcp_status = None;
+    let mut afc_updates = AFC_RESULT.anon_receiver();
+    let mut afc_status = None;
     // Peaks follow the meter page's reads; a reset hold on the overview
     // clears them.
     let mut peaks = ui::Peaks::default();
@@ -1078,6 +1124,14 @@ async fn meter_task(
         // The input task owns debounce/navigation, independently of this frame.
         if let Some(update) = input_updates.try_changed() {
             input = update;
+            // A fresh QC result supersedes the previous boot's full scan.
+            // Keep this invalidation after cancellation too: falling back
+            // must not resurrect single-wire results the rescan discarded.
+            if input.settings.qc_findings.is_some() {
+                carried_scp = None;
+                carried_fcp = None;
+                carried_afc = None;
+            }
             dirty = true;
         }
         let page = input.page;
@@ -1238,6 +1292,10 @@ async fn meter_task(
         if let Some(update) = fcp_updates.try_changed() {
             fcp_status = Some(update);
             dirty |= matches!(view, View::Fcp { .. });
+        }
+        if let Some(update) = afc_updates.try_changed() {
+            afc_status = Some(update);
+            dirty |= matches!(view, View::Afc { .. });
         }
         if let Some(update) = qc_updates.try_changed() {
             qc_status = update;
@@ -1418,6 +1476,25 @@ async fn meter_task(
                         },
                     );
                 }
+                View::Afc { probing, preview } => {
+                    ui::draw_afc(
+                        &mut Canvas(frame),
+                        &header,
+                        &ui::Afc {
+                            mode: qc_mode(latest_observation()),
+                            probing,
+                            preview,
+                            adapter: input.afc_adapter,
+                            request: match input.trigger {
+                                Some(QcTarget::AfcOutput { mv, .. }) => Some(mv),
+                                _ => None,
+                            },
+                            status: afc_status
+                                .filter(|(attempt, _)| *attempt == input.afc_attempt)
+                                .map(|(_, status)| status),
+                        },
+                    );
+                }
                 View::Qc2(preview) => {
                     let mode = qc_mode(latest_observation());
                     ui::draw_qc2(
@@ -1526,7 +1603,7 @@ async fn meter_task(
                             let offer = partner.min(pd::CAPABILITY_SECTIONS);
                             let mode = qc_mode(observation);
                             // A running scan shows only what it found so far.
-                            let scanning = input.scp_scanning() || input.fcp_scanning();
+                            let scanning = input.wire_scanning();
                             let scp = if scanning {
                                 input.settings.scp_findings
                             } else {
@@ -1537,15 +1614,21 @@ async fn meter_task(
                             } else {
                                 input.settings.fcp_findings.or(carried_fcp)
                             };
+                            let afc = if scanning {
+                                input.settings.afc_findings
+                            } else {
+                                input.settings.afc_findings.or(carried_afc)
+                            };
                             let qc = input.settings.qc_findings.or(qc_findings);
                             let qc_sections = ui::qc_charger_sections(qc);
                             let scp_section = offer + qc_sections;
                             let fcp_section = scp_section + 1;
+                            let afc_section = fcp_section + 1;
                             ui::draw_detail(
                                 canvas,
                                 &header,
                                 detail,
-                                (0..partner + qc_sections + 2).map(|section| {
+                                (0..partner + qc_sections + 3).map(|section| {
                                     if section < offer {
                                         pd::partner_lines(observation, section)
                                     } else if section < scp_section {
@@ -1569,8 +1652,17 @@ async fn meter_task(
                                                 })
                                                 .map(|(_, status)| status),
                                         )
+                                    } else if section == afc_section {
+                                        ui::afc_charger_lines(
+                                            afc,
+                                            afc_status
+                                                .filter(|(attempt, _)| {
+                                                    *attempt == input.afc_attempt
+                                                })
+                                                .map(|(_, status)| status),
+                                        )
                                     } else {
-                                        pd::partner_lines(observation, section - qc_sections - 2)
+                                        pd::partner_lines(observation, section - qc_sections - 3)
                                     }
                                 }),
                                 top,
@@ -1729,8 +1821,8 @@ async fn main(spawner: Spawner) {
     let requested = settings.next_boot;
     let resume = settings.resume;
     let qc_findings = settings.qc_findings;
-    // A normal new attachment must not inherit another charger's SCP or FCP
-    // proof. Carry evidence only through the explicitly requested scan
+    // A normal new attachment must not inherit another charger's SCP, FCP
+    // or AFC proof. Carry evidence only through the explicitly requested scan
     // continuation.
     let scan = matches!(
         requested,
@@ -1738,12 +1830,14 @@ async fn main(spawner: Spawner) {
     );
     let scp_findings = settings.scp_findings.filter(|_| scan);
     let fcp_findings = settings.fcp_findings.filter(|_| scan);
-    // Retain QC across source restarts during the SCP and FCP stages. The
+    let afc_findings = settings.afc_findings.filter(|_| scan);
+    // Retain QC across source restarts during the SCP, FCP and AFC stages. The
     // final PD/cable boot consumes the results and displays them from RAM.
     if !matches!(requested, NextBoot::ScanQuickCharge { .. }) {
         settings.qc_findings = None;
         settings.scp_findings = None;
         settings.fcp_findings = None;
+        settings.afc_findings = None;
     }
     settings.finish_boot();
     let cleared = store.save(settings);
@@ -1919,7 +2013,7 @@ async fn main(spawner: Spawner) {
     spawner.spawn(
         meter_task(
             backlight_pwm,
-            (qc_findings, scp_findings, fcp_findings),
+            (qc_findings, scp_findings, fcp_findings, afc_findings),
             upper_installed,
             settings,
             energy_store,

@@ -79,7 +79,7 @@ impl Sniffer {
 /// lost. `false` without a µs clock: nothing can be decoded, nor an edge
 /// storm caught, so the caller must not watch.
 pub fn start() -> bool {
-    let sniffer = crate::scp_drive::cycle_clock().map(|cycles_per_us| {
+    let sniffer = crate::single_wire_drive::cycle_clock().map(|cycles_per_us| {
         // Only now is the cycle counter known to run.
         let now = DWT::cycle_count();
         Sniffer {

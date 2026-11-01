@@ -1,13 +1,13 @@
 //! Saved settings: 8-byte records appended to one claimed sector of the
 //! original settings area through `crate::flash` (never erased). The newest
 //! valid record wins; a full sector moves to the next blank one. The
-//! calibration has a record per field and the FCP findings one record,
+//! calibration has a record per field and the FCP and AFC findings one each,
 //! beside the settings word; a newly claimed sector starts with all of them,
 //! so it never depends on older ones. Older builds skip records they do not
 //! know.
 
 use firmware_core::calibration::{FIELDS, Found};
-use firmware_core::settings::{FcpFindings, Settings};
+use firmware_core::settings::{AfcFindings, FcpFindings, Settings};
 
 use crate::flash::{BLANK, ENERGY_SECTORS, SECTOR, SECTORS, blank, read, write};
 
@@ -39,12 +39,13 @@ pub struct Store {
     status: Status,
 }
 
-/// The newest settings word, calibration and FCP records found.
+/// The newest settings word, calibration, FCP and AFC records found.
 #[derive(Clone, Copy, Default)]
 struct Records {
     settings: Option<Settings>,
     calibration: Found,
     fcp: Option<Option<FcpFindings>>,
+    afc: Option<Option<AfcFindings>>,
 }
 
 /// Read a claimed sector's valid records into `found`, later ones winning,
@@ -58,9 +59,12 @@ fn scan(base: usize, found: &mut Records) -> Option<usize> {
         }
         // A record interrupted mid-write fails the check and is skipped.
         if check == !word && !found.calibration.read(word) {
-            match FcpFindings::read(word) {
-                Some(fcp) => found.fcp = Some(fcp),
-                None => found.settings = Settings::decode(word).or(found.settings),
+            if let Some(fcp) = FcpFindings::read(word) {
+                found.fcp = Some(fcp);
+            } else if let Some(afc) = AfcFindings::read(word) {
+                found.afc = Some(afc);
+            } else {
+                found.settings = Settings::decode(word).or(found.settings);
             }
         }
         slot += RECORD;
@@ -87,12 +91,16 @@ impl Store {
                 next = next.or(Some((base, slot)));
             }
         }
-        let loaded = (found.settings.is_some() || found.calibration.any() || found.fcp.is_some())
-            .then(|| Settings {
-                calibration: found.calibration.calibration(),
-                fcp_findings: found.fcp.flatten(),
-                ..found.settings.unwrap_or_default()
-            });
+        let loaded = (found.settings.is_some()
+            || found.calibration.any()
+            || found.fcp.is_some()
+            || found.afc.is_some())
+        .then(|| Settings {
+            calibration: found.calibration.calibration(),
+            fcp_findings: found.fcp.flatten(),
+            afc_findings: found.afc.flatten(),
+            ..found.settings.unwrap_or_default()
+        });
         let store = Self {
             next,
             saved: loaded.unwrap_or_default(),
@@ -106,8 +114,8 @@ impl Store {
     }
 
     /// Append `settings` unless they are what was last attempted: the
-    /// settings word, the calibration records and the FCP record, each only
-    /// if it changed. One attempt per change: a failed write is not retried,
+    /// settings word, the calibration records and the FCP and AFC records,
+    /// each only if it changed. One attempt per change: a failed write is not retried,
     /// the settings stay in RAM.
     pub fn save(&mut self, settings: Settings) -> bool {
         if settings == self.saved {
@@ -115,17 +123,20 @@ impl Store {
         }
         let word = settings.encode();
         let fcp = FcpFindings::record(settings.fcp_findings);
-        let mut records = [0; 2 + FIELDS];
+        let afc = AfcFindings::record(settings.afc_findings);
+        let mut records = [0; 3 + FIELDS];
         records[0] = word;
         records[1..=FIELDS].copy_from_slice(&settings.calibration.records());
         records[1 + FIELDS] = fcp;
-        let mut changed = [0; 2 + FIELDS];
+        records[2 + FIELDS] = afc;
+        let mut changed = [0; 3 + FIELDS];
         let mut count = 0;
         for (record, keep) in records.iter().zip(
             [word != self.saved.encode()]
                 .into_iter()
                 .chain([settings.calibration != self.saved.calibration; FIELDS])
-                .chain([fcp != FcpFindings::record(self.saved.fcp_findings)]),
+                .chain([fcp != FcpFindings::record(self.saved.fcp_findings)])
+                .chain([afc != AfcFindings::record(self.saved.afc_findings)]),
         ) {
             if keep {
                 changed[count] = *record;

@@ -17,8 +17,8 @@ use firmware_core::dcp::Dcp;
 use firmware_core::energy::Totals;
 use firmware_core::power_history::{GraphTrace, GraphWindow, History, Sample};
 use firmware_core::settings::{
-    BRIGHTNESS_PERCENT, EnergyMemory, FcpFindings, Item, QcFindings, Rotation, ScpFindings,
-    Settings,
+    AfcFindings, BRIGHTNESS_PERCENT, EnergyMemory, FcpFindings, Item, QcFindings, Rotation,
+    ScpFindings, Settings,
 };
 use u8g2_fonts::FontRenderer;
 use u8g2_fonts::fonts;
@@ -73,7 +73,8 @@ const AMPS_TINT: Rgb565 = Rgb565::new(1, 9, 6);
 const WATTS_TINT: Rgb565 = Rgb565::new(1, 10, 1);
 /// Each charging protocol's colour: its tab, its page's cards and its
 /// overview badge. Every tab in a group has a colour of its own; a family
-/// (PD, Quick Charge, FCP and SCP) shares a hue in different tones.
+/// (PD, Quick Charge, FCP and SCP) shares a hue in different tones; AFC
+/// has a hue of its own.
 const PD_ACCENT: Rgb565 = GREEN;
 const PPS_ACCENT: Rgb565 = Rgb565::new(20, 63, 20);
 const AVS_ACCENT: Rgb565 = Rgb565::new(2, 46, 10);
@@ -81,6 +82,7 @@ const QC2_ACCENT: Rgb565 = ORANGE;
 const QC3_ACCENT: Rgb565 = Rgb565::new(31, 50, 18);
 const SCP_ACCENT: Rgb565 = MAGENTA;
 const FCP_ACCENT: Rgb565 = Rgb565::new(31, 44, 31);
+const AFC_ACCENT: Rgb565 = Rgb565::new(8, 40, 31);
 /// Ripple spectrum bars, dim purple behind the cyan trace, and their peak
 /// labels.
 const SPECTRUM: Rgb565 = Rgb565::new(12, 6, 14);
@@ -203,6 +205,10 @@ pub enum Protocol {
     /// SCP transactions another device sends, as for [`Self::Fcp`].
     DrivenScp {
         mv: Option<u16>,
+    },
+    /// This meter's applied AFC request, at `mv`.
+    Afc {
+        mv: u16,
     },
     /// A charging port telling its current by fixed D+/D− voltages.
     Dcp(Dcp),
@@ -357,6 +363,7 @@ fn tab_style(tab: Tab, passthrough: bool) -> (&'static str, Rgb565) {
         Tab::Qc3 => ("QC 3.0", QC3_ACCENT),
         Tab::Scp => ("SCP", SCP_ACCENT),
         Tab::Fcp => ("FCP", FCP_ACCENT),
+        Tab::Afc => ("AFC", AFC_ACCENT),
         Tab::Detail { page, .. } => match page {
             Detail::Pd if passthrough => ("PD SNIFF", GREEN),
             Detail::Pd => ("PD SESSION", GREEN),
@@ -697,6 +704,7 @@ fn protocol_badge(protocol: Protocol) -> (&'static str, Rgb565) {
             ("SCP", SCP_ACCENT)
         }
         Protocol::Fcp { .. } => ("FCP", FCP_ACCENT),
+        Protocol::Afc { .. } => ("AFC", AFC_ACCENT),
         Protocol::SingleWire => ("FCP/SCP", SCP_ACCENT),
         Protocol::Dcp(Dcp::Bias1V2) => ("1.2V DCP", YELLOW),
         Protocol::Dcp(_) => ("DIVIDER", YELLOW),
@@ -1346,7 +1354,8 @@ fn status(protocol: Protocol, cc: Option<u8>) -> Label {
         Protocol::Qc2 { mv }
         | Protocol::Qc3 { mv: Some(mv) }
         | Protocol::Fcp { mv: Some(mv) }
-        | Protocol::DrivenScp { mv: Some(mv) } => label.volts(mv),
+        | Protocol::DrivenScp { mv: Some(mv) }
+        | Protocol::Afc { mv } => label.volts(mv),
         Protocol::Qc3 { mv: None } => label.push(b"continuous"),
         Protocol::ScpDetected => label.push(b"detected, 5V"),
         Protocol::SingleWire | Protocol::Fcp { mv: None } | Protocol::DrivenScp { mv: None } => {
@@ -1793,14 +1802,15 @@ fn qc2_pill(status: Status, request: Voltage) -> Option<(Voltage, &'static str, 
         | Status::Detecting(_)
         | Status::Detected(_)
         | Status::Scp(..)
-        | Status::Fcp(..) => {
+        | Status::Fcp(..)
+        | Status::Afc(..) => {
             return None;
         }
     })
 }
 
-fn scp_error(error: crate::scp_drive::Failure) -> &'static str {
-    use crate::scp_drive::Failure;
+fn single_wire_error(error: crate::single_wire_drive::Failure) -> &'static str {
+    use crate::single_wire_drive::Failure;
     use single_wire_protocols::Error;
     match error {
         Failure::Entry => "LEGACY ENTRY FAILED",
@@ -1810,7 +1820,7 @@ fn scp_error(error: crate::scp_drive::Failure) -> &'static str {
         Failure::Silent => "NO DIGITAL RESPONSE",
         Failure::Control(error) => match error {
             single_wire_protocols::control::ControlError::Wire(error) => {
-                scp_error(Failure::Wire(error))
+                single_wire_error(Failure::Wire(error))
             }
             single_wire_protocols::control::ControlError::Request(_) => "UNSUPPORTED SETPOINT",
             single_wire_protocols::control::ControlError::Readback => "REGISTER READBACK FAILED",
@@ -1853,7 +1863,7 @@ fn scp_range(cap: single_wire_protocols::scp::Capabilities) -> Label {
 
 pub fn scp_charger_lines(
     findings: Option<ScpFindings>,
-    status: Option<crate::scp_drive::Status>,
+    status: Option<crate::single_wire_drive::Status>,
 ) -> Lines {
     let mut rows = [[b' '; 24]; 8];
     let mut row = 0;
@@ -1868,7 +1878,10 @@ pub fn scp_charger_lines(
     line(b"SUPERCHARGE (SCP)");
     match findings {
         Some(ScpFindings::Confirmed) => {
-            if let Some(crate::scp_drive::Status::Detected(adapter)) = status {
+            if let Some(crate::single_wire_drive::Status::Detected(
+                crate::single_wire_drive::Adapter::Scp(adapter),
+            )) = status
+            {
                 line(match adapter.modes {
                     single_wire_protocols::scp::Modes::LowVoltage => b"SCP DETECTED (LVC)",
                     single_wire_protocols::scp::Modes::HighVoltage => b"SCP DETECTED (HVC)",
@@ -1917,15 +1930,15 @@ pub fn scp_charger_lines(
         }
         Some(ScpFindings::Unverified) => {
             line(b"SCP NOT VERIFIED");
-            if let Some(crate::scp_drive::Status::Failed(error)) = status {
-                line(scp_error(error).as_bytes());
+            if let Some(crate::single_wire_drive::Status::Failed(error)) = status {
+                line(single_wire_error(error).as_bytes());
             }
             line(b"SUPPORT NOT DETERMINED");
         }
         Some(ScpFindings::Absent) => {
             line(b"NO SCP");
-            if let Some(crate::scp_drive::Status::Failed(error)) = status {
-                line(scp_error(error).as_bytes());
+            if let Some(crate::single_wire_drive::Status::Failed(error)) = status {
+                line(single_wire_error(error).as_bytes());
             }
         }
         None => {
@@ -1940,7 +1953,7 @@ pub fn scp_charger_lines(
 pub fn fcp_charger_lines(
     findings: Option<FcpFindings>,
     adapter: Option<single_wire_protocols::fcp::Adapter>,
-    status: Option<crate::scp_drive::FcpStatus>,
+    status: Option<crate::single_wire_drive::Status>,
 ) -> Lines {
     let mut rows = [[b' '; 24]; 8];
     let mut row = 0;
@@ -1954,7 +1967,7 @@ pub fn fcp_charger_lines(
     };
     line(b"FAST CHARGE (FCP)");
     let failure = match status {
-        Some(crate::scp_drive::FcpStatus::Failed(error)) => Some(scp_error(error)),
+        Some(crate::single_wire_drive::Status::Failed(error)) => Some(single_wire_error(error)),
         _ => None,
     };
     match findings {
@@ -2006,11 +2019,57 @@ pub fn fcp_charger_lines(
     rows
 }
 
+/// The charger page's AFC section, after FCP's and laid out the same.
+/// Detection checks a 5 V exchange, not the charger's output ratings.
+pub fn afc_charger_lines(
+    findings: Option<AfcFindings>,
+    status: Option<crate::single_wire_drive::Status>,
+) -> Lines {
+    let mut rows = [[b' '; 24]; 8];
+    let mut row = 0;
+    let mut line = |text: &[u8]| {
+        if let Some(target) = rows.get_mut(row) {
+            for (cell, &byte) in target.iter_mut().zip(text) {
+                *cell = byte;
+            }
+            row += 1;
+        }
+    };
+    line(b"SAMSUNG AFC");
+    let failure = match status {
+        Some(crate::single_wire_drive::Status::Failed(error)) => Some(single_wire_error(error)),
+        _ => None,
+    };
+    match findings {
+        Some(AfcFindings::Detected) => {
+            line(b"AFC DETECTED");
+            line(b"5V EXCHANGE CHECKED");
+            line(b"REQUESTS: 5.0V / 9.0V");
+        }
+        Some(AfcFindings::Unverified) => {
+            line(b"AFC NOT VERIFIED");
+            if let Some(failure) = failure {
+                line(failure.as_bytes());
+            }
+            line(b"SUPPORT NOT DETERMINED");
+        }
+        Some(AfcFindings::Absent) => {
+            line(b"NO AFC");
+            if let Some(failure) = failure {
+                line(failure.as_bytes());
+            }
+        }
+        None => line(b"NOT TESTED YET"),
+    }
+    line(b"HOLD OK: FULL RESCAN");
+    rows
+}
+
 pub struct Scp {
     pub probing: bool,
     pub mode: QcMode,
     pub findings: Option<ScpFindings>,
-    pub status: Option<crate::scp_drive::Status>,
+    pub status: Option<crate::single_wire_drive::Status>,
     pub selection: Option<firmware_core::scp::Selection>,
     pub focus: Option<PpsFocus>,
     pub active: bool,
@@ -2066,15 +2125,19 @@ pub fn draw_scp<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'
                 .push(b"A")
         });
         let (caption, color) = match status {
-            Some(crate::scp_drive::Status::Output { applied: true, .. }) => ("ACTIVE", GREEN),
-            Some(crate::scp_drive::Status::Output { applied: false, .. }) => ("SETTING", ORANGE),
-            Some(crate::scp_drive::Status::Stopping) => ("STOPPING", ORANGE),
-            Some(crate::scp_drive::Status::Failed(_)) => ("FAILED", MAGENTA),
+            Some(crate::single_wire_drive::Status::Output { applied: true, .. }) => {
+                ("ACTIVE", GREEN)
+            }
+            Some(crate::single_wire_drive::Status::Output { applied: false, .. }) => {
+                ("SETTING", ORANGE)
+            }
+            Some(crate::single_wire_drive::Status::Stopping) => ("STOPPING", ORANGE),
+            Some(crate::single_wire_drive::Status::Failed(_)) => ("FAILED", MAGENTA),
             _ if scp.active => ("ENTERING", ORANGE),
             _ => ("", MUTED),
         };
         let failure = match status {
-            Some(crate::scp_drive::Status::Failed(error)) => Some(scp_error(error)),
+            Some(crate::single_wire_drive::Status::Failed(error)) => Some(single_wire_error(error)),
             _ => None,
         };
         output_card(
@@ -2097,7 +2160,9 @@ pub fn draw_scp<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'
     }
     if !probing
         && findings == Some(ScpFindings::Confirmed)
-        && let Some(crate::scp_drive::Status::Detected(adapter)) = status
+        && let Some(crate::single_wire_drive::Status::Detected(
+            crate::single_wire_drive::Adapter::Scp(adapter),
+        )) = status
     {
         let lines = match adapter.capabilities {
             Some(cap) => scp_range(cap),
@@ -2133,8 +2198,8 @@ pub fn draw_scp<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'
                 Some(ScpFindings::Absent) => "NO SCP",
                 None => "SCP NOT TESTED",
             },
-            if let Some(crate::scp_drive::Status::Failed(error)) = status {
-                scp_error(error)
+            if let Some(crate::single_wire_drive::Status::Failed(error)) = status {
+                single_wire_error(error)
             } else {
                 "no output requested"
             },
@@ -2162,82 +2227,190 @@ pub struct Fcp {
     /// The voltage asked of the adapter in mV, kept while other tabs show.
     pub request: Option<u16>,
     /// The current attempt's latest status.
-    pub status: Option<crate::scp_drive::FcpStatus>,
+    pub status: Option<crate::single_wire_drive::Status>,
 }
 
 /// The FCP tab: the probe's result until it finds an adapter, then one row
 /// per voltage the adapter lists and an off row, laid out as the Quick
 /// Charge 2.0 tab.
 pub fn draw_fcp<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'_>, page: &Fcp) {
-    use crate::scp_drive::FcpStatus;
-    let &Fcp {
-        mode,
-        probing,
-        preview,
-        adapter,
-        request,
-        status,
-    } = page;
+    // The rated power is the adapter's, shown once at its top voltage.
+    let power = page
+        .adapter
+        .and_then(|adapter| adapter.max_power_mw)
+        .map(|mw| match mw % 1_000 {
+            0 => Label::new().fixed(mw / 1_000, 0),
+            _ => Label::new().fixed(mw / 100, 1),
+        })
+        .map(|watts| watts.push(b"W rated"));
+    let (pill, failure) = wire_progress(page.status);
+    draw_levels(
+        target,
+        header,
+        &Levels {
+            text: &FCP_TEXT,
+            mode: page.mode,
+            probing: page.probing,
+            preview: page.preview,
+            levels: page
+                .adapter
+                .as_ref()
+                .map(single_wire_protocols::fcp::Adapter::levels),
+            note: power,
+            request: page.request,
+            pill,
+            failure,
+        },
+    );
+}
+
+/// Everything the AFC tab shows, as for FCP.
+pub struct Afc {
+    pub mode: QcMode,
+    pub probing: bool,
+    pub preview: Option<usize>,
+    pub adapter: Option<single_wire_protocols::afc::Adapter>,
+    pub request: Option<u16>,
+    pub status: Option<crate::single_wire_drive::Status>,
+}
+
+/// AFC's voltages in mV, as the AFC tab's rows.
+const AFC_LEVELS_MV: [u16; 2] = [
+    single_wire_protocols::afc::Voltage::V5.millivolts(),
+    single_wire_protocols::afc::Voltage::V9.millivolts(),
+];
+
+/// The AFC tab, laid out as FCP's. These are request choices, not ratings
+/// discovered by detection; only VBUS confirms an applied output.
+pub fn draw_afc<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'_>, page: &Afc) {
+    let (pill, failure) = wire_progress(page.status);
+    draw_levels(
+        target,
+        header,
+        &Levels {
+            text: &AFC_TEXT,
+            mode: page.mode,
+            probing: page.probing,
+            preview: page.preview,
+            levels: page.adapter.map(|_| &AFC_LEVELS_MV[..]),
+            note: None,
+            request: page.request,
+            pill,
+            failure,
+        },
+    );
+}
+
+/// What tells the fixed-voltage single-wire tabs apart.
+struct WireText {
+    accent: Rgb565,
+    pd: &'static str,
+    switch: &'static str,
+    testing: &'static str,
+    absent: &'static str,
+    unverified: &'static str,
+    untested: &'static str,
+    test: &'static str,
+}
+
+const FCP_TEXT: WireText = WireText {
+    accent: FCP_ACCENT,
+    pd: "PD must stop before FCP detection",
+    switch: "< > tabs  OK switch to FCP detection",
+    testing: "TESTING FCP",
+    absent: "NO FCP",
+    unverified: "FCP NOT VERIFIED",
+    untested: "FCP NOT TESTED",
+    test: "< > tabs  OK test FCP",
+};
+
+const AFC_TEXT: WireText = WireText {
+    accent: AFC_ACCENT,
+    pd: "PD must stop before AFC detection",
+    switch: "< > tabs  OK switch to AFC detection",
+    testing: "TESTING AFC",
+    absent: "NO AFC",
+    unverified: "AFC NOT VERIFIED",
+    untested: "AFC NOT TESTED",
+    test: "< > tabs  OK test AFC",
+};
+
+/// A fixed-voltage tab's contents.
+struct Levels<'a> {
+    text: &'a WireText,
+    mode: QcMode,
+    probing: bool,
+    /// The row being chosen, while the choice is open.
+    preview: Option<usize>,
+    /// The adapter's voltages in mV, once the probe found it.
+    levels: Option<&'a [u16]>,
+    /// Shown on the top voltage's row.
+    note: Option<Label>,
+    /// The voltage asked of the adapter in mV, kept while other tabs show.
+    request: Option<u16>,
+    /// The requested row's pill, and the current attempt's failure.
+    pill: (&'static str, Rgb565),
+    failure: Option<crate::single_wire_drive::Failure>,
+}
+
+/// The requested row's pill and the failure, from a single-wire trigger's
+/// latest status.
+fn wire_progress(
+    status: Option<crate::single_wire_drive::Status>,
+) -> (
+    (&'static str, Rgb565),
+    Option<crate::single_wire_drive::Failure>,
+) {
+    use crate::single_wire_drive::Status;
+    match status {
+        Some(Status::Output { applied: true, .. }) => (("ACTIVE", GREEN), None),
+        Some(Status::Output { applied: false, .. }) => (("SETTING", ORANGE), None),
+        Some(Status::Stopping) => (("STOPPING", ORANGE), None),
+        Some(Status::Failed(error)) => (("FAILED", MAGENTA), Some(error)),
+        _ => (("WAIT", ORANGE), None),
+    }
+}
+
+/// The probe's result until it finds an adapter, then one row per voltage
+/// and an off row, laid out as the Quick Charge 2.0 tab.
+fn draw_levels<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'_>, page: &Levels) {
+    let text = page.text;
     draw_header(target, header);
-    if mode == QcMode::Pd {
-        notice(
-            target,
-            "PD MODE",
-            "PD must stop before FCP detection",
-            GREEN,
-        );
-        hint(target, header, "< > tabs  OK switch to FCP detection");
+    if page.mode == QcMode::Pd {
+        notice(target, "PD MODE", text.pd, GREEN);
+        hint(target, header, text.switch);
         return;
     }
-    let failure = match status {
-        Some(FcpStatus::Failed(error)) => Some(error),
-        _ => None,
-    };
-    if probing {
-        notice(target, "TESTING FCP", "adapter identification", ORANGE);
+    if page.probing {
+        notice(target, text.testing, "adapter identification", ORANGE);
         hint(target, header, "BACK stop");
         return;
     }
-    let Some(adapter) = adapter else {
+    let failure = page.failure;
+    let Some(levels) = page.levels else {
         notice(
             target,
             match failure {
-                Some(error) if error.absent() => "NO FCP",
-                Some(_) => "FCP NOT VERIFIED",
-                None => "FCP NOT TESTED",
+                Some(error) if error.absent() => text.absent,
+                Some(_) => text.unverified,
+                None => text.untested,
             },
-            failure.map_or("no output requested", scp_error),
-            FCP_ACCENT,
+            failure.map_or("no output requested", single_wire_error),
+            text.accent,
         );
-        hint(target, header, "< > tabs  OK test FCP");
+        hint(target, header, text.test);
         return;
     };
-    let pill = match status {
-        Some(FcpStatus::Output { applied: true, .. }) => ("ACTIVE", GREEN),
-        Some(FcpStatus::Output { applied: false, .. }) => ("SETTING", ORANGE),
-        Some(FcpStatus::Stopping) => ("STOPPING", ORANGE),
-        Some(FcpStatus::Failed(_)) => ("FAILED", MAGENTA),
-        _ => ("WAIT", ORANGE),
-    };
-    let levels = adapter.levels();
     for (row, &mv) in levels.iter().enumerate() {
-        // The rated power is the adapter's, shown once at its top voltage.
-        let power = adapter
-            .max_power_mw
-            .filter(|_| row + 1 == levels.len())
-            .map(|mw| match mw % 1_000 {
-                0 => Label::new().fixed(mw / 1_000, 0),
-                _ => Label::new().fixed(mw / 100, 1),
-            })
-            .map(|watts| watts.push(b"W rated"));
+        let note = page.note.as_ref().filter(|_| row + 1 == levels.len());
         selector_row(
             target,
             row,
             Label::new().volts(mv).as_str(),
             level_color(mv),
-            [power.as_ref().map_or("", Label::as_str), ""],
-            preview == Some(row),
-            (request == Some(mv)).then_some(pill),
+            [note.map_or("", Label::as_str), ""],
+            page.preview == Some(row),
+            (page.request == Some(mv)).then_some(page.pill),
         );
     }
     selector_row(
@@ -2246,12 +2419,12 @@ pub fn draw_fcp<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'
         "OFF",
         WHITE,
         ["plain USB", ""],
-        preview == Some(levels.len()),
+        page.preview == Some(levels.len()),
         None,
     );
-    let hint_text = match (preview, failure, request) {
+    let hint_text = match (page.preview, failure, page.request) {
         (Some(_), ..) => "< > choose  OK request  BACK cancel",
-        (None, Some(error), _) => scp_error(error),
+        (None, Some(error), _) => single_wire_error(error),
         (None, None, None) => "< > tabs  OK choose  HOLD OK rescan",
         (None, None, Some(_)) => "< > tabs  OK change  HOLD OK stop",
     };
@@ -2591,12 +2764,13 @@ pub fn qc_charger_lines(findings: Option<QcFindings>, mode: QcMode, section: u32
             line(b"QUICK CHARGE");
             line(b"NOT SCANNED YET");
             line(b"HOLD OK: FULL RESCAN");
-            line(b"(QC, SCP, FCP AND PD)");
+            line(b"(QC/SCP/FCP/AFC AND PD)");
         }
         None => {
             line(b"QUICK CHARGE");
             line(b"NOT TESTED YET");
-            line(b"HOLD OK: SCAN QC/SCP/FCP");
+            line(b"HOLD OK: FULL SCAN");
+            line(b"(QC/SCP/FCP/AFC)");
         }
     }
     rows
