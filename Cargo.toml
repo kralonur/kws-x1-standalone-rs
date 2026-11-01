@@ -35,7 +35,7 @@ object = "0.40.0"
 panic-halt = "1.0.0"
 pd-protocol = { git = "https://github.com/kralonur/embedded-charging-protocols-rs", rev = "2c3d511cb7214f1db9f5e3528900e1fd9d1bc323" }
 qc-protocol = { git = "https://github.com/kralonur/embedded-charging-protocols-rs", rev = "2c3d511cb7214f1db9f5e3528900e1fd9d1bc323" }
-scp-protocol = { git = "https://github.com/kralonur/embedded-charging-protocols-rs", rev = "2c3d511cb7214f1db9f5e3528900e1fd9d1bc323" }
+single-wire-protocols = { git = "https://github.com/kralonur/embedded-charging-protocols-rs", rev = "cdd11012eab7dffd00ca90942014c64c9bf39f1c" }
 serde = "1.0.229"
 serde_json = "1.0.154"
 sha2 = "0.11.1"

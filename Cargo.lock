@@ -576,7 +576,7 @@ dependencies = [
  "hc32f460-pac",
  "panic-halt",
  "qc-protocol",
- "scp-protocol",
+ "single-wire-protocols",
  "u8g2-fonts",
  "usbpd",
 ]
@@ -593,7 +593,7 @@ dependencies = [
  "microfft",
  "pd-protocol",
  "qc-protocol",
- "scp-protocol",
+ "single-wire-protocols",
  "u8g2-fonts",
  "usbpd",
 ]
@@ -1133,15 +1133,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e1cf6437eb19a8f4a6cc0f7dca544973b0b78843adbfeb3683d1a94a0024a294"
 
 [[package]]
-name = "scp-protocol"
-version = "0.1.0"
-source = "git+https://github.com/kralonur/embedded-charging-protocols-rs?rev=2c3d511cb7214f1db9f5e3528900e1fd9d1bc323#2c3d511cb7214f1db9f5e3528900e1fd9d1bc323"
-dependencies = [
- "crc",
- "thiserror",
-]
-
-[[package]]
 name = "semver"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1230,6 +1221,15 @@ name = "simd-adler32"
 version = "0.3.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
+
+[[package]]
+name = "single-wire-protocols"
+version = "0.1.0"
+source = "git+https://github.com/kralonur/embedded-charging-protocols-rs?rev=cdd11012eab7dffd00ca90942014c64c9bf39f1c#cdd11012eab7dffd00ca90942014c64c9bf39f1c"
+dependencies = [
+ "crc",
+ "thiserror",
+]
 
 [[package]]
 name = "smallvec"

@@ -664,12 +664,12 @@ fn qc2(canvas: &mut Canvas) -> Result<()> {
 }
 
 /// SCP layout fixtures, not hardware measurements.
-fn scp_fixture_adapter() -> scp_protocol::Adapter {
-    scp_protocol::Adapter {
-        modes: scp_protocol::Modes::Both,
+fn scp_fixture_adapter() -> single_wire_protocols::scp::Adapter {
+    single_wire_protocols::scp::Adapter {
+        modes: single_wire_protocols::scp::Modes::Both,
         type0: Some(0xb8),
         type1: None,
-        capabilities: Some(scp_protocol::Capabilities {
+        capabilities: Some(single_wire_protocols::scp::Capabilities {
             min_mv: 5_500,
             max_mv: 11_000,
             min_ma: 1_000,
@@ -702,8 +702,9 @@ fn scp(canvas: &mut Canvas) -> Result<()> {
 
 /// FCP layout fixture, not a hardware measurement: an 18 W adapter with
 /// the draft standard's 5.2 V default.
-fn fcp_fixture_adapter() -> Result<scp_protocol::fcp::Adapter> {
-    scp_protocol::fcp::Adapter::new(&[5_200, 9_000, 12_000], Some(18_000)).context("FCP fixture")
+fn fcp_fixture_adapter() -> Result<single_wire_protocols::fcp::Adapter> {
+    single_wire_protocols::fcp::Adapter::new(&[5_200, 9_000, 12_000], Some(18_000))
+        .context("FCP fixture")
 }
 
 /// FCP photo: 9 V requested and applied.
@@ -720,7 +721,7 @@ fn fcp(canvas: &mut Canvas) -> Result<()> {
             adapter: Some(adapter),
             request: Some(9_000),
             status: Some(scp_drive::FcpStatus::Output {
-                output: scp_protocol::fcp::Output::new(adapter, 9_000)
+                output: single_wire_protocols::fcp::Output::new(adapter, 9_000)
                     .context("FCP fixture output")?,
                 applied: true,
             }),

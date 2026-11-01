@@ -1801,7 +1801,7 @@ fn qc2_pill(status: Status, request: Voltage) -> Option<(Voltage, &'static str, 
 
 fn scp_error(error: crate::scp_drive::Failure) -> &'static str {
     use crate::scp_drive::Failure;
-    use scp_protocol::Error;
+    use single_wire_protocols::Error;
     match error {
         Failure::Entry => "LEGACY ENTRY FAILED",
         Failure::DriveLevel => "LINE LEVEL CHECK FAILED",
@@ -1809,10 +1809,12 @@ fn scp_error(error: crate::scp_drive::Failure) -> &'static str {
         Failure::Clock => "MICROSECOND CLOCK FAILED",
         Failure::Silent => "NO DIGITAL RESPONSE",
         Failure::Control(error) => match error {
-            scp_protocol::control::ControlError::Wire(error) => scp_error(Failure::Wire(error)),
-            scp_protocol::control::ControlError::Request(_) => "UNSUPPORTED SETPOINT",
-            scp_protocol::control::ControlError::Readback => "REGISTER READBACK FAILED",
-            scp_protocol::control::ControlError::Protection => "PROTECTION / MODE LOST",
+            single_wire_protocols::control::ControlError::Wire(error) => {
+                scp_error(Failure::Wire(error))
+            }
+            single_wire_protocols::control::ControlError::Request(_) => "UNSUPPORTED SETPOINT",
+            single_wire_protocols::control::ControlError::Readback => "REGISTER READBACK FAILED",
+            single_wire_protocols::control::ControlError::Protection => "PROTECTION / MODE LOST",
         },
         Failure::Wire(error) => match error {
             Error::Transport(never) => match never {},
@@ -1833,7 +1835,7 @@ fn scp_error(error: crate::scp_drive::Failure) -> &'static str {
 /// range, the maximum current and, only when the adapter reports it, the
 /// rated power. Power is never derived from the voltage and current maxima,
 /// which need not be available together. Steps are on Charger info.
-fn scp_range(cap: scp_protocol::Capabilities) -> Label {
+fn scp_range(cap: single_wire_protocols::scp::Capabilities) -> Label {
     let line = Label::new()
         .hundredths(u32::from(cap.min_mv))
         .push(b"-")
@@ -1868,9 +1870,9 @@ pub fn scp_charger_lines(
         Some(ScpFindings::Confirmed) => {
             if let Some(crate::scp_drive::Status::Detected(adapter)) = status {
                 line(match adapter.modes {
-                    scp_protocol::Modes::LowVoltage => b"SCP DETECTED (LVC)",
-                    scp_protocol::Modes::HighVoltage => b"SCP DETECTED (HVC)",
-                    scp_protocol::Modes::Both => b"SCP DETECTED (LVC+HVC)",
+                    single_wire_protocols::scp::Modes::LowVoltage => b"SCP DETECTED (LVC)",
+                    single_wire_protocols::scp::Modes::HighVoltage => b"SCP DETECTED (HVC)",
+                    single_wire_protocols::scp::Modes::Both => b"SCP DETECTED (LVC+HVC)",
                 });
                 if let Some(cap) = adapter.capabilities {
                     let vout = Label::new()
@@ -1937,7 +1939,7 @@ pub fn scp_charger_lines(
 /// test's findings, with the voltages and the reason when this boot ran it.
 pub fn fcp_charger_lines(
     findings: Option<FcpFindings>,
-    adapter: Option<scp_protocol::fcp::Adapter>,
+    adapter: Option<single_wire_protocols::fcp::Adapter>,
     status: Option<crate::scp_drive::FcpStatus>,
 ) -> Lines {
     let mut rows = [[b' '; 24]; 8];
@@ -2112,9 +2114,9 @@ pub fn draw_scp<D: DrawTarget<Color = Rgb565>>(target: &mut D, header: &Header<'
         value_box(target, volts_box, "MAX VOLTAGE", volts, "V", VOLTS, false);
         value_box(target, amps_box, "MAX CURRENT", amps, "A", AMPS, false);
         let mode_text = match adapter.modes {
-            scp_protocol::Modes::LowVoltage => "LVC",
-            scp_protocol::Modes::HighVoltage => "HVC",
-            scp_protocol::Modes::Both => "LVC + HVC",
+            single_wire_protocols::scp::Modes::LowVoltage => "LVC",
+            single_wire_protocols::scp::Modes::HighVoltage => "HVC",
+            single_wire_protocols::scp::Modes::Both => "LVC + HVC",
         };
         output_card(target, "MODE", mode_text, ("DETECTED", GREEN));
         hint(target, header, "< > tabs  OK rescan SCP");
@@ -2156,7 +2158,7 @@ pub struct Fcp {
     pub probing: bool,
     /// The row being chosen, while the choice is open.
     pub preview: Option<usize>,
-    pub adapter: Option<scp_protocol::fcp::Adapter>,
+    pub adapter: Option<single_wire_protocols::fcp::Adapter>,
     /// The voltage asked of the adapter in mV, kept while other tabs show.
     pub request: Option<u16>,
     /// The current attempt's latest status.

@@ -1,11 +1,11 @@
 //! Hardware adapter for SCP and FCP detection and explicit output control.
 //! Table numbers refer to Appendix B of the SCP draft standard cited in
-//! `scp-protocol`.
+//! `single-wire-protocols`.
 
 use core::convert::Infallible;
 use cortex_m::peripheral::{DWT, SYST};
 use qc_protocol::qc2::{Handshake, Level, Progress};
-use scp_protocol::{
+use single_wire_protocols::{
     Transport,
     control::{ControlError, RequestError},
     fcp,
@@ -57,7 +57,7 @@ pub trait Link {
     fn detect<T: Transport>(
         detection: &mut Self::Detection,
         phy: &mut T,
-    ) -> Result<Option<Self::Adapter>, scp_protocol::Error<T::Error>>;
+    ) -> Result<Option<Self::Adapter>, single_wire_protocols::Error<T::Error>>;
     /// Whether `request` is inside the application's power-path envelope.
     fn allowed(request: Self::Request) -> bool;
     fn start(adapter: Self::Adapter, request: Self::Request)
@@ -78,13 +78,13 @@ pub trait Link {
 pub enum Scp {}
 
 impl Link for Scp {
-    type Detection = scp_protocol::Detection;
-    type Adapter = scp_protocol::Adapter;
-    type Output = scp_protocol::control::Output;
-    type Session = scp_protocol::control::Session;
+    type Detection = single_wire_protocols::scp::Detection;
+    type Adapter = single_wire_protocols::scp::Adapter;
+    type Output = single_wire_protocols::scp::control::Output;
+    type Session = single_wire_protocols::scp::control::Session;
     type Request = (u16, u16);
     fn detection() -> Self::Detection {
-        scp_protocol::Detection::new()
+        single_wire_protocols::scp::Detection::new()
     }
     fn answered(detection: &Self::Detection) -> bool {
         detection.answered()
@@ -92,7 +92,7 @@ impl Link for Scp {
     fn detect<T: Transport>(
         detection: &mut Self::Detection,
         phy: &mut T,
-    ) -> Result<Option<Self::Adapter>, scp_protocol::Error<T::Error>> {
+    ) -> Result<Option<Self::Adapter>, single_wire_protocols::Error<T::Error>> {
         detection.poll(phy)
     }
     fn allowed((mv, ma): Self::Request) -> bool {
@@ -154,7 +154,7 @@ impl Link for Fcp {
     fn detect<T: Transport>(
         detection: &mut Self::Detection,
         phy: &mut T,
-    ) -> Result<Option<Self::Adapter>, scp_protocol::Error<T::Error>> {
+    ) -> Result<Option<Self::Adapter>, single_wire_protocols::Error<T::Error>> {
         detection.poll(phy)
     }
     fn allowed(mv: Self::Request) -> bool {
@@ -271,7 +271,7 @@ impl<L: Link> Trigger<L> {
                 let result = match Phy::new(drive, adc.dm_input()) {
                     Some(mut phy) => {
                         L::detect(&mut detection, &mut phy).map_err(|error| match error {
-                            scp_protocol::Error::Timeout if !L::answered(&detection) => {
+                            single_wire_protocols::Error::Timeout if !L::answered(&detection) => {
                                 Failure::Silent
                             }
                             error => Failure::Wire(error),

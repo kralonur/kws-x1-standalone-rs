@@ -9,7 +9,7 @@ use qc_protocol::{
     lines::{self, Request},
     qc2::Voltage,
 };
-use scp_protocol::sniff::{Protocol, Transaction};
+use single_wire_protocols::sniff::{Protocol, Transaction};
 
 /// A port's D+/D− signature.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

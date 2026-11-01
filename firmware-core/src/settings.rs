@@ -301,7 +301,7 @@ pub enum FcpFindings {
 /// FCP findings record: tag in the top byte, the kind in bits 17..16 (0 for
 /// none), then for a detection the top voltage in 100 mV and the rated power
 /// in 500 mW (0 for none) in bits 15..8 and 7..0, the units the adapter
-/// reports them in (`scp_protocol::fcp`).
+/// reports them in (`single_wire_protocols::fcp`).
 const FCP_RECORD_TAG: u32 = 0xfc;
 const FCP_KIND_SHIFT: u32 = 16;
 const FCP_STEP_MV: u16 = 100;
@@ -309,7 +309,7 @@ const FCP_POWER_STEP_MW: u32 = 500;
 
 impl FcpFindings {
     /// What detecting `adapter` found.
-    pub fn detected(adapter: scp_protocol::fcp::Adapter) -> Self {
+    pub fn detected(adapter: single_wire_protocols::fcp::Adapter) -> Self {
         Self::Detected {
             max_mv: adapter.levels().last().copied().unwrap_or(0),
             max_power_mw: adapter.max_power_mw,

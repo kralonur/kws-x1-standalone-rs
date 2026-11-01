@@ -93,12 +93,12 @@ fn a_source_restart_resumes_scp_without_discarding_qc_evidence() {
     assert_eq!(input.settings.qc_findings, saved.qc_findings);
 }
 
-fn output_adapter() -> scp_protocol::Adapter {
-    scp_protocol::Adapter {
-        modes: scp_protocol::Modes::HighVoltage,
+fn output_adapter() -> single_wire_protocols::scp::Adapter {
+    single_wire_protocols::scp::Adapter {
+        modes: single_wire_protocols::scp::Modes::HighVoltage,
         type0: Some(0x1c),
         type1: None,
-        capabilities: Some(scp_protocol::Capabilities {
+        capabilities: Some(single_wire_protocols::scp::Capabilities {
             min_mv: 5_500,
             max_mv: 11_000,
             min_ma: 300,

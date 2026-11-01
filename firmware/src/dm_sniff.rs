@@ -10,7 +10,7 @@ use cortex_m::peripheral::{DWT, NVIC};
 use embassy_hc32::gpio::Port;
 use embassy_sync::blocking_mutex::{Mutex, raw::CriticalSectionRawMutex};
 use embassy_sync::channel::Channel;
-use scp_protocol::sniff::{Decoder, Transaction};
+use single_wire_protocols::sniff::{Decoder, Transaction};
 
 /// D− is PB0, and pin n of every port is external-interrupt channel n
 /// (RM 10.5.5). Errata 2.4.1: no other port's pin 0 may enable it too.

@@ -906,7 +906,7 @@ pub struct Input {
     /// probe found; this boot only, since the settings word has no room for
     /// FCP findings.
     pub fcp_attempt: u8,
-    pub fcp_adapter: Option<scp_protocol::fcp::Adapter>,
+    pub fcp_adapter: Option<single_wire_protocols::fcp::Adapter>,
     /// What the graph plots and how far back it reaches; this boot only.
     pub graph_trace: GraphTrace,
     pub graph_window: GraphWindow,
@@ -1115,7 +1115,7 @@ impl Navigation {
     }
 
     /// Accept ratings only from the current explicit detection attempt.
-    pub fn set_scp_adapter(&mut self, attempt: u8, adapter: scp_protocol::Adapter) {
+    pub fn set_scp_adapter(&mut self, attempt: u8, adapter: single_wire_protocols::scp::Adapter) {
         if attempt == self.input.scp_attempt && self.input.page == Page::Open(Open::Scp) {
             self.input.scp_selection = crate::scp::Selection::new(adapter);
         }
@@ -1136,7 +1136,7 @@ impl Navigation {
         &mut self,
         attempt: u8,
         findings: FcpFindings,
-        adapter: Option<scp_protocol::fcp::Adapter>,
+        adapter: Option<single_wire_protocols::fcp::Adapter>,
     ) -> Option<PdCommand> {
         if attempt != self.input.fcp_attempt || self.input.page != Page::Open(Open::Fcp) {
             return None;

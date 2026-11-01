@@ -1,6 +1,6 @@
 //! Standalone SCP output selection and measured-voltage checks.
 
-use scp_protocol::{Adapter, control::Output};
+use single_wire_protocols::scp::{Adapter, control::Output};
 
 /// Application power-path envelope: 4–30 V input; negotiated current is
 /// limited to 5 A, as on the existing PD trigger. Adapter ratings can only
@@ -128,9 +128,9 @@ pub fn request(
     adapter: Adapter,
     mv: u16,
     ma: u16,
-) -> Result<Output, scp_protocol::control::RequestError> {
+) -> Result<Output, single_wire_protocols::control::RequestError> {
     if !(MIN_MV..=MAX_MV).contains(&mv) || ma > MAX_MA {
-        return Err(scp_protocol::control::RequestError::Range);
+        return Err(single_wire_protocols::control::RequestError::Range);
     }
     Output::new(adapter, mv, ma)
 }

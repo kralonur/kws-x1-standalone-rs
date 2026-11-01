@@ -16,8 +16,8 @@ pub enum Failure {
     Clock,
     /// No answer to the first read, after its retries.
     Silent,
-    Wire(scp_protocol::Error<core::convert::Infallible>),
-    Control(scp_protocol::control::ControlError<core::convert::Infallible>),
+    Wire(single_wire_protocols::Error<core::convert::Infallible>),
+    Control(single_wire_protocols::control::ControlError<core::convert::Infallible>),
 }
 
 impl Failure {
@@ -30,7 +30,9 @@ impl Failure {
             self,
             Self::Entry
                 | Self::Silent
-                | Self::Wire(scp_protocol::Error::NotScp | scp_protocol::Error::NotFcp)
+                | Self::Wire(
+                    single_wire_protocols::Error::NotScp | single_wire_protocols::Error::NotFcp
+                )
         )
     }
 }
@@ -38,7 +40,10 @@ impl Failure {
 /// A trigger's progress, by default SCP's: the adapter `A` detection found
 /// and the output `O` requested.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Status<A = scp_protocol::Adapter, O = scp_protocol::control::Output> {
+pub enum Status<
+    A = single_wire_protocols::scp::Adapter,
+    O = single_wire_protocols::scp::control::Output,
+> {
     Entering,
     Reading,
     Detected(A),
@@ -49,4 +54,5 @@ pub enum Status<A = scp_protocol::Adapter, O = scp_protocol::control::Output> {
 }
 
 /// An FCP trigger's progress.
-pub type FcpStatus = Status<scp_protocol::fcp::Adapter, scp_protocol::fcp::Output>;
+pub type FcpStatus =
+    Status<single_wire_protocols::fcp::Adapter, single_wire_protocols::fcp::Output>;
