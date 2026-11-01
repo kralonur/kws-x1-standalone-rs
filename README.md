@@ -32,6 +32,7 @@ is not affiliated with or endorsed by KOWSI.
   - [Passthrough mode](#passthrough-mode)
 - [SCP](#scp)
 - [FCP](#fcp)
+- [AFC](#afc)
 - [Quick Charge](#quick-charge)
 - [Full charger offer and 5 A without a cable](#full-charger-offer-and-5-a-without-a-cable)
 - [Hand-test checklist](#hand-test-checklist)
@@ -69,7 +70,7 @@ by full Git revision, and every library is usable on its own.
 | ---------- | -------- |
 | [kws-x1-standalone-rs](https://github.com/kralonur/kws-x1-standalone-rs) | firmware for a USB-C power meter, built on the libraries below |
 | [hc32f460-embassy-rs](https://github.com/kralonur/hc32f460-embassy-rs) | `hc32f460-pac` and `embassy-hc32`: peripheral access crate and Embassy HAL for the HC32F460 MCU |
-| [embedded-charging-protocols-rs](https://github.com/kralonur/embedded-charging-protocols-rs) | `pd-protocol`, `qc-protocol` and `scp-protocol`: allocation-free, `no_std`, hardware-independent USB PD sink engine, Quick Charge, and SCP and FCP |
+| [embedded-charging-protocols-rs](https://github.com/kralonur/embedded-charging-protocols-rs) | `pd-protocol`, `qc-protocol` and `single-wire-protocols`: allocation-free, `no_std`, hardware-independent USB PD sink engine, Quick Charge, and SCP, FCP and Samsung AFC |
 | [usbpd](https://github.com/kralonur/usbpd) | fork of [elagil/usbpd](https://github.com/elagil/usbpd): the `usbpd` policy engine and the `usbpd-traits` PHY interface |
 
 This is **kws-x1-standalone-rs**.
@@ -104,7 +105,9 @@ This is **kws-x1-standalone-rs**.
 - FCP: the voltages the charger lists (such as 5.2, 9 and 12 V) and its rated
   power, retained Charger-info results, and an explicit FCP page that
   requests one of them.
-- A full charger scan (hold OK on the charger page): Quick Charge, SCP, FCP, the PD
+- Samsung AFC: identification by a 5 V request, retained Charger-info
+  results, and an explicit AFC page that requests 5 or 9 V.
+- A full charger scan (hold OK on the charger page): Quick Charge, SCP, FCP, AFC, the PD
   offer, the EPR offer and, with the plug in the charger, the 5 A offer, on
   one page.
 - Everything the charger says about itself: its full offer (EPR included),
@@ -123,9 +126,9 @@ This is **kws-x1-standalone-rs**.
 
 What this firmware does **not** do, for now:
 
-- **No SCP authentication.** SCP and FCP output control is only an explicit
-  request on their pages, never automatic.
-  AFC and other protocols are not triggered. Beyond PD, QC and verified
+- **No SCP authentication.** SCP, FCP and AFC output control is only an
+  explicit request on their pages, never automatic.
+  Other protocols are not triggered. Beyond PD, QC and verified
   SCP detection, the overview names the Type-C current
   advertisement, the fixed D+/D- voltages some ports use to tell their
   current (`DIVIDER`, `1.2V DCP`) and the BC1.2 short once the Quick Charge
@@ -163,7 +166,7 @@ What this firmware does **not** do, for now:
   not explain the voltage. The chargers tried so far work with it. The
   overview's `TYPE-C` current corrects for it; the PD chip's own level
   reading does not, so the startup `CC1`/`CC2` status reads one level low
-  (see [PD Session](#13-pd-session)). Passthrough is not affected. How the
+  (see [PD Session](#14-pd-session)). Passthrough is not affected. How the
   value was found:
   - A USB-A port with an A-to-C cable pulls CC up to VBUS through a fixed
     56 kΩ resistor, so a pull-down R gives CC = VBUS × R / (56 kΩ + R). On
@@ -192,10 +195,11 @@ What this firmware does **not** do, for now:
 | Back | up one level: cancel the edit or scroll, leave the tabs; from a group, back to the overview; on the overview, open the settings | – |
 
 The pages sit in three groups: **Monitor** (Overview, Lines, Energy, Graph, Ripple), **Trigger**
-(PD Profiles, PPS, AVS, QC 2.0, QC 3.0, SCP, FCP) and **Info** (PD Session, Charger, Cable,
+(PD Profiles, PPS, AVS, QC 2.0, QC 3.0, SCP, FCP, AFC) and **Info** (PD Session, Charger, Cable,
 System). The header shows the group's tabs as a strip, each in a colour no
 other tab in its group has; a protocol family (PD, PPS and AVS; QC 2.0 and
-QC 3.0; SCP and FCP) shares a hue in different tones, which the protocol's
+QC 3.0; SCP and FCP) shares a hue in different tones, AFC has a blue of its
+own, and the protocol's
 cards and overview badge use too. The shown tab is named, the others fold to
 thin bars. A dot per group sits on the right. The shown tab marks what
 Left/Right move: a bar beside its name and lit dots for groups (the hint row
@@ -206,7 +210,7 @@ the tab it last showed.
 Wherever a voltage, current or power has its own card or trace, it is
 yellow, cyan or green on every page; charge (Ah) is cyan and energy (Wh)
 green. Two exceptions: Lines gives each line its own colour, and the voltage
-lists (PD Profiles, QC 2.0, FCP) colour each voltage from cool to warm.
+lists (PD Profiles, QC 2.0, FCP, AFC) colour each voltage from cool to warm.
 
 Holding **Back** and **OK** while plugging into a computer starts the
 bootloader instead (see [Flashing](#flashing)).
@@ -250,7 +254,7 @@ point the way it flows (they follow the screen rotation).
 
 | Page | Shows | Buttons |
 | ---- | ----- | ------- |
-| **Overview** | voltage, current, power; the highest of each since boot while a live page shows (`MAX`); protocol (`USB`, `TYPE-C`, `PD 2.0`, `PD 3.0`, `PPS`, `AVS`, `QC 2.0`, `QC 3.0`, `FCP`, `FCP/SCP`, `SCP`, `DIVIDER`, `1.2V DCP`, `BC1.2`) with the CC pin and contract; flow chevrons; a heartbeat dot | hold OK: reset `MAX`; Back: settings |
+| **Overview** | voltage, current, power; the highest of each since boot while a live page shows (`MAX`); protocol (`USB`, `TYPE-C`, `PD 2.0`, `PD 3.0`, `PPS`, `AVS`, `QC 2.0`, `QC 3.0`, `FCP`, `FCP/SCP`, `SCP`, `AFC`, `DIVIDER`, `1.2V DCP`, `BC1.2`) with the CC pin and contract; flow chevrons; a heartbeat dot | hold OK: reset `MAX`; Back: settings |
 | **Lines** | D+, D-, CC1 and CC2 voltages | |
 | **Energy** | charge (Ah), energy (Wh) and the time since the last reset; how the totals are kept | hold OK: reset the totals |
 | **Graph** | power, voltage or current over the last 1, 2, 5 or 10 minutes; the latest second's and the window's highest voltage, current and power | OK, Left/Right choose power, voltage or current, OK, Left/Right change the window, OK done; Back closes; hold OK: clear the graph |
@@ -262,8 +266,9 @@ point the way it flows (they follow the screen rotation).
 | **QC 3.0** | the step range, the set voltage, VBUS, D+ and D−; under a PD contract only `PD MODE` | OK tests the charger, then starts continuous mode at 5 V (under a PD contract it first switches the charger out of PD); Left/Right move it by 0.2 V (repeats held); OK or Back closes it; the steps stay in force on other screens until `OFF` on QC 2.0 |
 | **SCP** | identification, then the set voltage and current limit, the live output; `ACTIVE`, `SETTING`, `STOPPING` or `FAILED` | OK tests adapter-type registers; after a detection with ratings, OK, Left/Right voltage (20 mV, 100 mV held), OK, current limit (50 mA, 250 mA held), OK applies; Back cancels an edit, then leaves the page with the output still in force; hold OK: stop the output, or rescan when none runs; PD must stop first |
 | **FCP** | identification, then the voltages the charger lists and `OFF`, the status on the requested row (`WAIT`, `SETTING`, `ACTIVE`, `STOPPING`); under a PD contract only `PD MODE` | OK tests the charger, then opens the choice at the voltage in force, else the first; Left/Right choose, OK requests and closes the choice, Back closes it; the request stays in force on other screens until `OFF`; hold OK: stop the output, or rescan when none runs; PD must stop first |
+| **AFC** | identification, then 5 V, 9 V and `OFF`, the status on the requested row; under a PD contract only `PD MODE` | as FCP |
 | **PD Session** | sink: session state, CC levels, the source's offer and the port check (a dual-role device's sink PDOs and identity). Passthrough: CC pin, Rp level and the latest PD messages | OK to scroll; hold OK: port check (drops to fixed 5 V first, PD 3.0 only) |
-| **Charger** | the offer (`*` = needs a 5 A cable), the charger's identity, maker and peak ratings, power status and source info, the battery of a power bank or a phone powering the meter, QC, SCP and FCP results | OK to scroll; hold OK: full scan (Quick Charge, SCP and FCP identification, PD, EPR, and the 5 A cable test with the plug in the charger) |
+| **Charger** | the offer (`*` = needs a 5 A cable), the charger's identity, maker and peak ratings, power status and source info, the battery of a power bank or a phone powering the meter, QC, SCP, FCP and AFC results | OK to scroll; hold OK: full scan (Quick Charge, SCP, FCP and AFC identification, PD, EPR, and the 5 A cable test with the plug in the charger) |
 | **Cable** | the cable's e-marker: a readable summary (type, speed, rating, length, alt modes, maker), identity, ratings, status and modes | OK to scroll; hold OK to read the e-marker (drops to fixed 5 V first) |
 | **System** | I2C bus state and counters, frame and button timing, stack use, `LAST RESET:` cause | OK to scroll |
 | **Settings** | `BRIGHTNESS` (5 levels, 60% at first), `ROTATION` (`AUTO` follows the tilt sensor, `NORMAL`, `FLIPPED`), `ENERGY MEMORY`, `CALIBRATION`, `SERIAL` and `VERSION` (shown only) | Left/Right row, OK change it, Left/Right value, OK or Back done |
@@ -408,8 +413,8 @@ use in the `PROTOCOL` strip along the bottom. The meter starts on it.
     registers and VBUS is at the default 5 V (`detected, 5V`). It is
     evidence of support, not an SCP output contract. Once this meter's SCP
     output is applied and followed, `SCP` shows its setpoint and current
-    limit instead (e.g. `9.00V 2.00A`), and once this meter's FCP request
-    is followed, `FCP` shows its voltage (e.g. `9V`).
+    limit instead (e.g. `9.00V 2.00A`), and once this meter's FCP or AFC
+    request is followed, `FCP` or `AFC` shows its voltage (e.g. `9V`).
   - `TYPE-C`: Type-C current advertisement without PD (1.5 A or 3 A).
   - `DIVIDER`: a port telling its current by fixed D+/D- voltages (TI
     TPS2514 datasheet, section 8.3.3): D+ 2 V and D- 2.7 V for a 5 W adapter
@@ -749,7 +754,21 @@ screen; [FCP](#fcp) explains the test and the requests.
   shows its reason here instead. In `PD MODE`,
   `< > tabs  OK switch to FCP detection`.
 
-#### 13. PD Session
+#### 13. AFC
+
+<img src="pictures/afc_screen.webp" width="480" alt="AFC screen">
+
+This is the **AFC** screen (tab `AFC` in Trigger): Samsung Adaptive Fast
+Charging's 5 V and 9 V, laid out as the FCP screen; [AFC](#afc) explains the
+test and the requests. The picture is a layout fixture, not a photo.
+
+- **Rows**: `5V`, `9V`, then `OFF` (`plain USB`). These are request choices,
+  not voltage ratings discovered by the test.
+- **Status pill**, test, `PD MODE` and hint rows: as on FCP, with `AFC` in
+  place of `FCP` (`TESTING AFC`, `NO AFC`, `AFC NOT VERIFIED`,
+  `AFC NOT TESTED`, `< > tabs  OK test AFC`).
+
+#### 14. PD Session
 
 <img src="pictures/pd_session_screen.webp" width="480" alt="PD Session screen">
 
@@ -867,7 +886,7 @@ Scroll to `PORT CHECK` for the outcomes, then `SINK PDOS (ACCEPTS)`,
 
 <img src="pictures/pd_input_ufp_screen.webp" width="480" alt="Port check scrolled to the phone's UFP VDO">
 
-The device's own offer to the meter is on the [Charger](#14-charger) page.
+The device's own offer to the meter is on the [Charger](#15-charger) page.
 Watts in parentheses are calculated from each PDO (the top voltage for
 variable and PPS ranges), not a measured charging rate. QC, AFC and SCP input
 support cannot be inferred from PD results. The XID is not proof of
@@ -920,12 +939,12 @@ passthrough and the 5 A cable-test boot.
 | `002B` | session ended without a contract |
 | `002C` | Hard Reset sent |
 
-#### 14. Charger
+#### 15. Charger
 
 <img src="pictures/charger_screen.webp" width="480" alt="Charger screen">
 
 This is the **Charger** screen (tab `CHARGER` in Info): what the charger says
-about itself, plus QC tests and SCP and FCP identification. The PD
+about itself, plus QC tests and SCP, FCP and AFC identification. The PD
 parts are the charger's claims; legacy results come from active probes. It
 scrolls (OK) through the parts; a long offer takes two screens.
 
@@ -944,7 +963,7 @@ scrolls (OK) through the parts; a long offer takes two screens.
 - **`*`** after a row: offered at that current only with a 5 A cable. Then
   the note `* ONLY WITH 5A CABLE`.
 - **Notes**:
-  - `HOLD OK: FULL RESCAN` / `QC/SCP/FCP; RESTARTS` (`QC/SCP/FCP, 5A; RESTARTS`
+  - `HOLD OK: FULL RESCAN` / `QC/SCP/FCP/AFC; RESTARTS` (`ALL + 5A TEST; RESTARTS`
     with the plug in the charger): hold OK for the
     [full scan](#full-charger-offer-and-5-a-without-a-cable).
   - The EPR (28 V and up) request: `ASKING CHARGER`,
@@ -972,9 +991,9 @@ scan or the last Quick Charge test, measured on VBUS:
 
 A failed handshake shows one `QUICK CHARGE` section with `NOT A CHARGING
 PORT` or `NO QUICK CHARGE`. Before any result it shows `NOT SCANNED YET`
-with `HOLD OK: FULL RESCAN`, or without a PD contract `NOT TESTED YET` with
-`HOLD OK: SCAN QC/SCP/FCP`, which runs QC then read-only SCP and FCP
-identification and
+with `HOLD OK: FULL RESCAN` and `(QC/SCP/FCP/AFC AND PD)`, or without a PD
+contract `NOT TESTED YET` with `HOLD OK: FULL SCAN` and `(QC/SCP/FCP/AFC)`,
+which runs QC then read-only SCP, FCP and AFC identification and
 returns to Charger info on success or failure, without opening QC controls.
 
 **`SUPERCHARGE (SCP)`**
@@ -999,6 +1018,16 @@ full scan's restart only the highest voltage survives (`VOUT: UP TO
 12.0V`). `NO FCP`, `FCP NOT VERIFIED` and `NOT TESTED YET` mean what they
 do for SCP. The result is kept in its own flash record beside the settings
 and carried through the scan like SCP's.
+
+**`SAMSUNG AFC`**
+
+Always present, after FCP. `AFC DETECTED` and `5V EXCHANGE CHECKED` mean
+that the complete ping sequence for the test's 5 V request succeeded.
+`REQUESTS: 5.0V / 9.0V` lists the available controls, not discovered charger
+ratings; 9 V is only verified after an explicit request and VBUS measurement.
+The reference driver skips the response data, so no reply byte or current
+rating is inferred. `NO AFC`, `AFC NOT VERIFIED` and `NOT TESTED YET` mean
+what they do for SCP. The result is kept in its own flash record, as FCP's is.
 
 **`IDENTITY`**
 
@@ -1054,7 +1083,7 @@ phone powering the meter): its first battery, as the charger describes it.
 **Answer words** used in these sections: `OK`, `WAITING`, `NOT SUPPORTED`,
 `NO REPLY`, `BLOCKED`, `RESET`, `PD2 N/A` (not available under PD 2.0).
 
-#### 15. Cable
+#### 16. Cable
 
 <img src="pictures/cable_screen.webp" width="480" alt="Cable screen">
 
@@ -1141,7 +1170,7 @@ GET_STATUS`, `SECOND PLUG NO DATA`).
 **Status words**: `NOT QUERIED`, `ACK`, `NAK`, `BUSY NO RETRY`,
 `TIMEOUT NO RETRY`, `LIST INCOMPLETE`, `NOT SUPPORTED`.
 
-#### 16. System
+#### 17. System
 
 <img src="pictures/system_screen.webp" width="480" alt="System screen">
 
@@ -1356,9 +1385,9 @@ This is an active digital probe, not passive voltage-signature detection.
 means the drive/idle check refused transmission; `EDGE TIMING FAILED` or
 `NO DIGITAL RESPONSE` does not establish that the charger lacks SCP.
 
-The portable detector lives in `scp-protocol` in the charging-protocols
-workspace, pinned by full Git revision like the other libraries. Nothing is
-flashed automatically.
+The portable detector lives in the `scp` module of `single-wire-protocols`
+in the charging-protocols workspace. Its source is selected in the root
+`Cargo.toml`. Nothing is flashed automatically.
 
 ## FCP
 
@@ -1384,7 +1413,48 @@ and releases the lines, which pass to Quick Charge only once VBUS is back at
 5 V or 4 s have passed.
 
 Registers and sequencing follow Huawei's public FCP driver, cited in
-`scp-protocol`. Not yet tried on hardware.
+the `fcp` module of `single-wire-protocols`. Not yet tried on hardware.
+
+## AFC
+
+The [AFC screen](#13-afc) shows each field. Open **Trigger → AFC** and press
+OK. Under PD, the first OK switches to a PD-silent boot and automatically
+starts AFC detection after the restart. The probe uses the same BC1.2 entry
+as SCP but keeps D+ at
+0.6 V rather than raising it, checks D+ is there, then
+sends AFC's 5 V request (`0x08`) over the same electrical interface, but
+with AFC-specific framing. Detection requires the complete response-ping
+sequence, not just one ping. As in Samsung's driver, response data is skipped
+rather than interpreted as an acknowledgement or capability byte. Nothing
+answering the initial ping shows `NO AFC` with `NO DIGITAL RESPONSE`; an
+incomplete exchange leaves support unverified. Back stops the probe. The
+result also shows on the Charger page, and the full scan runs this probe
+after FCP.
+
+Once a charger is found, the page lists 5 V, 9 V and `OFF`. OK opens the
+choice and a second OK requests the previewed voltage: the meter re-enters
+and sends 5 V's `0x08` or 9 V's `0x46`. This AFC path reads no status
+registers and configures no watchdog. If an acknowledged request does not
+change VBUS to the target, it repeats up to five request groups in total,
+at least 300 ms apart, without restarting the original 2 s deadline.
+The output counts as `ACTIVE` once VBUS is within 5% of the voltage and
+must stay there; an applied output gets no periodic AFC traffic. A missed voltage or failed exchange ends the request and
+sends a best-effort reset and releases the lines; the reason shows at the
+bottom. `OFF` or hold OK uses Samsung's 100-UI (16 ms) D− reset pulse and
+releases the lines. Shutdown waits for 5 V for at most 4 s; that timeout
+releases ownership but does not authorize a Quick Charge entry while VBUS
+is still raised or unmeasured.
+
+Request bytes, 160 µs UI, UI-spaced response-ping sampling and count bounds,
+trailing sync, the 2 ms response-data skip, 200 µs final gap and reset pulse
+are based on the nominal values in the
+[public AFC driver](https://github.com/gta7lite/android_kernel_samsung_mt6765/blob/de3c7f5140460fd449a970613f94f7c16c7f579c/drivers/power/supply/afc_charger_intf.c)
+and [header](https://github.com/gta7lite/android_kernel_samsung_mt6765/blob/de3c7f5140460fd449a970613f94f7c16c7f579c/drivers/power/supply/afc_charger_intf.h).
+These are community-hosted implementation references, not a public normative
+AFC specification. The reference's delay macro is platform-tuned; this PHY
+uses nominal intervals rather than copying its delay compensation.
+AFC detection and 5 V/9 V switching have been tested on a charger; this is
+not broad charger compatibility or electrical qualification.
 
 ## Quick Charge
 
@@ -1441,15 +1511,15 @@ charger ignores Quick Charge under a PD contract, so the meter:
 1. Restarts the charger with a Hard Reset into a boot with PD silent, and
    runs the Quick Charge test on the QC 2.0 screen (it may restart once or
    twice more first; it carries on). Back abandons the scan.
-2. Keeps the QC result, performs read-only SCP and then FCP identification,
-   releasing the data lines and checking VBUS at 5 V after each. Source
-   restarts resume the stage they interrupt.
+2. Keeps the QC result, performs read-only SCP, FCP and then AFC
+   identification, releasing the data lines and checking VBUS at 5 V after
+   each. Source restarts resume the stage they interrupt.
 3. Saves the results, restarts the charger into PD, asks for the EPR offer by
    itself, and opens the Charger screen with the offer, the EPR offer, the
-   QC, SCP and FCP sections and the charger's answers. With the plug in the charger
+   QC, SCP, FCP and AFC sections and the charger's answers. With the plug in the charger
    that boot is the 5 A cable test below.
 
-Without PD, QC, SCP and FCP identification run directly and finish on Charger
+Without PD, QC, SCP, FCP and AFC identification run directly and finish on Charger
 info, without a PD restart.
 
 The output goes up to 20 V during the scan.

@@ -114,6 +114,26 @@ entry, checks its D+ drive at 2.6–3.0 V and D− idle low before transmitting,
 and verifies 5 V after releasing the lines. The opposite D+ resistor-pair
 encoding is not assumed correct: the ADC gate must validate it each attempt.
 
+This AFC path performs no register reads: detection sends the 5 V request, which a
+charger already at its default output keeps, and VBUS must still be at 5 V
+afterwards. 9 V is only sent from a confirmed request on the AFC page. AFC
+keeps D+ at 0.6 V and checks it at 0.5–0.7 V before transmitting. Without
+status reads or a decoded reply, measured VBUS confirms an output.
+The exchange checks all response pings using AFC's timing, not SCP's narrow
+ping window or reply-byte parser; response data is skipped as in Samsung's
+published driver. Detection does not establish 9 V capability or a current
+rating. An acknowledged but unmatched output can retry up to five request
+groups total, spaced at least 300 ms apart; retries neither extend the
+original 2 s deadline nor relax the 5% voltage check. Missing measurements
+and loss of an applied voltage still fail rather than triggering retries.
+A missed or lost voltage ends the request with a best-effort 100-UI
+(16 ms) D− reset pulse, then releases D+; orderly shutdown uses that reset
+as well. Releasing D+ alone is not assumed to restore AFC's default output.
+Shutdown is bounded to 4 s, but a timeout is not proof of 5 V: Quick Charge
+entry still requires a measured default output. Initial charger testing
+confirmed detection and 5 V/9 V switching, but physical signaling, reset
+behavior and charger compatibility are not electrically qualified.
+
 SCP shares QC's exclusive D+/D− owner and is suppressed during passthrough
 or a live PD session. Generation-tagged requests reject stale completions.
 A terminal-result watch preserves evidence independently of display timing.
