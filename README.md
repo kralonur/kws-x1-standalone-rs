@@ -9,6 +9,12 @@ drives them as such; those three parts are inferred, not confirmed (see
 [Hardware reference documents](#hardware-reference-documents)). This project
 is not affiliated with or endorsed by KOWSI.
 
+The **UT01C** has also been confirmed working by
+[@paulcarroty](https://github.com/kralonur/kws-x1-standalone-rs/issues/20).
+A [teardown comparison by @tomoca2 (Japanese)](https://tomoca2.hatenablog.com/entry/2026/04/04/172251)
+found the same PCB revision and components in both units examined. This is
+community-tested compatibility, not a guarantee for every hardware revision.
+
 > **Disclaimer.** This is unofficial firmware, provided as is, without warranty
 > of any kind. Flashing it, and using the meter with it, is entirely at your
 > own risk. The author is not responsible for any damage to the meter, to
