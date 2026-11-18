@@ -1861,19 +1861,24 @@ the `unpacker`. `firmware-pack` packs them into one release image: the unpacker,
 followed by the upper-flash code and the main firmware, both compressed
 with LZMA2. No baseline image, template file or download is required. `pack`
 refuses existing outputs rather than overwriting them; `audit` checks an exact
-hash-confirmed image against the same two builds. Both emit JSON reports to
-stdout and never access USB hardware.
+hash-confirmed image against the supplied builds. Both emit JSON reports to
+stdout and never access USB hardware. The build below also supplies the USB
+unpacker, which is used only when the standalone image won't fit.
 
 ```sh
+cargo fw
+cargo build --release -p firmware --bin unpacker --target thumbv7em-none-eabihf \
+  --target-dir target/usb --features usb-install --locked
 mkdir -p build
 ELF=target/thumbv7em-none-eabihf/release
+USB=target/usb/thumbv7em-none-eabihf/release/unpacker
 cargo run --release -p firmware-pack --locked -- pack \
-  --firmware "$ELF/firmware" --unpacker "$ELF/unpacker" \
+  --firmware "$ELF/firmware" --unpacker "$ELF/unpacker" --usb-unpacker "$USB" \
   --out build/firmware.X1C > build/package.json
 IMAGE_SHA256=$(sha256sum build/firmware.X1C | cut -d ' ' -f 1)
 cargo run --release -p firmware-pack --locked -- audit \
   --image build/firmware.X1C --confirm-sha256 "$IMAGE_SHA256" \
-  --firmware "$ELF/firmware" --unpacker "$ELF/unpacker" > build/audit.json
+  --firmware "$ELF/firmware" --unpacker "$ELF/unpacker" --usb-unpacker "$USB" > build/audit.json
 cargo run --release -p flasher --locked -- \
   --dry-run --image build/firmware.X1C --confirm-sha256 "$IMAGE_SHA256"
 ```
@@ -1887,10 +1892,12 @@ same unpacking to prove the main firmware never erases stream bytes it has
 yet to read. Its report's `unused_content_bytes` is the compressed room left
 in the release, and `release` breaks the sizes down per region.
 
-An opt-in build sends the upper flash over USB after the bootloader step
-instead, leaving room for larger releases: see [docs/USB-INSTALL.md](docs/USB-INSTALL.md).
+If the standalone image won't fit, the packer appends the upper region for the
+flasher to send over USB after the bootloader step. The flashing command is the
+same, but a two-stage image requires a flasher that supports it. Tagged releases
+cannot publish this format yet; see [docs/USB-INSTALL.md](docs/USB-INSTALL.md).
 
-The container uses the layout implemented by `firmware-image::build_container`:
+The standalone container uses the layout implemented by `firmware-image::build_container`:
 the two-byte prefix, application bytes, zero fill, a 16-byte descriptor at
 payload offset `0x333fc`, a big-endian additive checksum at `0x3340c`, the
 `0x80` marker and 559 zero trailer bytes. The complete file is 210498 bytes

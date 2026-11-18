@@ -57,7 +57,7 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Generate a standalone container; never overwrites an existing output.
+    /// Generate a container; never overwrites an existing output.
     Pack {
         #[command(flatten)]
         source: Source,
@@ -89,7 +89,10 @@ struct Source {
     /// The unpacker ELF (`target/.../release/unpacker`).
     #[arg(long, requires = "firmware")]
     unpacker: Option<PathBuf>,
-    /// Send the upper region over USB; needs an unpacker built with `--features usb-install`.
+    /// Alternate unpacker ELF built with `--features usb-install`; used only if the release is too large.
+    #[arg(long, requires = "firmware", conflicts_with = "usb_install")]
+    usb_unpacker: Option<PathBuf>,
+    /// Force the USB format for testing; `--unpacker` must support USB install.
     #[arg(long, requires = "firmware")]
     usb_install: bool,
 }
@@ -319,11 +322,13 @@ type UsbSection = (Identity, Vec<u8>);
 
 /// A release's application image: the unpacker, its record filled in, then
 /// the upper and main streams. Returns it with the main firmware's checks.
-/// With `usb`: no upper stream, and the main stream ends at the top so no erased sector holds unread bytes.
+/// A USB install has no compressed upper stream, and the main stream ends at
+/// the top so no erased sector holds unread bytes.
 fn release(
     firmware: &[u8],
     unpacker: &[u8],
-    usb: bool,
+    usb_unpacker: Option<&Path>,
+    mut usb: bool,
 ) -> Result<(Vec<u8>, Application, Release, Option<UsbSection>)> {
     let (main, upper) = split(firmware).context("Splitting the firmware")?;
     let (mut main, upper) = (whole_words(main), whole_words(upper));
@@ -344,15 +349,35 @@ fn release(
         unpacker_upper.is_empty(),
         "The unpacker must not run code from the upper region"
     );
-    let unpacker_bytes = content.len();
     check_unpacker(&content)?;
+    let mut upper_packed = if usb { Vec::new() } else { deflate(&upper)? };
+    let main_packed = deflate(&main)?;
+    let standalone_bytes =
+        content.len().next_multiple_of(size_of::<u32>()) + upper_packed.len() + main_packed.len();
+    if !usb && standalone_bytes > APP_LIMIT {
+        let Some(path) = usb_unpacker else {
+            anyhow::bail!(
+                "The release exceeds the application space by {} bytes; supply --usb-unpacker",
+                standalone_bytes - APP_LIMIT
+            );
+        };
+        let elf = fs::read(path).context("Reading USB unpacker ELF")?;
+        let (candidate, candidate_upper) = split(&elf).context("Splitting the USB unpacker")?;
+        ensure!(
+            candidate_upper.is_empty(),
+            "The USB unpacker must not run code from the upper region"
+        );
+        check_unpacker(&candidate)?;
+        content = candidate;
+        upper_packed.clear();
+        usb = true;
+    }
+    let unpacker_bytes = content.len();
     let marker = words(&UNPACKER_MAGIC);
     ensure!(
         !usb || content.windows(marker.len()).any(|window| window == marker),
         "The unpacker was built without --features usb-install"
     );
-    let upper_packed = if usb { Vec::new() } else { deflate(&upper)? };
-    let main_packed = deflate(&main)?;
     let data = if usb {
         let start = APP_LIMIT
             .checked_sub(main_packed.len())
@@ -437,7 +462,7 @@ fn check_unpacker(unpacker: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// The file for `source`, with its report; `--usb-install` appends the USB section.
+/// The file for `source`, with its report and optional USB section.
 fn prepare(source: &Source) -> Result<(Vec<u8>, Report)> {
     let (content, application, release, section) = match source {
         Source { app: Some(app), .. } => {
@@ -461,8 +486,12 @@ fn prepare(source: &Source) -> Result<(Vec<u8>, Report)> {
         } => {
             let firmware = fs::read(firmware).context("Reading firmware ELF")?;
             let unpacker = fs::read(unpacker).context("Reading unpacker ELF")?;
-            let (content, application, release, section) =
-                release(&firmware, &unpacker, source.usb_install)?;
+            let (content, application, release, section) = release(
+                &firmware,
+                &unpacker,
+                source.usb_unpacker.as_deref(),
+                source.usb_install,
+            )?;
             (content, application, Some(release), section)
         }
         _ => anyhow::bail!("Pass --app, or --firmware with --unpacker"),

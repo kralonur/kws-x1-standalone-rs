@@ -1,15 +1,19 @@
 # USB install
 
-An opt-in way to install a release whose upper and main streams do not fit
-together in the 26 bootloader sectors. The bootloader writes the unpacker and
-the main stream. The unpacker then takes the upper region from the flasher
-over USB HID, and installs the main firmware as usual. It is one file and one
-flasher run, with no reconnect.
+The standard build and packaging workflow still emits the same standalone image
+if it fits. If the unpacker and both streams won't fit in the 26 bootloader
+sectors, the packer chooses a two-stage image. The bootloader writes the USB
+unpacker and the main stream. The unpacker then takes the upper region from the
+flasher over USB HID and installs the main firmware as usual. It is one file and
+one flasher run, with no manual reconnect.
 
-The normal release is unchanged: without the feature, the firmware, unpacker
-and release image are byte-identical to a build without this code.
+A two-stage image requires the matching project flasher; don't load it into a
+vendor tool or an older flasher. Tagged release publishing of two-stage images
+is blocked pending hardware recovery validation and a final USB identity.
 
-## Build and pack
+## Force a two-stage image for testing
+
+For normal builds and automatic selection, see [Package and audit offline](../README.md#package-and-audit-offline).
 
 ```sh
 rustup target add thumbv7em-none-eabihf
