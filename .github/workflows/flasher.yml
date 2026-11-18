@@ -42,6 +42,8 @@ jobs:
           cargo check --workspace --exclude firmware --locked
           cargo clippy --workspace --exclude firmware --all-targets --locked -- -D warnings
           cargo check -p firmware --target thumbv7em-none-eabihf --locked
+      - name: Test the flasher without USB hardware
+        run: cargo test -p flasher --locked
 
   package:
     needs: check

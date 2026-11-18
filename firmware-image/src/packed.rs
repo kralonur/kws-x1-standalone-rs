@@ -41,6 +41,8 @@ pub struct Packed {
 pub const PACKED_MAGIC: [u32; 2] = [0x554e_504b, 0x6a09_e667];
 /// An unfilled record field.
 pub const PACKED_UNSET: u32 = u32::MAX;
+/// `upper.packed` of a USB install image: the region arrives over USB.
+pub const UPPER_OVER_USB: u32 = 1 << 31;
 /// Inflated output is handed over in flash-sector chunks.
 pub const CHUNK_BYTES: usize = SECTOR_BYTES as usize;
 /// LZMA2 sliding dictionary size in bytes (64 KiB).

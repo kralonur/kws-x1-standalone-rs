@@ -30,6 +30,8 @@ cable-log = []
 # Read-only flash probe sections on the System page (bootloader, trailer,
 # upper sectors); never writes or erases.
 flash-probe = []
+# Unpacker only: take the upper region from the flasher over USB.
+usb-install = ["dep:usb-device"]
 
 [dependencies]
 cortex-m = { workspace = true, features = ["critical-section-single-core"] }
@@ -49,4 +51,5 @@ panic-halt.workspace = true
 qc-protocol.workspace = true
 single-wire-protocols.workspace = true
 u8g2-fonts.workspace = true
+usb-device = { workspace = true, optional = true }
 usbpd.workspace = true

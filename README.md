@@ -1861,19 +1861,24 @@ the `unpacker`. `firmware-pack` packs them into one release image: the unpacker,
 followed by the upper-flash code and the main firmware, both compressed
 with LZMA2. No baseline image, template file or download is required. `pack`
 refuses existing outputs rather than overwriting them; `audit` checks an exact
-hash-confirmed image against the same two builds. Both emit JSON reports to
-stdout and never access USB hardware.
+hash-confirmed image against the supplied builds. Both emit JSON reports to
+stdout and never access USB hardware. The build below also supplies the USB
+unpacker, which is used only when the standalone image won't fit.
 
 ```sh
+cargo fw
+cargo build --release -p firmware --bin unpacker --target thumbv7em-none-eabihf \
+  --target-dir target/usb --features usb-install --locked
 mkdir -p build
 ELF=target/thumbv7em-none-eabihf/release
+USB=target/usb/thumbv7em-none-eabihf/release/unpacker
 cargo run --release -p firmware-pack --locked -- pack \
-  --firmware "$ELF/firmware" --unpacker "$ELF/unpacker" \
+  --firmware "$ELF/firmware" --unpacker "$ELF/unpacker" --usb-unpacker "$USB" \
   --out build/firmware.X1C > build/package.json
 IMAGE_SHA256=$(sha256sum build/firmware.X1C | cut -d ' ' -f 1)
 cargo run --release -p firmware-pack --locked -- audit \
   --image build/firmware.X1C --confirm-sha256 "$IMAGE_SHA256" \
-  --firmware "$ELF/firmware" --unpacker "$ELF/unpacker" > build/audit.json
+  --firmware "$ELF/firmware" --unpacker "$ELF/unpacker" --usb-unpacker "$USB" > build/audit.json
 cargo run --release -p flasher --locked -- \
   --dry-run --image build/firmware.X1C --confirm-sha256 "$IMAGE_SHA256"
 ```
@@ -1887,7 +1892,28 @@ same unpacking to prove the main firmware never erases stream bytes it has
 yet to read. Its report's `unused_content_bytes` is the compressed room left
 in the release, and `release` breaks the sizes down per region.
 
-The container uses the layout implemented by `firmware-image::build_container`:
+If the standalone image won't fit, the packer appends the upper region for the
+flasher to send over USB after the bootloader step. The format is selected
+at packaging time; the [flashing command](#validate-query-and-flash) is the same.
+
+<details>
+<summary>Force a two-stage build for local testing</summary>
+
+Use the commands above, replacing `--unpacker "$ELF/unpacker" --usb-unpacker "$USB"`
+with `--unpacker "$USB" --usb-install` in both `pack` and `audit`. For hardware
+validation, configure a private test USB ID in [`firmware-image/src/link.rs`](firmware-image/src/link.rs),
+then rebuild the USB unpacker and flasher with the same ID. Do not redistribute
+these test builds.
+
+On one meter under Linux, a two-stage build with a private test ID completed
+in one flasher run and booted. A separate test paused after erasing the first
+application sector, before programming it. After a power cut at that point,
+the factory bootloader accepted a known-good standalone image, which booted
+into the Overview screen.
+
+</details>
+
+The standalone container uses the layout implemented by `firmware-image::build_container`:
 the two-byte prefix, application bytes, zero fill, a 16-byte descriptor at
 payload offset `0x333fc`, a big-endian additive checksum at `0x3340c`, the
 `0x80` marker and 559 zero trailer bytes. The complete file is 210498 bytes
@@ -1902,7 +1928,7 @@ verification on Linux. The flasher waits for flash programming to settle before
 verification and checks response packet checksums. Final verification has
 failed intermittently (code 4) after every batch was accepted, so the flasher
 then erases and writes the same image once more. If that also fails, stop and
-follow the [flashing error guidance](#what-the-flasher-checks-and-does).
+follow the [flashing error guidance](#recover-from-an-interrupted-update).
 An offline audit is not runtime or safety qualification; neither an audit nor
 a matching hash authorizes flashing.
 
@@ -1921,11 +1947,12 @@ It never opens USB hardware or flashes a device. Invalid applications, container
 or failed audits block publication. Generated release files live in the ignored
 `dist/` directory; it is build output, not source code.
 
-CI runs provide a `firmware` build artifact, including packaging/audit JSON
-reports for build diagnostics. Pushing an unused `firmware-v` tag publishes a
-public [GitHub Release](https://github.com/kralonur/kws-x1-standalone-rs/releases)
-with the prepared downloads automatically after all checks pass. For example,
-after committing and pushing the source:
+For standalone images, CI provides a `firmware` build artifact with the image
+and packaging/audit JSON reports. CI audits two-stage images but does not upload
+or release them until the final USB ID is validated and a compatible flasher
+has been released. Pushing an unused `firmware-v` tag publishes an eligible
+build as a [GitHub Release](https://github.com/kralonur/kws-x1-standalone-rs/releases)
+after all checks pass. For example, after committing and pushing the source:
 
 ```sh
 git tag firmware-v0.1.0
@@ -1958,8 +1985,10 @@ flasher tags do not trigger the firmware workflow.
 meter into the computer. The meter then starts in its bootloader, ready to be
 flashed, instead of the firmware.
 
-The Rust `flasher` is the project's flashing tool. It uses
-[HIDAPI](https://docs.rs/hidapi/) to communicate with the existing USB bootloader.
+Use the project's `flasher`. The same command handles standalone and two-stage
+`.X1C` images; there is no flag or manual reconnect for the second stage. A
+local two-stage build needs a compatible flasher, not an older version or the
+vendor tool.
 
 #### Download and prerequisites
 
@@ -1989,7 +2018,9 @@ You need:
   mode. Leave the output unloaded during the update.
 - On Linux, permission to access the HID device. If opening it is denied, use
   `sudo` for the device-access command or configure a hidraw udev permission rule
-  for USB ID `1105:000a`. An offline dry-run needs no USB permissions.
+  for bootloader USB ID `1105:000a`. For a local two-stage test, also allow the
+  installer's USB ID configured in the test build. An offline dry-run needs no
+  USB permissions.
 - On Windows, the built-in HID driver; do not replace it with a libusb driver.
 
 The downloaded binary needs **no Rust installation**, build tools or separate
@@ -2035,9 +2066,14 @@ and needs separate authorization; mode `0` means bootloader. It cannot be combin
 .\flasher.exe --image .\firmware.X1C --confirm-sha256 "<approved-sha256>"
 ```
 
-If multiple matching HID paths are found, use `--device "<HIDAPI-path>"` with one
-of the exact paths shown by the error. Paths are platform-dependent; the tool
-refuses an override that does not belong to the supported USB identity.
+The flasher identifies the image format and shows progress for each stage.
+Add `--verbose` (or `-v`) for image details and per-batch USB diagnostics.
+
+For a two-stage image, connect only one meter. The flasher stops before
+writing if it sees both a bootloader and a waiting installer. For a standalone
+image, if multiple matching HID paths are found, use `--device "<HIDAPI-path>"`
+with an exact path shown by the error. `--device` selects the starting
+bootloader, not the installer, and disables resuming a waiting installer.
 
 #### What the flasher checks and does
 
@@ -2051,26 +2087,19 @@ After verifying bootloader mode, it erases only the application envelope,
 sends 64-byte HID reports in checksum-acknowledged batches, requests final
 bootloader verification, and sends reboot **only after final acceptance**.
 A partial final report is zero-padded for transport without changing the image
-or its checksum. The bootloader and storage above the erase envelope are not
-written by this update sequence.
+or its checksum. The bootloader stage does not write outside the application
+envelope.
 
 If final bootloader verification returns code 4, the tool automatically makes
 one more full erase-and-write pass with the same approved image. Other
 transport or protocol errors stop immediately. It never restores another image.
 
-**First boot after flashing:** the backlight comes on for a few seconds with a
-blank screen while the release unpacks itself, then the meter restarts into
-the firmware. Keep it powered until then. If the backlight **blinks**, the
-image was damaged or flash could not be written: enter bootloader mode and
-flash the release again. If power is lost while it unpacks, it either resumes
-on the next power-up or stays dark; for a dark screen, flash the release
-again the same way. The bootloader itself is never written.
-
-**If the command exits with a write or verification error, stop and leave the
-device in bootloader mode.** The tool does not reboot after a failed update.
-Successful batch checksums alone are not a successful update. Investigation,
-a new flashing attempt or restoration needs separate approval of the exact
-image/hash.
+**Keep the meter powered until the measurement screen appears.** A blank,
+backlit screen is normal while the firmware is being installed. For a two-stage
+image, the flasher waits for the temporary installer after reboot and sends
+and verifies the remaining data. It skips this transfer if the data is already
+installed. **`Transfer complete` does not mean the update is finished:** the
+meter is still writing the main firmware and will reboot on its own.
 
 Linux flashing has passed final verification for both the generated project
 image and stock firmware; stock boot was confirmed. The x64 Windows GNU
@@ -2078,13 +2107,27 @@ cross-build has also flashed project and stock firmware, and the Windows MSVC
 and macOS release builds have flashed the project firmware.
 See [the safety contract](docs/SAFETY.md) for the full limits.
 
+#### Recover from an interrupted update
+
+- If a two-stage meter is waiting in the installer (blank, backlit screen and
+  visible to the PC as the installer), run the same command with the exact same
+  image and hash, without `--device`. If reconnecting, don't hold any buttons.
+  The flasher refuses to resume with a different build.
+- If the backlight blinks, the screen stays dark, or you no longer have the
+  exact image needed to resume, reconnect while holding **Back + OK** and flash
+  a known-good `.X1C`. The factory bootloader is not overwritten.
+- If the command exits with an error before the bootloader accepts the image,
+  leave the meter in bootloader mode. It has not been told to reboot. A retry
+  or restoration still requires approval of the exact image and hash.
+
 #### GitHub builds and releases
 
 `.github/workflows/flasher.yml` validates pull requests, pushes to `main` and
-`flasher-v*` tags using current stable Rust. It builds the flasher natively on Linux,
-Windows and both macOS architectures, runs `--help` without hardware access,
-and packages the executable, README and licenses. No tests or firmware images
-are included in this release workflow.
+`flasher-v*` tags using current stable Rust. Offline tests check image validation,
+installer selection and transfer. The workflow builds the flasher natively on
+Linux, Windows and both macOS architectures, runs `--help` without hardware
+access, and packages the executable, README and licenses. Firmware images are
+not included.
 
 Regular CI and manually dispatched runs provide downloadable build artifacts.
 Pushing a `flasher-v` version tag publishes [GitHub Release downloads](https://github.com/kralonur/kws-x1-standalone-rs/releases)

@@ -34,6 +34,16 @@ mod flash;
 
 use flash::{BLANK, SECTOR, program_blank, read};
 
+#[cfg(feature = "usb-install")]
+#[path = "../clock_setup.rs"]
+mod clock_setup;
+#[cfg(feature = "usb-install")]
+#[path = "../install_link.rs"]
+mod install_link;
+#[cfg(feature = "usb-install")]
+#[path = "../usb_bus.rs"]
+mod usb_bus;
+
 // Copy `.ramcode` (`unpacker.x`) from flash to RAM before cortex-m-rt
 // initializes RAM; it runs from flash, so it calls nothing.
 core::arch::global_asm!(
@@ -88,6 +98,7 @@ fn main() -> ! {
     let mut backlight =
         unsafe { OutputPin::new_high_drive(BACKLIGHT_PORT, BACKLIGHT_PIN, Level::High) };
     let mut window = [0; WINDOW_BYTES];
+    #[cfg(not(feature = "usb-install"))]
     if let Some(packed) = record()
         && intact(stream(&packed, Part::Upper), packed.upper, &mut window)
         && intact(stream(&packed, Part::Main), packed.main, &mut window)
@@ -95,6 +106,20 @@ fn main() -> ! {
         && install_main(&packed, &mut window)
     {
         cortex_m::peripheral::SCB::sys_reset();
+    }
+    #[cfg(feature = "usb-install")]
+    if let Some(packed) = record() {
+        let upper_ready = if usb::over_usb() {
+            intact(stream(&packed, Part::Main), packed.main, &mut window)
+                && usb::receive_upper(&packed, &mut window)
+        } else {
+            intact(stream(&packed, Part::Upper), packed.upper, &mut window)
+                && intact(stream(&packed, Part::Main), packed.main, &mut window)
+                && install_upper(&packed, &mut window)
+        };
+        if upper_ready && install_main(&packed, &mut window) {
+            cortex_m::peripheral::SCB::sys_reset();
+        }
     }
     loop {
         backlight.toggle();
@@ -108,6 +133,8 @@ fn record() -> Option<Packed> {
     // SAFETY: a read of an initialized static; volatile so the placeholder
     // values are never folded in place of what the packer wrote.
     let packed = unsafe { core::ptr::read_volatile(&PACKED) };
+    #[cfg(feature = "usb-install")]
+    let packed = usb::without_upper_stream(packed);
     let streams_end = (packed.data as usize)
         .checked_add(packed.upper.packed as usize)?
         .checked_add(packed.main.packed as usize)?;
@@ -210,4 +237,68 @@ fn erase(base: usize) -> bool {
     // keeps `base` clear of code it runs.
     let errors = cortex_m::interrupt::free(|_| unsafe { erase(base as u32) });
     errors == 0 && flash::blank(base)
+}
+
+/// USB install: the image has no upper stream and the flasher sends the region.
+#[cfg(feature = "usb-install")]
+mod usb {
+    use super::*;
+    use firmware_image::{
+        link::{self, Receiver, UNPACKER_MAGIC},
+        packed::UPPER_OVER_USB,
+        region_hash,
+    };
+
+    /// Lets `firmware-pack` tell this unpacker from one without USB install.
+    #[used]
+    static CAPABLE: [u32; 2] = UNPACKER_MAGIC;
+
+    pub fn over_usb() -> bool {
+        // SAFETY: as in `record`.
+        unsafe { core::ptr::read_volatile(&PACKED) }.upper.packed == UPPER_OVER_USB
+    }
+
+    /// The record with no upper stream bytes when the region comes over USB.
+    pub fn without_upper_stream(mut packed: Packed) -> Packed {
+        if packed.upper.packed == UPPER_OVER_USB {
+            packed.upper.packed = 0;
+        }
+        packed
+    }
+
+    /// The installed upper region is this image's.
+    fn installed(packed: &Packed) -> bool {
+        // SAFETY: `record` checked the length against the fixed upper region.
+        let region = unsafe {
+            core::slice::from_raw_parts(UPPER_BASE as *const u8, packed.upper.len as usize)
+        };
+        region_hash(region) == packed.upper.hash
+    }
+
+    /// Take the upper region from the flasher unless it is already installed. Not inlined, to free its stack.
+    #[inline(never)]
+    pub fn receive_upper(packed: &Packed, window: &mut [u8; WINDOW_BYTES]) -> bool {
+        let present = installed(packed);
+        // SAFETY: interrupts are off and nothing else owns the clocks or USB.
+        let clocks = unsafe {
+            install_link::sram_waits();
+            clock_setup::init()
+        };
+        let Ok(clocks) = clocks else {
+            return present;
+        };
+        let mut receiver = Receiver::new(link::identity(packed), present);
+        // SAFETY: as above.
+        unsafe {
+            install_link::serve(
+                clocks.hclk,
+                &mut receiver,
+                &mut window[..SECTOR],
+                |offset, bytes| {
+                    write_sector(UPPER_BASE as usize + offset, bytes, UPPER_BASE..UPPER_END)
+                },
+                || installed(packed),
+            )
+        }
+    }
 }

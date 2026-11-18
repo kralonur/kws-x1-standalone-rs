@@ -34,27 +34,44 @@ jobs:
           cargo clippy -p firmware --all-features --target thumbv7em-none-eabihf --locked -- -D warnings
           cargo clippy --workspace --exclude firmware --all-targets --locked -- -D warnings
           cargo test -p firmware-pack --test cli --locked
-      - name: Build normal release firmware without diagnostic features
-        run: cargo build --release -p firmware --target thumbv7em-none-eabihf --locked
+      - name: Build release firmware and both unpackers
+        run: |
+          cargo build --release -p firmware --target thumbv7em-none-eabihf --locked
+          cargo build --release -p firmware --bin unpacker --target thumbv7em-none-eabihf \
+            --target-dir target/usb --features usb-install --locked
       - name: Prepare and audit flashable firmware
         run: |
           mkdir -p dist
           elf=target/thumbv7em-none-eabihf/release
+          usb=target/usb/thumbv7em-none-eabihf/release/unpacker
           cargo run --release -p firmware-pack --locked -- pack \
-            --firmware "$elf/firmware" --unpacker "$elf/unpacker" \
+            --firmware "$elf/firmware" --unpacker "$elf/unpacker" --usb-unpacker "$usb" \
             --out dist/firmware.X1C \
             > dist/firmware-package.json
           image_sha256=$(sha256sum dist/firmware.X1C | cut -d ' ' -f 1)
           cargo run --release -p firmware-pack --locked -- audit \
             --image dist/firmware.X1C --confirm-sha256 "$image_sha256" \
-            --firmware "$elf/firmware" --unpacker "$elf/unpacker" \
+            --firmware "$elf/firmware" --unpacker "$elf/unpacker" --usb-unpacker "$usb" \
             > dist/firmware-audit.json
           cargo run --release -p flasher --locked -- \
             --dry-run --image dist/firmware.X1C --confirm-sha256 "$image_sha256"
           cp LICENSE-MIT LICENSE-APACHE dist/
           cd dist
           sha256sum firmware.X1C LICENSE-MIT LICENSE-APACHE > SHA256SUMS
+      - name: Check whether the image can be distributed
+        id: distribution
+        working-directory: dist
+        run: |
+          if jq -e '.release != null and (.release.usb_upper_bytes == null)' firmware-package.json >/dev/null; then
+            echo 'standalone=true' >> "$GITHUB_OUTPUT"
+          elif [[ "$GITHUB_REF" == refs/tags/firmware-v* ]]; then
+            echo 'Two-stage releases are blocked until the final USB ID is validated and the compatible flasher is released.' >&2
+            exit 1
+          else
+            echo 'Two-stage image audited locally; skipping artifact upload.'
+          fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: steps.distribution.outputs.standalone == 'true'
         with:
           name: firmware
           if-no-files-found: error
@@ -75,7 +92,10 @@ jobs:
           path: dist
       - name: Verify firmware downloads
         working-directory: dist
-        run: sha256sum --check SHA256SUMS
+        run: |
+          sha256sum --check SHA256SUMS
+          # Defense in depth: only standalone images may be distributed for now.
+          jq -e '.release != null and (.release.usb_upper_bytes == null)' firmware-package.json >/dev/null
       - name: Publish firmware release
         working-directory: dist
         env:
