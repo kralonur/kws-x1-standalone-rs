@@ -1,5 +1,6 @@
 //! USB install: send the upper region to the unpacker over USB HID.
 
+use crate::report_progress;
 use anyhow::{Context, Result, bail, ensure};
 use firmware_image::{
     SECTOR_BYTES,
@@ -58,7 +59,16 @@ pub enum Outcome {
 }
 
 /// The waiting installer to resume; `--device` always starts from the bootloader.
-pub fn resume(installers: &[String], requested: Option<&str>) -> Result<Option<String>> {
+pub fn resume(
+    installers: &[String],
+    bootloader_present: bool,
+    requested: Option<&str>,
+) -> Result<Option<String>> {
+    ensure!(
+        !bootloader_present || installers.is_empty(),
+        "Found both a factory bootloader and a waiting USB installer. \
+         Connect only the meter you want to update"
+    );
     match (requested, installers) {
         (Some(_), _) | (None, []) => Ok(None),
         (None, [only]) => Ok(Some(only.clone())),
@@ -105,6 +115,7 @@ pub fn install(port: &impl Port, part: &Part) -> Result<Outcome> {
         return Ok(Outcome::AlreadyInstalled);
     }
     let upper = part.upper.as_slice();
+    tracing::info!("  Sending {} bytes of remaining firmware...", upper.len());
     let mut offset = 0;
     while offset < upper.len() {
         let end = (offset + SECTOR).min(upper.len());
@@ -118,11 +129,9 @@ pub fn install(port: &impl Port, part: &Part) -> Result<Outcome> {
             Reply::Ack { status, next } => Some((status, next)),
             Reply::Info { .. } => None,
         })?;
-        match status {
-            Status::Next if next as usize == end && end < upper.len() => {}
-            Status::Done if next as usize == end && end == upper.len() => {
-                return Ok(Outcome::Sent);
-            }
+        let complete = match status {
+            Status::Next if next as usize == end && end < upper.len() => false,
+            Status::Done if next as usize == end && end == upper.len() => true,
             Status::WriteFailed => bail!(
                 "The meter could not program its flash at upper offset {offset:#x}; \
                  run the same command again"
@@ -135,12 +144,16 @@ pub fn install(port: &impl Port, part: &Part) -> Result<Outcome> {
                 "Unexpected installer reply {status:?} at upper offset {offset:#x}; \
                  run the same command again"
             ),
-        }
-        tracing::info!(
+        };
+        tracing::debug!(
             bytes = end,
             total = upper.len(),
             "Upper region sector written"
         );
+        report_progress("USB transfer", offset, end, upper.len());
+        if complete {
+            return Ok(Outcome::Sent);
+        }
         offset = end;
     }
     bail!("The upper region is empty")
@@ -167,13 +180,14 @@ pub fn open(api: &HidApi, path: &str) -> Result<HidDevice> {
         .device_list()
         .find(|device| device.path().to_string_lossy() == path)
         .context("The installer disconnected")?;
-    api.open_path(device.path())
-        .context("Opening the installer; on Linux check hidraw permissions for 16c0:05df")
+    api.open_path(device.path()).with_context(|| {
+        format!("Opening USB installer {VID:04x}:{PID:04x}; on Linux check hidraw permissions")
+    })
 }
 
 /// Wait for the installer to enumerate, then send it the region.
 pub fn run(api: &mut HidApi, part: &Part) -> Result<Outcome> {
-    tracing::info!("Waiting for the meter's installer; keep the cable connected");
+    tracing::info!("  Waiting for the meter's installer. Keep the cable connected.");
     let deadline = Instant::now() + APPEAR_TIMEOUT;
     let mut last_error = None;
     while Instant::now() < deadline {
@@ -193,9 +207,9 @@ pub fn run(api: &mut HidApi, part: &Part) -> Result<Outcome> {
     match last_error {
         Some(error) => Err(error),
         None => bail!(
-            "The installer did not appear within {:.0}s. If the meter shows the \
-             measurement screen, the update is complete. Otherwise keep it connected \
-             and run the same command again",
+            "No matching USB installer ({VID:04x}:{PID:04x}) appeared within {:.0}s. \
+             If the meter shows the measurement screen, the update is complete. \
+             Otherwise keep it connected and retry with a compatible flasher",
             APPEAR_TIMEOUT.as_secs_f32()
         ),
     }
@@ -440,9 +454,20 @@ mod tests {
                 .map(|name| name.to_string())
                 .collect::<Vec<_>>()
         };
-        assert_eq!(resume(&paths(&[]), None).unwrap(), None);
-        assert_eq!(resume(&paths(&["a"]), None).unwrap(), Some("a".into()));
-        assert!(resume(&paths(&["a", "b"]), None).is_err());
-        assert_eq!(resume(&paths(&["a"]), Some("x")).unwrap(), None);
+        assert_eq!(resume(&paths(&[]), true, None).unwrap(), None);
+        assert_eq!(
+            resume(&paths(&["a"]), false, None).unwrap(),
+            Some("a".into())
+        );
+        assert!(resume(&paths(&["a", "b"]), false, None).is_err());
+        assert_eq!(resume(&paths(&["a"]), false, Some("x")).unwrap(), None);
+    }
+
+    #[test]
+    fn refuses_to_choose_between_bootloader_and_installer() {
+        // The wrong installer could belong to another meter with the same image.
+        let installers = ["installer path".to_owned()];
+        assert!(resume(&installers, true, None).is_err());
+        assert!(resume(&installers, true, Some("bootloader path")).is_err());
     }
 }

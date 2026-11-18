@@ -1,4 +1,7 @@
-use crate::image::{CHUNK_BYTES, Plan};
+use crate::{
+    image::{CHUNK_BYTES, Plan},
+    report_progress,
+};
 use anyhow::{Result, bail, ensure};
 use firmware_image::CONTAINER_PREFIX;
 use std::{
@@ -107,7 +110,7 @@ fn response(
         if codes.contains(&code) {
             return Ok(report);
         }
-        tracing::info!(code, "{what}: ignoring informational response");
+        tracing::debug!(code, "{what}: ignoring informational response");
     }
     bail!("{what}: no response within {:.1}s", timeout.as_secs_f32())
 }
@@ -138,12 +141,13 @@ pub fn flash(plan: &Plan, device: &impl Transport) -> Result<Finish> {
         query_info(device)? == BOOTLOADER,
         "Device is not in Bootloader mode"
     );
-    tracing::info!(sectors = plan.sectors, "Erasing application sectors");
+    tracing::info!("  Erasing application flash...");
     let arguments = [plan.sectors, CONTAINER_PREFIX[0], CONTAINER_PREFIX[1]];
     device.write(&packet(ERASE, &arguments)?)?;
     response(device, ERASE_TIMEOUT, &[SUCCESS], "erase")?;
     thread::sleep(ERASE_DELAY);
-    for (index, batch) in plan.payload.chunks(CHUNK_BYTES * BATCH_CHUNKS).enumerate() {
+    let batch_bytes = CHUNK_BYTES * BATCH_CHUNKS;
+    for (index, batch) in plan.payload.chunks(batch_bytes).enumerate() {
         let number = index + 1;
         device.write(&packet(
             ANNOUNCE,
@@ -164,8 +168,16 @@ pub fn flash(plan: &Plan, device: &impl Transport) -> Result<Finish> {
             &[CHECKSUM_ACCEPTED],
             "batch checksum",
         )?;
-        tracing::info!(batch = number, "Batch written and checksum accepted");
+        tracing::debug!(batch = number, "Batch written and checksum accepted");
+        let previous = index * batch_bytes;
+        report_progress(
+            "Writing firmware",
+            previous,
+            previous + batch.len(),
+            plan.payload.len(),
+        );
     }
+    tracing::info!("  Verifying bootloader write...");
     thread::sleep(FINISH_DELAY);
     device.write(&packet(FINISH, &[])?)?;
     let report = response(device, FINISH_TIMEOUT, &[SUCCESS, VERIFY_FAILED], "finish")?;
@@ -173,6 +185,6 @@ pub fn flash(plan: &Plan, device: &impl Transport) -> Result<Finish> {
         return Ok(Finish::VerifyFailed);
     }
     device.write(&packet(REBOOT, &[])?)?;
-    tracing::info!("Bootloader accepted the image; reboot command sent");
+    tracing::info!("  Bootloader verified the image. Reboot sent.");
     Ok(Finish::Accepted)
 }

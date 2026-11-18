@@ -2066,10 +2066,14 @@ and needs separate authorization; mode `0` means bootloader. It cannot be combin
 .\flasher.exe --image .\firmware.X1C --confirm-sha256 "<approved-sha256>"
 ```
 
-For a two-stage image, connect only one meter. For a standalone image, if
-multiple matching HID paths are found, use `--device "<HIDAPI-path>"` with an
-exact path shown by the error. `--device` selects the starting bootloader,
-not the installer, and disables resuming a waiting installer.
+The flasher identifies the image format and shows progress for each stage.
+Add `--verbose` (or `-v`) for image details and per-batch USB diagnostics.
+
+For a two-stage image, connect only one meter. The flasher stops before
+writing if it sees both a bootloader and a waiting installer. For a standalone
+image, if multiple matching HID paths are found, use `--device "<HIDAPI-path>"`
+with an exact path shown by the error. `--device` selects the starting
+bootloader, not the installer, and disables resuming a waiting installer.
 
 #### What the flasher checks and does
 
@@ -2119,10 +2123,11 @@ See [the safety contract](docs/SAFETY.md) for the full limits.
 #### GitHub builds and releases
 
 `.github/workflows/flasher.yml` validates pull requests, pushes to `main` and
-`flasher-v*` tags using current stable Rust. It builds the flasher natively on Linux,
-Windows and both macOS architectures, runs `--help` without hardware access,
-and packages the executable, README and licenses. No tests or firmware images
-are included in this release workflow.
+`flasher-v*` tags using current stable Rust. Offline tests check image validation,
+installer selection and transfer. The workflow builds the flasher natively on
+Linux, Windows and both macOS architectures, runs `--help` without hardware
+access, and packages the executable, README and licenses. Firmware images are
+not included.
 
 Regular CI and manually dispatched runs provide downloadable build artifacts.
 Pushing a `flasher-v` version tag publishes [GitHub Release downloads](https://github.com/kralonur/kws-x1-standalone-rs/releases)
