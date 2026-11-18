@@ -51,5 +51,5 @@ panic-halt.workspace = true
 qc-protocol.workspace = true
 single-wire-protocols.workspace = true
 u8g2-fonts.workspace = true
-usbpd.workspace = true
 usb-device = { workspace = true, optional = true }
+usbpd.workspace = true
