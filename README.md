@@ -1894,8 +1894,8 @@ in the release, and `release` breaks the sizes down per region.
 
 If the standalone image won't fit, the packer appends the upper region for the
 flasher to send over USB after the bootloader step. The flashing command is the
-same, but a two-stage image requires a flasher that supports it. Tagged releases
-cannot publish this format yet; see [docs/USB-INSTALL.md](docs/USB-INSTALL.md).
+same, but a two-stage image requires a flasher that supports it. CI doesn't
+upload or publish this format yet; see [docs/USB-INSTALL.md](docs/USB-INSTALL.md).
 
 The standalone container uses the layout implemented by `firmware-image::build_container`:
 the two-byte prefix, application bytes, zero fill, a 16-byte descriptor at

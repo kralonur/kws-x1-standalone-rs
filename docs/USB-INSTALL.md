@@ -8,8 +8,20 @@ flasher over USB HID and installs the main firmware as usual. It is one file and
 one flasher run, with no manual reconnect.
 
 A two-stage image requires the matching project flasher; don't load it into a
-vendor tool or an older flasher. Tagged release publishing of two-stage images
-is blocked pending hardware recovery validation and a final USB identity.
+vendor tool or an older flasher. CI can build and audit two-stage images, but
+it doesn't upload them as artifacts or publish them as releases. Keep them
+local until the final USB identity is verified and the compatible flasher is
+released.
+
+## Hardware validation
+
+On one meter under Linux, a build with a private test USB ID completed both
+stages in one flasher run and booted into the firmware. In a separate local
+build, the installer paused after erasing the first application sector and
+before programming it. After cutting power, Back + OK still entered the
+factory bootloader. A known-good standalone image flashed and booted into the
+Overview screen. This verifies recovery at that interruption point, not at
+every point in the update.
 
 ## Force a two-stage image for testing
 
