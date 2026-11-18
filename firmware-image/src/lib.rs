@@ -14,6 +14,7 @@
 
 #![no_std]
 
+pub mod link;
 pub mod packed;
 
 /// Observed 16-byte footer descriptor immediately before the checksum.
