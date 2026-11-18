@@ -1,4 +1,5 @@
 mod image;
+mod link;
 mod protocol;
 
 use anyhow::{Context, Result, bail, ensure};
@@ -33,8 +34,7 @@ struct Args {
     device: Option<String>,
 }
 
-fn open_device(requested: Option<&str>) -> Result<(HidDevice, String)> {
-    let api = HidApi::new().context("Initializing HID access")?;
+fn open_device(api: &HidApi, requested: Option<&str>) -> Result<(HidDevice, String)> {
     let matches: Vec<_> = api
         .device_list()
         .filter(|device| device.vendor_id() == TARGET_VID && device.product_id() == TARGET_PID)
@@ -68,7 +68,8 @@ fn open_device(requested: Option<&str>) -> Result<(HidDevice, String)> {
 
 fn run(args: Args) -> Result<()> {
     if args.info {
-        let (device, path) = open_device(args.device.as_deref())?;
+        let api = HidApi::new().context("Initializing HID access")?;
+        let (device, path) = open_device(&api, args.device.as_deref())?;
         let mode = protocol::query_info(&device)?;
         tracing::info!(device = path, mode, "Device mode (0 = bootloader)");
         return Ok(());
@@ -82,14 +83,36 @@ fn run(args: Args) -> Result<()> {
     tracing::info!(image = %image.display(), sha256 = plan.digest, payload_bytes = plan.payload.len(),
         sectors = plan.sectors, erase_start = APP_BASE, erase_end = end,
         "Validated image; bootloader and bytes above the application erase envelope remain protected");
+    if let Some(usb) = &plan.usb {
+        tracing::info!(
+            upper_bytes = usb.upper.len(),
+            "USB install file: the upper region is sent over USB after the bootloader step"
+        );
+    }
     if args.dry_run {
         tracing::info!("Dry run: no device was discovered or opened and nothing was written");
         return Ok(());
     }
-    let (device, _) = open_device(args.device.as_deref())?;
+    let mut api = HidApi::new().context("Initializing HID access")?;
+    if let Some(usb) = &plan.usb
+        && let Some(path) = link::resume(&link::installers(&mut api)?, args.device.as_deref())?
+    {
+        tracing::info!(
+            device = path,
+            "The meter is waiting in the installer; resuming"
+        );
+        return finish(link::install(&link::open(&api, &path)?, usb)?);
+    }
+    let (device, _) = open_device(&api, args.device.as_deref())?;
     for attempt in 1..=FLASH_ATTEMPTS {
         match protocol::flash(&plan, &device)? {
-            protocol::Finish::Accepted => return Ok(()),
+            protocol::Finish::Accepted => {
+                let Some(usb) = &plan.usb else {
+                    return Ok(());
+                };
+                drop(device);
+                return finish(link::run(&mut api, usb)?);
+            }
             protocol::Finish::VerifyFailed if attempt < FLASH_ATTEMPTS => {
                 tracing::warn!(
                     attempt,
@@ -103,6 +126,24 @@ fn run(args: Args) -> Result<()> {
         "Bootloader verification failed (code 4) on every attempt; the bootloader is intact. \
          Unplug the meter, hold Back+OK while reconnecting and run the same command again"
     )
+}
+
+fn finish(outcome: link::Outcome) -> Result<()> {
+    match outcome {
+        link::Outcome::Sent => {
+            tracing::info!("Transfer complete: the meter verified the upper region")
+        }
+        link::Outcome::AlreadyInstalled => {
+            tracing::info!("Transfer skipped: the meter already holds this build's upper region")
+        }
+    }
+    tracing::warn!(
+        "Installation is not complete yet and this tool cannot observe the rest: \
+         the meter is now writing the main firmware. Keep it powered until the \
+         measurement screen appears. A blinking backlight means it failed: \
+         enter bootloader mode and flash again"
+    );
+    Ok(())
 }
 
 fn main() -> std::process::ExitCode {

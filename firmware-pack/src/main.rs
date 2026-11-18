@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 use firmware_image::{
     self as image, APP_BASE, APP_LIMIT, CONTAINER_PREFIX, ERASE_CEILING, EXTENDED_PAYLOAD_LEN,
     SECTOR_BYTES, UPPER_BASE, UPPER_END, UPPER_ID_MAGIC, UPPER_ID_UNSET,
+    link::{self, Identity, UNPACKER_MAGIC},
     packed::{
         DICT_BYTES, PACKED_MAGIC, PACKED_UNSET, Packed, Stream, WINDOW_BYTES, filter_thumb_bl,
         inflate_sectors, main_erase_margin,
@@ -88,6 +89,9 @@ struct Source {
     /// The unpacker ELF (`target/.../release/unpacker`).
     #[arg(long, requires = "firmware")]
     unpacker: Option<PathBuf>,
+    /// Send the upper region over USB; needs an unpacker built with `--features usb-install`.
+    #[arg(long, requires = "firmware")]
+    usb_install: bool,
 }
 
 #[derive(Serialize)]
@@ -110,6 +114,9 @@ struct Release {
     /// The least distance between a main firmware sector the unpacker
     /// erases and the stream bytes it has yet to read.
     erase_margin_bytes: usize,
+    /// Upper region bytes after the container, sent over USB (`--usb-install`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usb_upper_bytes: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -307,9 +314,17 @@ fn whole_words(mut bytes: Vec<u8>) -> Vec<u8> {
     bytes
 }
 
+/// A USB install file's section: the record words and the raw upper region.
+type UsbSection = (Identity, Vec<u8>);
+
 /// A release's application image: the unpacker, its record filled in, then
 /// the upper and main streams. Returns it with the main firmware's checks.
-fn release(firmware: &[u8], unpacker: &[u8]) -> Result<(Vec<u8>, Application, Release)> {
+/// With `usb`: no upper stream, and the main stream ends at the top so no erased sector holds unread bytes.
+fn release(
+    firmware: &[u8],
+    unpacker: &[u8],
+    usb: bool,
+) -> Result<(Vec<u8>, Application, Release, Option<UsbSection>)> {
     let (main, upper) = split(firmware).context("Splitting the firmware")?;
     let (mut main, upper) = (whole_words(main), whole_words(upper));
     ensure!(!upper.is_empty(), "The firmware has no upper region");
@@ -331,22 +346,46 @@ fn release(firmware: &[u8], unpacker: &[u8]) -> Result<(Vec<u8>, Application, Re
     );
     let unpacker_bytes = content.len();
     check_unpacker(&content)?;
-    let (upper_packed, main_packed) = (deflate(&upper)?, deflate(&main)?);
+    let marker = words(&UNPACKER_MAGIC);
+    ensure!(
+        !usb || content.windows(marker.len()).any(|window| window == marker),
+        "The unpacker was built without --features usb-install"
+    );
+    let upper_packed = if usb { Vec::new() } else { deflate(&upper)? };
+    let main_packed = deflate(&main)?;
+    let data = if usb {
+        let start = APP_LIMIT
+            .checked_sub(main_packed.len())
+            .context("The main stream exceeds the application space")?
+            & !3;
+        ensure!(
+            start >= unpacker_bytes,
+            "The release exceeds the application space by {} bytes",
+            unpacker_bytes - start
+        );
+        start
+    } else {
+        unpacker_bytes.next_multiple_of(size_of::<u32>())
+    };
     let record = Packed {
         magic: PACKED_MAGIC,
-        data: APP_BASE + u32::try_from(unpacker_bytes.next_multiple_of(size_of::<u32>()))?,
+        data: APP_BASE + u32::try_from(data)?,
         upper: stream(&upper, &upper_packed)?,
         main: stream(&main, &main_packed)?,
     };
-    let fields = [
-        record.data,
-        record.upper.len,
-        record.upper.hash,
-        record.upper.packed,
-        record.main.len,
-        record.main.hash,
-        record.main.packed,
-    ];
+    let fields = if usb {
+        link::identity(&record)
+    } else {
+        [
+            record.data,
+            record.upper.len,
+            record.upper.hash,
+            record.upper.packed,
+            record.main.len,
+            record.main.hash,
+            record.main.packed,
+        ]
+    };
     ensure!(
         fill_record(&mut content, &PACKED_MAGIC, PACKED_UNSET, &fields)?,
         "The unpacker has no record"
@@ -359,7 +398,9 @@ fn release(firmware: &[u8], unpacker: &[u8]) -> Result<(Vec<u8>, Application, Re
         "The release exceeds the application space by {} bytes",
         content.len() - APP_LIMIT
     );
-    rehearse(&upper_packed, &upper, None)?;
+    if !usb {
+        rehearse(&upper_packed, &upper, None)?;
+    }
     let erase_margin_bytes = rehearse(&main_packed, &main, Some(&record))?;
     let release = Release {
         unpacker_bytes,
@@ -369,8 +410,10 @@ fn release(firmware: &[u8], unpacker: &[u8]) -> Result<(Vec<u8>, Application, Re
         upper_packed_bytes: upper_packed.len(),
         upper_unused_bytes: (UPPER_END - UPPER_BASE) as usize - upper.len(),
         erase_margin_bytes,
+        usb_upper_bytes: usb.then_some(upper.len()),
     };
-    Ok((content, application, release))
+    let section = usb.then_some((fields, upper));
+    Ok((content, application, release, section))
 }
 
 /// The unpacker starts on its own stack in its RAM, at a Thumb reset
@@ -394,9 +437,9 @@ fn check_unpacker(unpacker: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// The container for `source`, with its report.
+/// The file for `source`, with its report; `--usb-install` appends the USB section.
 fn prepare(source: &Source) -> Result<(Vec<u8>, Report)> {
-    let (content, application, release) = match source {
+    let (content, application, release, section) = match source {
         Source { app: Some(app), .. } => {
             let mut app = fs::read(app).context("Reading application")?;
             ensure!(
@@ -409,7 +452,7 @@ fn prepare(source: &Source) -> Result<(Vec<u8>, Report)> {
                 "This build runs code from the upper region; pack its ELF with --firmware and --unpacker"
             );
             let application = check_application(&app)?;
-            (app, application, None)
+            (app, application, None, None)
         }
         Source {
             firmware: Some(firmware),
@@ -418,8 +461,9 @@ fn prepare(source: &Source) -> Result<(Vec<u8>, Report)> {
         } => {
             let firmware = fs::read(firmware).context("Reading firmware ELF")?;
             let unpacker = fs::read(unpacker).context("Reading unpacker ELF")?;
-            let (content, application, release) = release(&firmware, &unpacker)?;
-            (content, application, Some(release))
+            let (content, application, release, section) =
+                release(&firmware, &unpacker, source.usb_install)?;
+            (content, application, Some(release), section)
         }
         _ => anyhow::bail!("Pass --app, or --firmware with --unpacker"),
     };
@@ -434,6 +478,15 @@ fn prepare(source: &Source) -> Result<(Vec<u8>, Report)> {
         .map_err(|error| anyhow::anyhow!("Building container: {error:?}"))?;
     image::verify_container(&container)
         .map_err(|error| anyhow::anyhow!("Invalid generated container: {error:?}"))?;
+    if let Some((identity, upper)) = section {
+        container.extend_from_slice(&link::section_header(&identity));
+        container.extend_from_slice(&upper);
+        ensure!(
+            link::split(&container)
+                .is_ok_and(|(_, found)| found.is_some_and(|found| found.upper == upper)),
+            "Invalid generated USB install section"
+        );
+    }
     let report = Report {
         sha256: digest(&container),
         payload_bytes: EXTENDED_PAYLOAD_LEN,
@@ -484,7 +537,15 @@ fn run(args: Args) -> Result<()> {
                 "Image SHA-256 is {actual}, not the confirmed {confirm_sha256}"
             );
             let (expected, mut report) = prepare(&source)?;
-            image::verify_container(&candidate)
+            let (container, _) = link::split(&candidate).map_err(|error| match error {
+                link::SectionError::Missing => anyhow::anyhow!(
+                    "USB install image without its appended upper region; it cannot complete"
+                ),
+                link::SectionError::Invalid => {
+                    anyhow::anyhow!("Invalid USB install section after the container")
+                }
+            })?;
+            image::verify_container(container)
                 .map_err(|error| anyhow::anyhow!("Invalid container: {error:?}"))?;
             ensure!(
                 candidate == expected,
