@@ -1887,6 +1887,9 @@ same unpacking to prove the main firmware never erases stream bytes it has
 yet to read. Its report's `unused_content_bytes` is the compressed room left
 in the release, and `release` breaks the sizes down per region.
 
+An opt-in build sends the upper flash over USB after the bootloader step
+instead, leaving room for larger releases: see [docs/USB-INSTALL.md](docs/USB-INSTALL.md).
+
 The container uses the layout implemented by `firmware-image::build_container`:
 the two-byte prefix, application bytes, zero fill, a 16-byte descriptor at
 payload offset `0x333fc`, a big-endian additive checksum at `0x3340c`, the
