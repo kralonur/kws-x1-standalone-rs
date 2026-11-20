@@ -1965,12 +1965,13 @@ USB port at 5 V. The logger mounts as a read-only FAT12 drive:
   are omitted.
 - `STATUS.TXT` shows storage use; `STORAGE.BIN` is the raw journal area.
 
-When full (or after 32 sessions), copy the files off first. There is no clear
-chord or automatic erase. To reuse the space, have the six 8 KiB sectors at
-`[0x62000, 0x6e000)` restored to blank with a service programmer **only after
-verifying the range contains no other data or code**. Unknown sectors are not
-reclaimed. Export before installing non-logger firmware, which can use part
-of this range for code.
+When full (or after 32 sessions), copy the files off first. To clear the logs,
+use the same disconnected-output, OFF/PASS, PC 5 V setup, but hold
+**Left + Right + Back** at boot. At the erase prompt, release all buttons,
+then hold **OK** alone for two seconds. Back or any other button cancels.
+Only recognized charging log sectors are erased; unknown data is kept and can
+still limit capacity. Unplug to restart. Export before installing non-logger
+firmware, which can use part of this range for code.
 
 ### Firmware builds and release downloads
 
