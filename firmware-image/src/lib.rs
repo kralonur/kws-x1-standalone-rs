@@ -50,6 +50,11 @@ pub const MARKER: u8 = 0x80;
 /// Matches `UPPER` in `firmware/memory.x`.
 pub const UPPER_BASE: u32 = ERASE_CEILING;
 pub const UPPER_END: u32 = 0x6c000;
+/// Sector-aligned upper code limit for logger images; the journal starts here.
+pub const LOGGER_UPPER_END: u32 = 0x62000;
+const _: () = assert!(LOGGER_UPPER_END.is_multiple_of(SECTOR_BYTES));
+/// Absolute ELF symbol identifying a logger firmware or guarded unpacker.
+pub const LOGGER_ELF_MARKER: &str = "__logger_image";
 /// Length and hash of an upper region's bytes, as little-endian words.
 #[repr(C)]
 #[derive(Clone, Copy)]

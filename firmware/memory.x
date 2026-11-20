@@ -55,5 +55,8 @@ SECTIONS
     *(.rodata.*_5usbpd* .rodata.*_12usbpd_traits* .rodata.*_11pd_protocol* .rodata.*_10fusb302_pd* .rodata.*_8firmware7pd_task* .rodata.*_8microfft* .rodata.*_11qc_protocol* .rodata.*_21single_wire_protocols*);
     . = ALIGN(4);
     __eupper = .;
+    /* Logger builds reserve the erase sectors starting at LOGGER_UPPER_END. */
+    ASSERT(!DEFINED(__logger_image) || __eupper <= 0x62000,
+           "upper region overlaps charging log sectors");
   } > UPPER
 } INSERT BEFORE .text;

@@ -43,6 +43,8 @@ mod install_link;
 #[cfg(feature = "usb-install")]
 #[path = "../usb_bus.rs"]
 mod usb_bus;
+#[cfg(feature = "usb-install")]
+const USB_EP1_BULK: bool = false;
 
 // Copy `.ramcode` (`unpacker.x`) from flash to RAM before cortex-m-rt
 // initializes RAM; it runs from flash, so it calls nothing.
@@ -142,11 +144,18 @@ fn record() -> Option<Packed> {
         && packed.data >= APP_BASE
         && streams_end <= APP_BASE as usize + APP_LIMIT
         && packed.upper.len.is_multiple_of(4)
-        && packed.upper.len <= UPPER_END - UPPER_BASE
+        && packed.upper.len <= INSTALL_UPPER_END - UPPER_BASE
         && packed.main.len.is_multiple_of(4)
         && packed.main.len as usize <= APP_LIMIT;
     fits.then_some(packed)
 }
+
+/// Last permitted upper-sector boundary for this unpacker build.
+const INSTALL_UPPER_END: u32 = if cfg!(feature = "logger") {
+    firmware_image::LOGGER_UPPER_END
+} else {
+    UPPER_END
+};
 
 enum Part {
     Upper,
@@ -180,7 +189,7 @@ fn install_upper(packed: &Packed, window: &mut [u8; WINDOW_BYTES]) -> bool {
         write_sector(
             UPPER_BASE as usize + chunk.offset,
             chunk.bytes,
-            UPPER_BASE..UPPER_END,
+            UPPER_BASE..INSTALL_UPPER_END,
         )
     })
     .is_ok()
@@ -295,7 +304,11 @@ mod usb {
                 &mut receiver,
                 &mut window[..SECTOR],
                 |offset, bytes| {
-                    write_sector(UPPER_BASE as usize + offset, bytes, UPPER_BASE..UPPER_END)
+                    write_sector(
+                        UPPER_BASE as usize + offset,
+                        bytes,
+                        UPPER_BASE..INSTALL_UPPER_END,
+                    )
                 },
                 || installed(packed),
             )

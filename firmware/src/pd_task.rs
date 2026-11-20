@@ -258,6 +258,8 @@ async fn sniff(observation: &mut pd::Observation, released: pd::Snapshot) {
                         changed = true;
                     }
                     if let pd_service::Outcome::Packet(packet) = outcome {
+                        #[cfg(feature = "logger")]
+                        crate::logger::pd_packet(packet.bytes());
                         view.record(&packet.frame());
                         changed = true;
                     }
@@ -274,6 +276,8 @@ async fn sniff(observation: &mut pd::Observation, released: pd::Snapshot) {
             publish_observation(*observation);
         }
     }
+    #[cfg(feature = "logger")]
+    crate::logger::pd_stopped();
     observation.sniff = Some(view);
     publish_observation(*observation);
 }

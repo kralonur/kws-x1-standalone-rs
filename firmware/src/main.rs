@@ -19,6 +19,15 @@ mod flash_probe;
 mod ina226;
 mod line_adc;
 mod lis3dh;
+#[cfg(feature = "logger")]
+mod logger;
+#[cfg(feature = "logger")]
+mod usb_bus;
+#[cfg(feature = "logger")]
+mod usb_export;
+// The application presents MSC; the unpacker uses the same controller for HID.
+#[cfg(feature = "logger")]
+const USB_EP1_BULK: bool = true;
 #[path = "panel.rs"]
 mod panel;
 mod pd;
@@ -803,6 +812,8 @@ async fn button_task(
     let mut restart_pending = false;
     let mut previous = Instant::now();
     let mut gap = WindowPeak::new(&BUTTON_GAP_MS);
+    #[cfg(feature = "logger")]
+    let mut logger_hold = 0u8;
     loop {
         let now = Instant::now();
         gap.add(now, now.duration_since(previous).as_millis() as u32);
@@ -813,6 +824,27 @@ async fn button_task(
         let mut raw = inputs.iter().enumerate().fold(0u8, |mask, (index, pin)| {
             mask | (u8::from(pin.is_low()) << index)
         });
+        #[cfg(feature = "logger")]
+        {
+            if raw == logger::CHORD {
+                if logger_hold < logger::HOLD_POLLS {
+                    logger_hold += 1;
+                    if logger_hold == logger::HOLD_POLLS {
+                        logger::toggle();
+                    }
+                }
+            } else if logger_hold != 0 {
+                // Do not restart the hold until both arrows have been released.
+                logger_hold = u8::MAX;
+            }
+            if logger_hold != 0 {
+                navigation.consume_arrows();
+                if raw & logger::CHORD == 0 {
+                    logger_hold = 0;
+                }
+                raw &= !logger::CHORD;
+            }
+        }
         // The arrows follow the screen: turned over, the viewer's left button
         // is the Right one.
         if screen_orientation(rotation, sensed_rotation) == Orientation::Inverted {
@@ -1121,6 +1153,8 @@ async fn meter_task(
     let mut last_pulse = None;
     let detail_sender = DETAIL_VIEW.sender();
     let mut frame_time = WindowPeak::new(&FRAME_MS);
+    #[cfg(feature = "logger")]
+    let mut journal = logger::Writer::new();
 
     // Without this build's upper region the pages would call the PD stack's
     // missing code: show only the notice.
@@ -1145,6 +1179,12 @@ async fn meter_task(
         }
 
         // The input task owns debounce/navigation, independently of this frame.
+        #[cfg(feature = "logger")]
+        {
+            let old = journal.message();
+            journal.handle_request(now.as_millis());
+            dirty |= old != journal.message();
+        }
         if let Some(update) = input_updates.try_changed() {
             input = update;
             // A fresh QC result supersedes the previous boot's full scan.
@@ -1244,6 +1284,12 @@ async fn meter_task(
             }
             METER_MEAN.sender().send(average.mean());
             let read_ms = Instant::now().as_millis();
+            #[cfg(feature = "logger")]
+            {
+                let old = journal.message();
+                journal.sample(read_ms, sample.map(|r| (r.mv, r.ma))).await;
+                dirty |= old != journal.message();
+            }
             energy.sample(
                 read_ms,
                 sample.map(|reading| (reading.mv, reading.ma)),
@@ -1753,6 +1799,8 @@ async fn meter_task(
                     });
                 }
             }
+            #[cfg(feature = "logger")]
+            ui::logger::draw_logger_status(&mut Canvas(frame), journal.message());
             let frame_start = Instant::now();
             unsafe {
                 panel::flush(fb, current_rotation).await;
@@ -1788,6 +1836,20 @@ const FPU_FULL_ACCESS: u32 = 0xf << 20;
 /// four full banks, then the low 16 bits of the fifth.
 const IRQ_CLEAR_MASKS: [u32; 5] = [!0, !0, !0, !0, 0xffff];
 
+// Startup takes these pins once and passes ownership to the button task.
+unsafe fn init_buttons() -> [InputPin; 4] {
+    // SAFETY: startup owns the button pins and debug mux (SWD stays enabled).
+    unsafe {
+        gpio::release_jtag();
+        [
+            InputPin::new_pull_up(Port::B, 2),
+            InputPin::new_pull_up(Port::B, 10),
+            InputPin::new_pull_up(Port::H, 0),
+            InputPin::new_pull_up(Port::C, 14),
+        ]
+    }
+}
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     unsafe {
@@ -1817,7 +1879,10 @@ async fn main(spawner: Spawner) {
     unsafe {
         core::ptr::write_bytes(framebuffer(), 0, firmware_core::panel::PIXELS);
     }
-    #[cfg(any(feature = "pd-boot-diagnostic", feature = "cable-log"))]
+    #[cfg(all(
+        not(feature = "logger"),
+        any(feature = "pd-boot-diagnostic", feature = "cable-log")
+    ))]
     flash_log::start();
     // A clock error leaves startup fail-stopped; dependent drivers stay inactive.
     // SAFETY: SRAM timing is configured; startup owns clocks with IRQs/drivers inactive.
@@ -1832,7 +1897,26 @@ async fn main(spawner: Spawner) {
     unsafe {
         cortex_m::interrupt::enable();
     }
+    #[cfg(feature = "logger")]
+    // SAFETY: startup owns these pins and releases JTAG before assigning them.
+    let button_inputs = unsafe { init_buttons() };
+    #[cfg(feature = "logger")]
+    let export_boot = button_inputs
+        .iter()
+        .enumerate()
+        .fold(0u8, |mask, (i, pin)| mask | (u8::from(pin.is_low()) << i))
+        == logger::CHORD;
+    #[cfg(all(
+        feature = "logger",
+        any(feature = "pd-boot-diagnostic", feature = "cable-log")
+    ))]
+    if !export_boot {
+        flash_log::start();
+    }
     // Checked before any task: the PD stack's code lives in the upper region.
+    #[cfg(feature = "logger")]
+    let upper_installed = !export_boot && upper::installed();
+    #[cfg(not(feature = "logger"))]
     let upper_installed = upper::installed();
     // Migrate only legacy logs in the energy pair before any bus, display DMA
     // or protocol task starts. No blanket cleanup of other occupied sectors.
@@ -1875,6 +1959,9 @@ async fn main(spawner: Spawner) {
         settings.afc_findings = None;
     }
     settings.finish_boot();
+    #[cfg(feature = "logger")]
+    let cleared = !export_boot && store.save(settings);
+    #[cfg(not(feature = "logger"))]
     let cleared = store.save(settings);
     SETTINGS_SAVE.sender().send(store.status());
     // The cable test runs only on a boot after a power-up (the restart's power
@@ -1895,19 +1982,16 @@ async fn main(spawner: Spawner) {
     let line_adc;
     let mut ripple_adc;
     let qc_trigger;
+    #[cfg(not(feature = "logger"))]
     let button_inputs;
     let tilt_input;
     let pd_input;
     let pc13_input;
     unsafe {
-        // Release JTAG only; retain SWD. Move each input owner into its task.
-        gpio::release_jtag();
-        button_inputs = [
-            InputPin::new_pull_up(Port::B, 2),
-            InputPin::new_pull_up(Port::B, 10),
-            InputPin::new_pull_up(Port::H, 0),
-            InputPin::new_pull_up(Port::C, 14),
-        ];
+        #[cfg(not(feature = "logger"))]
+        {
+            button_inputs = init_buttons();
+        }
         tilt_input = InputPin::new_pull_up(Port::B, 13);
         // PC13 input + pull-up, no INTE, as the original firmware configures it.
         // Read-only slider sense (the original shows "Switch To Sink Mode" while
@@ -2013,6 +2097,30 @@ async fn main(spawner: Spawner) {
             if !write_meter(reg, value).await {
                 break;
             }
+        }
+        #[cfg(feature = "logger")]
+        if export_boot {
+            // Wait for the first INA226 average (~141 ms), as in the tested export.
+            const SETTLE_MS: u64 = 160;
+            // Plausible PC VBUS window in millivolts; do not attach at negotiated VBUS.
+            const PC_VBUS_MV: core::ops::RangeInclusive<u32> = 4400..=5500;
+            Timer::after_millis(SETTLE_MS).await;
+            let at_usb_voltage = read_meter(ina226::BUS_VOLTAGE)
+                .await
+                .map(ina226::bus_millivolts)
+                .is_some_and(|mv| PC_VBUS_MV.contains(&mv));
+            let export = at_usb_voltage && !pc13_input.is_low();
+            if panel::init(backlight.1).await {
+                let fb = framebuffer();
+                let frame = &mut *fb.cast::<Frame>();
+                render::clear(frame);
+                ui::logger::draw_logger_export(&mut Canvas(frame), export);
+                panel::flush(fb, Orientation::Normal).await;
+            }
+            if export {
+                usb_export::run(clocks.hclk, logger::export_disk());
+            }
+            return;
         }
         for (reg, value) in lis3dh::INIT {
             if !write_sensor(reg, value).await {

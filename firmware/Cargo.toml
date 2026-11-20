@@ -32,6 +32,7 @@ cable-log = []
 flash-probe = []
 # Unpacker only: take the upper region from the flasher over USB.
 usb-install = ["dep:usb-device"]
+logger = ["dep:usb-device"]
 
 [dependencies]
 cortex-m = { workspace = true, features = ["critical-section-single-core"] }

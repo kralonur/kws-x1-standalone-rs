@@ -48,7 +48,12 @@ const SET_NAK: u32 = 1 << 27;
 const CLEAR_NAK: u32 = 1 << 26;
 const STALL: u32 = 1 << 21;
 const ACTIVE: u32 = 1 << 15;
-const INTERRUPT: u32 = 3 << 18;
+// USBFS endpoint type field (EPTYP): interrupt = 3, bulk = 2.
+const EP1_TYPE: u32 = if crate::USB_EP1_BULK {
+    2 << 18
+} else {
+    3 << 18
+};
 const ONE_PACKET: u32 = 1 << 19;
 const EP0_SETUP_COUNT: u32 = 3 << 29;
 const TRANSFER_DONE: u32 = 1;
@@ -234,7 +239,8 @@ impl UsbBus for Bus {
     ) -> Result<EndpointAddress> {
         let index = match kind {
             EndpointType::Control if size == 64 => 0,
-            EndpointType::Interrupt if size == 64 => 1,
+            EndpointType::Interrupt if !crate::USB_EP1_BULK && size == 64 => 1,
+            EndpointType::Bulk if crate::USB_EP1_BULK && size == 64 => 1,
             _ => return Err(UsbError::EndpointOverflow),
         };
         let endpoint = EndpointAddress::from_parts(index, direction);
@@ -272,9 +278,9 @@ impl UsbBus for Bus {
         write(ep(OUT, 0), ACTIVE);
         write(
             ep(IN, 1),
-            ACTIVE | INTERRUPT | DATA0 | SET_NAK | (1 << 22) | 64,
+            ACTIVE | EP1_TYPE | DATA0 | SET_NAK | (1 << 22) | 64,
         );
-        write(ep(OUT, 1), ACTIVE | INTERRUPT | DATA0 | 64);
+        write(ep(OUT, 1), ACTIVE | EP1_TYPE | DATA0 | 64);
         arm_out(0, 64);
         arm_out(1, 64);
     }

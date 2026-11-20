@@ -11,7 +11,7 @@ use firmware_image::{
     region_hash,
 };
 use object::{
-    Endianness, elf,
+    Endianness, Object, elf,
     read::elf::{ElfFile32, ProgramHeader},
 };
 use serde::Serialize;
@@ -227,9 +227,15 @@ fn fill_record(app: &mut [u8], magic: &[u32; 2], unset: u32, fields: &[u32]) -> 
 /// Flash images of an ELF's loadable bytes, laid out from their load
 /// addresses with zero gaps: the application from `APP_BASE` and the upper
 /// region from `UPPER_BASE` (empty when it has none).
-fn split(elf_bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
+fn split(elf_bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>, bool)> {
     let file = ElfFile32::<Endianness>::parse(elf_bytes).context("Parsing ELF")?;
     let endian = file.endian();
+    let logger = file.symbol_by_name(image::LOGGER_ELF_MARKER).is_some();
+    let upper_end = if logger {
+        image::LOGGER_UPPER_END
+    } else {
+        UPPER_END
+    };
     let (mut app, mut upper) = (Vec::new(), Vec::new());
     for header in file.elf_program_headers() {
         if header.p_type(endian) != elf::PT_LOAD || header.p_filesz(endian) == 0 {
@@ -241,8 +247,8 @@ fn split(elf_bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
             .map_err(|()| anyhow::anyhow!("Segment at {address:#x} lies outside the ELF"))?;
         let (image, base, end) = if (APP_BASE..ERASE_CEILING).contains(&address) {
             (&mut app, APP_BASE, ERASE_CEILING)
-        } else if (UPPER_BASE..UPPER_END).contains(&address) {
-            (&mut upper, UPPER_BASE, UPPER_END)
+        } else if (UPPER_BASE..upper_end).contains(&address) {
+            (&mut upper, UPPER_BASE, upper_end)
         } else {
             anyhow::bail!("Segment at {address:#x} is outside the application and upper region");
         };
@@ -257,7 +263,7 @@ fn split(elf_bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
         }
         image[at..stop].copy_from_slice(data);
     }
-    Ok((app, upper))
+    Ok((app, upper, logger))
 }
 
 /// Filter Thumb-2 `BL` displacements and compress as a raw LZMA2 stream.
@@ -330,7 +336,7 @@ fn release(
     usb_unpacker: Option<&Path>,
     mut usb: bool,
 ) -> Result<(Vec<u8>, Application, Release, Option<UsbSection>)> {
-    let (main, upper) = split(firmware).context("Splitting the firmware")?;
+    let (main, upper, logger) = split(firmware).context("Splitting the firmware")?;
     let (mut main, upper) = (whole_words(main), whole_words(upper));
     ensure!(!upper.is_empty(), "The firmware has no upper region");
     ensure!(
@@ -344,7 +350,8 @@ fn release(
     );
     let application = check_application(&main)?;
 
-    let (mut content, unpacker_upper) = split(unpacker).context("Splitting the unpacker")?;
+    let (mut content, unpacker_upper, mut guarded) =
+        split(unpacker).context("Splitting the unpacker")?;
     ensure!(
         unpacker_upper.is_empty(),
         "The unpacker must not run code from the upper region"
@@ -362,16 +369,32 @@ fn release(
             );
         };
         let elf = fs::read(path).context("Reading USB unpacker ELF")?;
-        let (candidate, candidate_upper) = split(&elf).context("Splitting the USB unpacker")?;
+        let (candidate, candidate_upper, candidate_guarded) =
+            split(&elf).context("Splitting the USB unpacker")?;
         ensure!(
             candidate_upper.is_empty(),
             "The USB unpacker must not run code from the upper region"
         );
         check_unpacker(&candidate)?;
         content = candidate;
+        guarded = candidate_guarded;
         upper_packed.clear();
         usb = true;
     }
+    ensure!(
+        !logger || guarded,
+        "Logger firmware requires an unpacker built with --features logger"
+    );
+    let upper_limit = if guarded {
+        image::LOGGER_UPPER_END
+    } else {
+        UPPER_END
+    };
+    let upper_capacity = (upper_limit - UPPER_BASE) as usize;
+    ensure!(
+        upper.len() <= upper_capacity,
+        "The upper region overlaps the charging log sectors"
+    );
     let unpacker_bytes = content.len();
     let marker = words(&UNPACKER_MAGIC);
     ensure!(
@@ -433,7 +456,7 @@ fn release(
         main_packed_bytes: main_packed.len(),
         upper_bytes: upper.len(),
         upper_packed_bytes: upper_packed.len(),
-        upper_unused_bytes: (UPPER_END - UPPER_BASE) as usize - upper.len(),
+        upper_unused_bytes: upper_capacity - upper.len(),
         erase_margin_bytes,
         usb_upper_bytes: usb.then_some(upper.len()),
     };

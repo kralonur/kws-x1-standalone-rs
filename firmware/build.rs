@@ -22,6 +22,10 @@ fn main() -> std::io::Result<()> {
         println!("cargo:rustc-link-arg-bin={bin}=-L{}", dir.display());
         println!("cargo:rerun-if-changed={layout}");
     }
+    if env::var_os("CARGO_FEATURE_LOGGER").is_some() {
+        // Marker consumed by memory.x and firmware-pack; not a flash payload.
+        println!("cargo:rustc-link-arg-bins=--defsym=__logger_image=1");
+    }
     println!("cargo:rustc-link-arg-bins=-Tlink.x");
     println!("cargo:rerun-if-changed=build.rs");
     Ok(())

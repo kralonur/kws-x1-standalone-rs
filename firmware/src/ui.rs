@@ -2788,6 +2788,10 @@ pub fn draw_upper_missing<D: DrawTarget<Color = Rgb565>>(target: &mut D) {
     );
 }
 
+// The host screen example includes this module without firmware features.
+#[cfg(target_os = "none")]
+pub mod logger;
+
 fn notice<D: DrawTarget<Color = Rgb565>>(target: &mut D, title: &str, detail: &str, color: Rgb565) {
     text(
         target,
