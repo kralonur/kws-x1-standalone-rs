@@ -1836,20 +1836,6 @@ const FPU_FULL_ACCESS: u32 = 0xf << 20;
 /// four full banks, then the low 16 bits of the fifth.
 const IRQ_CLEAR_MASKS: [u32; 5] = [!0, !0, !0, !0, 0xffff];
 
-// Startup takes these pins once and passes ownership to the button task.
-unsafe fn init_buttons() -> [InputPin; 4] {
-    // SAFETY: startup owns the button pins and debug mux (SWD stays enabled).
-    unsafe {
-        gpio::release_jtag();
-        [
-            InputPin::new_pull_up(Port::B, 2),
-            InputPin::new_pull_up(Port::B, 10),
-            InputPin::new_pull_up(Port::H, 0),
-            InputPin::new_pull_up(Port::C, 14),
-        ]
-    }
-}
-
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     unsafe {
@@ -1899,7 +1885,15 @@ async fn main(spawner: Spawner) {
     }
     #[cfg(feature = "logger")]
     // SAFETY: startup owns these pins and releases JTAG before assigning them.
-    let button_inputs = unsafe { init_buttons() };
+    let button_inputs = unsafe {
+        gpio::release_jtag();
+        [
+            InputPin::new_pull_up(Port::B, 2),
+            InputPin::new_pull_up(Port::B, 10),
+            InputPin::new_pull_up(Port::H, 0),
+            InputPin::new_pull_up(Port::C, 14),
+        ]
+    };
     #[cfg(feature = "logger")]
     let export_boot = button_inputs
         .iter()
@@ -1990,7 +1984,14 @@ async fn main(spawner: Spawner) {
     unsafe {
         #[cfg(not(feature = "logger"))]
         {
-            button_inputs = init_buttons();
+            // Release JTAG only; retain SWD. Move each input owner into its task.
+            gpio::release_jtag();
+            button_inputs = [
+                InputPin::new_pull_up(Port::B, 2),
+                InputPin::new_pull_up(Port::B, 10),
+                InputPin::new_pull_up(Port::H, 0),
+                InputPin::new_pull_up(Port::C, 14),
+            ];
         }
         tilt_input = InputPin::new_pull_up(Port::B, 13);
         // PC13 input + pull-up, no INTE, as the original firmware configures it.
