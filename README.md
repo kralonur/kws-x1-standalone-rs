@@ -1932,6 +1932,46 @@ follow the [flashing error guidance](#recover-from-an-interrupted-update).
 An offline audit is not runtime or safety qualification; neither an audit nor
 a matching hash authorizes flashing.
 
+### Optional charging logger
+
+The `logger` feature is off by default. Use unstripped ELFs and the guarded
+unpackers built with the same feature:
+
+```sh
+cargo build --release -p firmware --target thumbv7em-none-eabihf --features logger --locked
+cargo build --release -p firmware --bin unpacker --target thumbv7em-none-eabihf \
+  --target-dir target/usb --features logger,usb-install --locked
+mkdir -p build/logger
+elf=target/thumbv7em-none-eabihf/release
+usb=target/usb/thumbv7em-none-eabihf/release/unpacker
+cargo run --release -p firmware-pack --locked -- pack \
+  --firmware "$elf/firmware" --unpacker "$elf/unpacker" --usb-unpacker "$usb" \
+  --out build/logger/firmware.X1C
+```
+
+Audit and dry-run the package as described above. Hold **Left + Right** to
+record (`MIN/PEAK 1s - L+R STOP`); hold them again to stop. Normal charging
+controls are unchanged. To export, disconnect the output, set the slider to
+**OFF/PASS**, then hold **Left + Right** (not Back) while connecting to a PC
+USB port at 5 V. The logger mounts as a read-only FAT12 drive:
+
+- `VIssss02.CSV`: `session,elapsed_ms,avg_voltage_mV,avg_current_mA,min_voltage_mV,peak_current_mA`.
+  One-second windows are kept on a change of at least 100 mV or 100 mA in any
+  field, or after 60 seconds. INA226 readings already average about 141 ms;
+  the minimum and signed largest-magnitude current describe observed readings
+  and may come from different moments.
+- `PDssss01.CSV`: `session,elapsed_ms,event_tag,raw_u32`. Only sessions with
+  retained passive PD traffic/events get a PD file. Known routine SOP packets
+  are omitted.
+- `STATUS.TXT` shows storage use; `STORAGE.BIN` is the raw journal area.
+
+When full (or after 32 sessions), copy the files off first. There is no clear
+chord or automatic erase. To reuse the space, have the six 8 KiB sectors at
+`[0x62000, 0x6e000)` restored to blank with a service programmer **only after
+verifying the range contains no other data or code**. Unknown sectors are not
+reclaimed. Export before installing non-logger firmware, which can use part
+of this range for code.
+
 ### Firmware builds and release downloads
 
 `.github/workflows/firmware.yml` runs on pull requests, pushes to `main`, manual
