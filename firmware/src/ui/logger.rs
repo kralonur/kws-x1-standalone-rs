@@ -20,15 +20,6 @@ pub fn draw_logger_status<D: DrawTarget<Color = Rgb565>>(target: &mut D, message
     );
 }
 
-pub fn draw_logger_export<D: DrawTarget<Color = Rgb565>>(target: &mut D, ready: bool) {
-    if ready {
-        notice(
-            target,
-            "USB LOG EXPORT",
-            "Read-only - copy logs to PC",
-            CYAN,
-        );
-    } else {
-        notice(target, "USB LOG EXPORT", "Use OFF/PASS at PC 5 V", CYAN);
-    }
+pub fn draw_boot_notice<D: DrawTarget<Color = Rgb565>>(target: &mut D, title: &str, detail: &str) {
+    notice(target, title, detail, CYAN);
 }

@@ -100,6 +100,12 @@ pub fn sector_free(sectors: [&[u8]; SECTORS], index: usize) -> bool {
         footer_sector.get(LEGACY_FOOTER_OFFSET..LEGACY_FOOTER_OFFSET + LEGACY_FOOTER.len());
     footer != Some(&LEGACY_FOOTER) && sector.len() == SECTOR && erased(sector)
 }
+/// Only complete sectors with valid logger headers need erasing. Blank sectors
+/// are already clear; all other data, including torn headers, are left alone.
+pub fn clear_mask(sectors: [&[u8]; SECTORS]) -> [bool; SECTORS] {
+    sectors.map(|s| s.len() == SECTOR && valid_header(s).is_some())
+}
+
 pub const BLOCK_BYTES: usize = 512;
 pub const BLOCKS: u32 = 512;
 const ROOT_BLOCKS: usize = 5; // 80 entries: volume + 64 streams + status and raw storage

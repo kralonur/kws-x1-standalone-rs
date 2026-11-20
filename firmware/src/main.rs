@@ -1895,21 +1895,19 @@ async fn main(spawner: Spawner) {
         ]
     };
     #[cfg(feature = "logger")]
-    let export_boot = button_inputs
-        .iter()
-        .enumerate()
-        .fold(0u8, |mask, (i, pin)| mask | (u8::from(pin.is_low()) << i))
-        == logger::CHORD;
+    let boot_buttons = logger::button_mask(&button_inputs);
+    #[cfg(feature = "logger")]
+    let logger_boot = matches!(boot_buttons, logger::CHORD | logger::CLEAR_CHORD);
     #[cfg(all(
         feature = "logger",
         any(feature = "pd-boot-diagnostic", feature = "cable-log")
     ))]
-    if !export_boot {
+    if !logger_boot {
         flash_log::start();
     }
     // Checked before any task: the PD stack's code lives in the upper region.
     #[cfg(feature = "logger")]
-    let upper_installed = !export_boot && upper::installed();
+    let upper_installed = !logger_boot && upper::installed();
     #[cfg(not(feature = "logger"))]
     let upper_installed = upper::installed();
     // Migrate only legacy logs in the energy pair before any bus, display DMA
@@ -1954,7 +1952,7 @@ async fn main(spawner: Spawner) {
     }
     settings.finish_boot();
     #[cfg(feature = "logger")]
-    let cleared = !export_boot && store.save(settings);
+    let cleared = !logger_boot && store.save(settings);
     #[cfg(not(feature = "logger"))]
     let cleared = store.save(settings);
     SETTINGS_SAVE.sender().send(store.status());
@@ -2100,25 +2098,27 @@ async fn main(spawner: Spawner) {
             }
         }
         #[cfg(feature = "logger")]
-        if export_boot {
+        if logger_boot {
             // Wait for the first INA226 average (~141 ms), as in the tested export.
             const SETTLE_MS: u64 = 160;
-            // Plausible PC VBUS window in millivolts; do not attach at negotiated VBUS.
-            const PC_VBUS_MV: core::ops::RangeInclusive<u32> = 4400..=5500;
             Timer::after_millis(SETTLE_MS).await;
-            let at_usb_voltage = read_meter(ina226::BUS_VOLTAGE)
-                .await
-                .map(ina226::bus_millivolts)
-                .is_some_and(|mv| PC_VBUS_MV.contains(&mv));
-            let export = at_usb_voltage && !pc13_input.is_low();
-            if panel::init(backlight.1).await {
-                let fb = framebuffer();
-                let frame = &mut *fb.cast::<Frame>();
-                render::clear(frame);
-                ui::logger::draw_logger_export(&mut Canvas(frame), export);
-                panel::flush(fb, Orientation::Normal).await;
+            let allowed = logger::at_pc_voltage(&pc13_input).await;
+            let panel_ready = panel::init(backlight.1).await;
+            if boot_buttons == logger::CLEAR_CHORD {
+                if panel_ready {
+                    logger::confirm_clear(&button_inputs, &pc13_input, allowed).await;
+                }
+                return;
             }
-            if export {
+            if panel_ready {
+                let detail = if allowed {
+                    "Read-only - copy logs to PC"
+                } else {
+                    "Use OFF/PASS at PC 5 V"
+                };
+                logger::boot_notice("USB LOG EXPORT", detail).await;
+            }
+            if allowed {
                 usb_export::run(clocks.hclk, logger::export_disk());
             }
             return;

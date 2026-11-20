@@ -164,6 +164,29 @@ fn journal_round_trips_to_read_only_disk() {
     assert_eq!(raw, [&vi[..], &pd, &blank, &blank, &blank, &blank].concat());
 }
 
+// Clear must not erase old formats, foreign payloads, or partly written headers.
+#[test]
+fn clear_only_selects_valid_logger_headers() {
+    let blank = [0xff; storage::SECTOR];
+    let mut vi = blank;
+    let mut pd = blank;
+    let mut torn = blank;
+    let mut foreign = blank;
+    put(&mut vi[..storage::HEADER], storage::header(1, 0, false));
+    put(&mut pd[..storage::HEADER], storage::header(1, 1, true));
+    put(
+        &mut torn[..storage::HEADER - 4],
+        storage::header(2, 0, false),
+    );
+    foreign[storage::SECTOR - 1] = 0;
+    let mut old = vi;
+    old[..4].copy_from_slice(b"XSL1");
+    assert_eq!(
+        storage::clear_mask([&vi, &pd, &torn, &foreign, &old, &blank]),
+        [true, true, false, false, false, false]
+    );
+}
+
 // A power cut before the checksum must seal the sector, even if a later slot is valid.
 #[test]
 fn torn_record_exports_only_committed_prefix() {

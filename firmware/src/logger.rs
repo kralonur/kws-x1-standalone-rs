@@ -1,14 +1,19 @@
 //! The meter task owns the journal; the passive sniffer only queues receive events.
-use crate::{I2C3, flash};
+use crate::{I2C3, Orientation, flash, framebuffer, ina226, panel, read_meter, render, ui};
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use embassy_hc32::gpio::InputPin;
+use embassy_time::{Duration, Instant, Timer};
 use firmware_core::selective_log;
 use firmware_core::{buttons, charging_log as format};
+use render::{Canvas, Frame};
 // Six reserved erase sectors starting at the logger build's upper end.
 const START: usize = firmware_image::LOGGER_UPPER_END as usize;
 const END: usize = START + format::SECTORS * flash::SECTOR;
 const _: () = assert!(flash::SECTOR == format::SECTOR);
 /// Physical L+R; a third button disqualifies the chord.
 pub const CHORD: u8 = buttons::LEFT | buttons::RIGHT;
+/// Boot-only clear request; it still requires explicit on-screen confirmation.
+pub const CLEAR_CHORD: u8 = CHORD | buttons::BACK;
 /// The reference hold time, in input polls, before toggling once per press.
 pub const HOLD_POLLS: u8 = (500 / buttons::POLL_MS) as u8;
 // Queue capacity and per-meter-pass drain bound for asynchronous PD RX.
@@ -396,4 +401,104 @@ fn sectors() -> [&'static [u8]; format::SECTORS] {
 /// The export boot never spawns a Writer, so this snapshot stays immutable.
 pub fn export_disk() -> format::Disk<'static> {
     format::Disk::new(sectors())
+}
+
+pub fn button_mask(inputs: &[InputPin; 4]) -> u8 {
+    inputs
+        .iter()
+        .enumerate()
+        .fold(0, |mask, (i, pin)| mask | (u8::from(pin.is_low()) << i))
+}
+
+pub async fn at_pc_voltage(slider: &InputPin) -> bool {
+    // Plausible PC VBUS window in millivolts, matching the export guard.
+    const PC_VBUS_MV: core::ops::RangeInclusive<u32> = 4400..=5500;
+    read_meter(ina226::BUS_VOLTAGE)
+        .await
+        .map(ina226::bus_millivolts)
+        .is_some_and(|mv| PC_VBUS_MV.contains(&mv))
+        && !slider.is_low()
+}
+
+/// Only called during clear boot, with exclusive use of the display and flash.
+pub async fn confirm_clear(inputs: &[InputPin; 4], slider: &InputPin, allowed: bool) {
+    if !allowed {
+        boot_notice("CLEAR BLOCKED", "Use OFF/PASS at PC 5 V").await;
+        return;
+    }
+    if !boot_notice("ERASE ALL CHARGING LOGS?", "Hold OK 2s; BACK cancels").await {
+        return;
+    }
+    let title = if !clear_confirmed(inputs).await {
+        "CLEAR CANCELLED"
+    } else if !at_pc_voltage(slider).await {
+        "CLEAR BLOCKED"
+    } else {
+        match erase_owned() {
+            Some(true) => "CLEARED - UNKNOWN KEPT",
+            Some(false) => "LOGS CLEARED",
+            None => "CLEAR FAILED",
+        }
+    };
+    boot_notice(title, "Unplug to restart").await;
+}
+
+async fn clear_confirmed(inputs: &[InputPin; 4]) -> bool {
+    // The reference requires a fresh, continuous two-second OK hold.
+    const HOLD: Duration = Duration::from_secs(2);
+    let poll = Duration::from_millis(u64::from(buttons::POLL_MS));
+    while button_mask(inputs) != 0 {
+        Timer::after(poll).await;
+    }
+    let mut held = None;
+    loop {
+        match button_mask(inputs) {
+            0 => held = None,
+            buttons::OK => {
+                if held.get_or_insert_with(Instant::now).elapsed() >= HOLD {
+                    return true;
+                }
+            }
+            _ => return false,
+        }
+        Timer::after(poll).await;
+    }
+}
+
+pub async fn boot_notice(title: &str, detail: &str) -> bool {
+    let fb = framebuffer();
+    // SAFETY: no meter task is running and the prior flush has completed.
+    unsafe {
+        let frame = &mut *fb.cast::<Frame>();
+        render::clear(frame);
+        ui::logger::draw_boot_notice(&mut Canvas(frame), title, detail);
+        panel::flush(fb, Orientation::Normal).await
+    }
+}
+
+/// Returns whether any foreign sectors were kept, or None on erase failure.
+#[inline(never)]
+fn erase_owned() -> Option<bool> {
+    let snapshot = sectors();
+    let mask = format::clear_mask(snapshot);
+    let kept = mask
+        .iter()
+        .enumerate()
+        .any(|(i, &owned)| !owned && !format::sector_free(snapshot, i));
+    let erase = core::hint::black_box(flash::erase_sector as unsafe extern "C" fn(u32) -> u32);
+    for (i, owned) in mask.into_iter().enumerate() {
+        if !owned {
+            continue;
+        }
+        let base = START + i * flash::SECTOR;
+        // SAFETY: the flash snapshot is no longer borrowed. Only the confirmed
+        // clear boot calls this, with all other flash users idle and erases
+        // limited to the six positively identified sectors. Code runs from RAM.
+        let errors = cortex_m::interrupt::free(|_| unsafe { erase(base as u32) });
+        let blank = flash::blank(base);
+        if errors != 0 || !blank {
+            return None;
+        }
+    }
+    Some(kept)
 }
