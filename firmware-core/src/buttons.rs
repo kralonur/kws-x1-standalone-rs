@@ -1327,6 +1327,14 @@ impl Navigation {
         self.mean = mean;
     }
 
+    /// A reserved chord consumed the arrow presses and their releases.
+    pub fn consume_arrows(&mut self) {
+        self.debounce.stable &= !(LEFT | RIGHT);
+        self.debounce.counters[..2].fill(0);
+        self.held = 0;
+        self.repeated = false;
+    }
+
     /// Feed one sample; returns the input state and any PD session request.
     pub fn update(&mut self, raw_pressed: u8) -> (Input, Option<PdCommand>) {
         let page_before = self.input.page;
